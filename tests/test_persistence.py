@@ -79,7 +79,15 @@ def test_rectangle_roundtrip(qapp, blank_doc) -> None:
     out = read_annotations(reopened, dpi=150)
     reopened.close()
     assert len(out[0]) == 1
-    assert isinstance(out[0][0], RectangleItem)
+    restored = out[0][0]
+    assert isinstance(restored, RectangleItem)
+    # Exact geometry round-trip (scene rect = local rect + pos): the
+    # padded /Rect must not leak into the restored item.
+    scene = restored.rect().translated(restored.pos())
+    assert scene.x() == pytest.approx(20, abs=0.05)
+    assert scene.y() == pytest.approx(30, abs=0.05)
+    assert scene.width() == pytest.approx(100, abs=0.05)
+    assert scene.height() == pytest.approx(50, abs=0.05)
 
 
 def test_ellipse_roundtrip(qapp, blank_doc) -> None:
@@ -174,6 +182,41 @@ def test_gdt_roundtrip_preserves_state(qapp, blank_doc) -> None:
     restored = out[0][0]
     assert isinstance(restored, GdtAnnotationItem)
     assert restored.state() == state
+    # Position must not drift across save/reopen cycles (the writer
+    # stores the content rect, whose topleft is exactly item.pos()).
+    assert restored.pos().x() == pytest.approx(120, abs=0.5)
+    assert restored.pos().y() == pytest.approx(80, abs=0.5)
+
+
+def test_gdt_appearance_visible_in_external_viewer(qapp, blank_doc) -> None:
+    """The GD&T annot must carry an appearance stream that actually
+    draws the frame: rendering the page region through MuPDF (as any
+    external viewer would) must produce dark pixels inside the rect,
+    not just an empty rectangle outline."""
+    state = GdtState(
+        characteristic=Characteristic.FLATNESS,
+        tolerance_value="0.05",
+        datum_primary=DatumRef(["A"]),
+    )
+    item = GdtAnnotationItem(state, QPointF(100, 100))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = next(page.annots())
+    r = annot.rect
+    # Sample the interior only: a bare Square outline would leave it
+    # blank, while the frame draws cell separators and glyphs there.
+    interior = fitz.Rect(
+        r.x0 + r.width * 0.15,
+        r.y0 + r.height * 0.25,
+        r.x1 - r.width * 0.15,
+        r.y1 - r.height * 0.25,
+    )
+    pix = page.get_pixmap(clip=interior, matrix=fitz.Matrix(3, 3))
+    reopened.close()
+    dark = sum(1 for b in pix.samples if b < 128)
+    assert dark > 50, "appearance stream did not draw the frame"
 
 
 def test_owned_annotations_are_overwritten(qapp, blank_doc) -> None:

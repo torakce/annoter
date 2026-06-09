@@ -7,7 +7,9 @@ Mapping (M4):
     ArrowItem          -> Line + endStyle OpenArrow
     FreehandItem       -> Ink
     TextAnnotationItem -> FreeText  (Helvetica only, for Acrobat compat)
-    GdtAnnotationItem  -> Square + JSON in `Contents`
+    GdtAnnotationItem  -> Square + JSON in `Contents` + rasterized
+                          appearance stream (so Acrobat/Foxit show the
+                          actual feature control frame)
 
 Coordinates are in page-local pixel space at the renderer's base DPI;
 this module converts to PDF points (1pt = 1/72 in) on write and back on
@@ -24,11 +26,13 @@ when their type maps to a known item.
 from __future__ import annotations
 
 import json
+import math
 from typing import Iterable
 
 import fitz
-from PySide6.QtCore import QPointF, QRectF
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtWidgets import QStyleOptionGraphicsItem
 
 from annoter.model.gdt import GdtState
 from annoter.model.styles import DASH_PATTERNS, DashStyle, EndStyle, TextAlign
@@ -144,7 +148,10 @@ def _scene_rect(item) -> QRectF:
         r = item.rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
     if isinstance(item, GdtAnnotationItem):
-        r = item.boundingRect()
+        # content_rect, not boundingRect: the bounding rect includes the
+        # selection/handle margin, which would shift the item's position
+        # on every save/reopen cycle (the reader anchors on rect topleft).
+        r = item.content_rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
     if isinstance(item, TextAnnotationItem):
         r = item.boundingRect()
@@ -160,9 +167,31 @@ _TEXT_FONT_TO_PDF = {
 _PDF_TO_TEXT_FONT = {v: k for k, v in _TEXT_FONT_TO_PDF.items()}
 
 
-def _props_payload(item: AnnotationItem) -> dict:
-    """Serialize the props that don't fit native PDF fields cleanly."""
+def _props_payload(item: AnnotationItem, dpi: int) -> dict:
+    """Serialize the props that don't fit native PDF fields cleanly.
+
+    Includes the exact geometry in PDF points ("rect_pt" / "pos_pt"):
+    MuPDF pads the stored /Rect of Square and Circle annots by the
+    border width, so reading /Rect back would drift the item on every
+    save/reopen cycle. Foreign annots have no payload and keep the
+    /Rect-based geometry.
+    """
     p: dict[str, object] = {"dash": item.dash_style().value}
+    if isinstance(
+        item, (RectangleItem, EllipseItem, GdtAnnotationItem)
+    ):
+        r = _scene_rect(item)
+        p["rect_pt"] = [
+            _pt(r.x(), dpi),
+            _pt(r.y(), dpi),
+            _pt(r.width(), dpi),
+            _pt(r.height(), dpi),
+        ]
+    elif isinstance(item, TextAnnotationItem):
+        p["pos_pt"] = [
+            _pt(item.pos().x(), dpi),
+            _pt(item.pos().y(), dpi),
+        ]
     if isinstance(item, RectangleItem) and not isinstance(item, EllipseItem):
         p["fill_enabled"] = bool(item.fill_enabled())
         p["fill_color"] = item.fill_color().name()
@@ -258,7 +287,7 @@ def _set_dash_border(
 def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
     color = _qcolor_to_rgb01(item.color())
     stroke = float(item.stroke())
-    props = _props_payload(item)
+    props = _props_payload(item, dpi)
     subject = json.dumps(props)
 
     if isinstance(item, RectangleItem) and not isinstance(
@@ -295,6 +324,12 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         annot.set_colors(stroke=color)
         _set_dash_border(annot, stroke, item.dash_style())
         annot.update()
+        try:
+            _set_gdt_appearance(annot, item, dpi)
+        except Exception:
+            # The appearance is cosmetic for external viewers; never let
+            # it break a save. Acrobat falls back to a plain rectangle.
+            pass
         return
 
     if isinstance(item, ArrowItem):
@@ -361,6 +396,109 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
 
 
 # ----------------------------------------------------------------------
+# GD&T appearance stream
+# ----------------------------------------------------------------------
+_GDT_AP_PX_PER_PT = 3.0  # raster density of the appearance image
+
+
+def _gdt_frame_planes(
+    item: GdtAnnotationItem, dpi: int
+) -> tuple[bytes, bytes, int, int]:
+    """Rasterize the frame to raw (RGB, alpha) planes, top-down rows."""
+    src = item.content_rect()
+    # Item units are page pixels at `dpi`; target density is
+    # _GDT_AP_PX_PER_PT device pixels per PDF point.
+    scale = _GDT_AP_PX_PER_PT * 72.0 / dpi
+    w = max(1, math.ceil(src.width() * scale))
+    h = max(1, math.ceil(src.height() * scale))
+    img = QImage(w, h, QImage.Format_RGBA8888)
+    img.fill(Qt.transparent)
+    painter = QPainter(img)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.TextAntialiasing, True)
+    painter.scale(scale, scale)
+    painter.translate(-src.left(), -src.top())
+    was_selected = item.isSelected()
+    if was_selected:
+        item.setSelected(False)  # keep the selection marker out of the AP
+    try:
+        item.paint(painter, QStyleOptionGraphicsItem(), None)
+    finally:
+        painter.end()
+        if was_selected:
+            item.setSelected(True)
+
+    stride = img.bytesPerLine()
+    buf = bytes(img.constBits())[: stride * h]
+    rgb = bytearray(w * h * 3)
+    alpha = bytearray(w * h)
+    for y in range(h):
+        row = bytearray(buf[y * stride : y * stride + w * 4])
+        alpha[y * w : (y + 1) * w] = row[3::4]
+        del row[3::4]
+        rgb[y * w * 3 : (y + 1) * w * 3] = row
+    return bytes(rgb), bytes(alpha), w, h
+
+
+def _set_gdt_appearance(
+    annot: fitz.Annot, item: GdtAnnotationItem, dpi: int
+) -> None:
+    """Replace the Square's appearance stream with the rendered frame.
+
+    External viewers (Acrobat, Foxit) display whatever is in /AP/N, so
+    they show the actual feature control frame instead of an empty
+    rectangle. The image carries an /SMask so the page content stays
+    visible around the cells. Annoter itself ignores the appearance and
+    rebuilds the editable item from the JSON in /Contents.
+    """
+    page = annot.parent
+    doc = page.parent
+    rgb, alpha, w, h = _gdt_frame_planes(item, dpi)
+
+    smask_xref = doc.get_new_xref()
+    doc.update_object(
+        smask_xref,
+        f"<</Type/XObject/Subtype/Image/Width {w}/Height {h}"
+        "/ColorSpace/DeviceGray/BitsPerComponent 8>>",
+    )
+    doc.update_stream(smask_xref, bytes(alpha))
+
+    img_xref = doc.get_new_xref()
+    doc.update_object(
+        img_xref,
+        f"<</Type/XObject/Subtype/Image/Width {w}/Height {h}"
+        f"/ColorSpace/DeviceRGB/BitsPerComponent 8"
+        f"/SMask {smask_xref} 0 R>>",
+    )
+    doc.update_stream(img_xref, bytes(rgb))
+
+    ap = doc.xref_get_key(annot.xref, "AP/N")
+    if ap[0] != "xref":
+        return
+    ap_xref = int(ap[1].split()[0])
+    rect = annot.rect
+    w_pt, h_pt = rect.width, rect.height
+    # /Rect is padded by MuPDF (border width); draw the image at the
+    # exact frame rect so it lines up with the stored geometry. AP form
+    # space has its origin at the rect's bottom-left with y up.
+    exact = _rect_pt(_scene_rect(item), dpi)
+    x = exact.x0 - rect.x0
+    y = rect.y1 - exact.y1
+    content = (
+        f"q {exact.width:.4f} 0 0 {exact.height:.4f} "
+        f"{x:.4f} {y:.4f} cm /AnnoterGdt Do Q"
+    ).encode()
+    doc.update_stream(ap_xref, content)
+    doc.xref_set_key(ap_xref, "BBox", f"[0 0 {w_pt:.4f} {h_pt:.4f}]")
+    doc.xref_set_key(ap_xref, "Matrix", "[1 0 0 1 0 0]")
+    doc.xref_set_key(
+        ap_xref,
+        "Resources",
+        f"<</XObject<</AnnoterGdt {img_xref} 0 R>>>>",
+    )
+
+
+# ----------------------------------------------------------------------
 # read
 # ----------------------------------------------------------------------
 def read_annotations(
@@ -414,6 +552,16 @@ def _annot_to_items(
         _px(rect.width, dpi),
         _px(rect.height, dpi),
     )
+    # Exact geometry written by us takes precedence over /Rect, which
+    # MuPDF pads by the border width on Square/Circle annots.
+    if "rect_pt" in props:
+        try:
+            x, y, w, h = (float(v) for v in props["rect_pt"])
+            qrect = QRectF(
+                _px(x, dpi), _px(y, dpi), _px(w, dpi), _px(h, dpi)
+            )
+        except (TypeError, ValueError):
+            pass
 
     # GD&T marker: Square + JSON.
     if (
@@ -509,7 +657,14 @@ def _annot_to_items(
 
     if subtype == "FreeText":
         text = content
-        item = TextAnnotationItem(QPointF(qrect.x(), qrect.y()), text)
+        pos = QPointF(qrect.x(), qrect.y())
+        if "pos_pt" in props:
+            try:
+                px, py = (float(v) for v in props["pos_pt"])
+                pos = QPointF(_px(px, dpi), _px(py, dpi))
+            except (TypeError, ValueError):
+                pass
+        item = TextAnnotationItem(pos, text)
         item.set_color(qcolor)
         item.set_stroke(width)
         _apply_props_to_item(item, props)

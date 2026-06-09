@@ -376,16 +376,14 @@ def read_annotations(
         page = doc[page_index]
         items: list[AnnotationItem] = []
         for annot in page.annots() or []:
-            it = _annot_to_item(annot, dpi)
-            if it is not None:
-                items.append(it)
+            items.extend(_annot_to_items(annot, dpi))
         out[page_index] = items
     return out
 
 
-def _annot_to_item(
+def _annot_to_items(
     annot: fitz.Annot, dpi: int
-) -> AnnotationItem | None:
+) -> list[AnnotationItem]:
     subtype = annot.type[1] if annot.type else ""
     info = annot.info or {}
     title = info.get("title", "") or ""
@@ -427,12 +425,12 @@ def _annot_to_item(
             data = json.loads(content[len(_GDT_CONTENT_PREFIX) :])
             state = GdtState.from_dict(data)
         except (ValueError, KeyError):
-            return None
+            return []
         item = GdtAnnotationItem(state, QPointF(qrect.x(), qrect.y()))
         item.set_color(qcolor)
         item.set_stroke(width)
         _apply_props_to_item(item, props)
-        return item
+        return [item]
 
     if subtype == "Square":
         item = RectangleItem(QRectF(0, 0, qrect.width(), qrect.height()))
@@ -443,7 +441,7 @@ def _annot_to_item(
             item.set_fill_enabled(True)
             item.set_fill_color(_rgb01_to_qcolor(fill_rgb))
         _apply_props_to_item(item, props)
-        return item
+        return [item]
 
     if subtype == "Circle":
         item = EllipseItem(QRectF(0, 0, qrect.width(), qrect.height()))
@@ -454,12 +452,12 @@ def _annot_to_item(
             item.set_fill_enabled(True)
             item.set_fill_color(_rgb01_to_qcolor(fill_rgb))
         _apply_props_to_item(item, props)
-        return item
+        return [item]
 
     if subtype == "Line":
         verts = annot.vertices or []
         if len(verts) < 2:
-            return None
+            return []
         (x1, y1), (x2, y2) = verts[0], verts[1]
         p1 = QPointF(_px(x1, dpi), _px(y1, dpi))
         p2 = QPointF(_px(x2, dpi), _px(y2, dpi))
@@ -483,33 +481,31 @@ def _annot_to_item(
             except (TypeError, ValueError):
                 pass
         _apply_props_to_item(item, props)
-        return item
+        return [item]
 
     if subtype == "Ink":
-        # `vertices` returns a flat list of (x, y) pairs across all
-        # strokes; PyMuPDF separates strokes through `annot.vertices`
-        # being a list-of-lists in newer versions.
+        # `annot.vertices` is a list of strokes (each a list of (x, y)
+        # pairs) for Ink annots; older PyMuPDF versions returned one
+        # flat list. Each stroke becomes its own FreehandItem so the
+        # strokes are not joined by spurious connecting segments.
         verts = annot.vertices or []
-        # Detect grouped vs flat. If first element is a tuple of floats
-        # we are in flat mode; reconstruct a single stroke.
-        points: list[QPointF] = []
-        if verts and isinstance(verts[0], (list, tuple)) and verts[0] and isinstance(
-            verts[0][0], (list, tuple)
-        ):
-            # list-of-strokes
-            for stroke in verts:
-                for x, y in stroke:
-                    points.append(QPointF(_px(x, dpi), _px(y, dpi)))
+        if verts and verts[0] and isinstance(verts[0][0], (list, tuple)):
+            strokes = verts
         else:
-            for x, y in verts:
-                points.append(QPointF(_px(x, dpi), _px(y, dpi)))
-        if len(points) < 2:
-            return None
-        item = FreehandItem(points)
-        item.set_color(qcolor)
-        item.set_stroke(width)
-        _apply_props_to_item(item, props)
-        return item
+            strokes = [verts]
+        out: list[AnnotationItem] = []
+        for stroke in strokes:
+            points = [
+                QPointF(_px(x, dpi), _px(y, dpi)) for x, y in stroke
+            ]
+            if len(points) < 2:
+                continue
+            item = FreehandItem(points)
+            item.set_color(qcolor)
+            item.set_stroke(width)
+            _apply_props_to_item(item, props)
+            out.append(item)
+        return out
 
     if subtype == "FreeText":
         text = content
@@ -517,6 +513,6 @@ def _annot_to_item(
         item.set_color(qcolor)
         item.set_stroke(width)
         _apply_props_to_item(item, props)
-        return item
+        return [item]
 
-    return None
+    return []

@@ -125,6 +125,26 @@ def test_freehand_roundtrip(qapp, blank_doc) -> None:
     assert len(out[0][0].points()) >= 2
 
 
+def test_foreign_multistroke_ink_reads_one_item_per_stroke(
+    qapp, blank_doc
+) -> None:
+    """An Ink annot with several strokes (e.g. from Acrobat) must not be
+    flattened into a single polyline joined by spurious segments."""
+    page = blank_doc[0]
+    stroke_a = [(10.0, 10.0), (20.0, 15.0), (30.0, 12.0)]
+    stroke_b = [(100.0, 100.0), (110.0, 105.0)]
+    page.add_ink_annot([stroke_a, stroke_b])
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    items = out[0]
+    assert len(items) == 2
+    assert all(isinstance(it, FreehandItem) for it in items)
+    assert len(items[0].points()) == 3
+    assert len(items[1].points()) == 2
+
+
 def test_text_roundtrip(qapp, blank_doc) -> None:
     item = TextAnnotationItem(QPointF(50, 50), "Hello world")
     write_annotations(blank_doc, {0: [item]}, dpi=150)

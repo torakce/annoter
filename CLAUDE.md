@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-This is a **greenfield project**. Only `PROMPT_RESTART.md` (the full product brief, in French) exists at the time of writing. No source tree, no `pyproject.toml`, no tests yet. **Read `PROMPT_RESTART.md` end to end before doing anything** — it is the single source of truth for product scope, architecture, and milestones.
+**M1 through M5 are implemented** (pending final user validation); the full source tree, test suite and `build.py` exist. `PROMPT_RESTART.md` is the original product brief (in French); **`PLAN.md` is the live source of truth** for architectural decisions, milestone deviations and the remaining-issues backlog — read it first. A "Post-v1 hardening" section in `PLAN.md` tracks work landed after M5.
 
 ## Product in one paragraph
 
@@ -27,14 +27,14 @@ The full target tree is in `PROMPT_RESTART.md` §4. Load-bearing invariants futu
 
 - **Annotations are children of their page's `QGraphicsPixmapItem`.** Their coordinates are page-local; moving/rotating a page moves its annotations automatically.
 - **Zoom convention:** `_apply_zoom(factor)` where `factor=1.0` means 1 screen pixel per PDF point (real size). The actual `QGraphicsView` scale is `factor * 72 / render_dpi`.
-- **Re-render at higher DPI** uses a hysteretic threshold. Until M4, the threshold is set very high because re-rendering would orphan child annotations. M4 introduces a re-parenting step.
+- **Re-render at higher DPI** is hysteretic (`HIGH_DPI_ZOOM_THRESHOLD` up, `HIGH_DPI_ZOOM_EXIT` down) and implemented via the pixmap's `devicePixelRatio`: the supersampled pixmap keeps the same *logical* scene size, so child annotations, undo history and the save path are untouched. Never swap the page item or rescale item geometry for DPI purposes.
 - **Every scene mutation goes through a `QUndoCommand`** (`Add`, `Delete`, `Move`, `ChangeColor`, `ChangeStroke`, `ChangeGdt`). Widgets must never mutate the scene directly.
 - **`ToolController(QObject)` is the single source of truth** for current tool/color/stroke. Views subscribe to its signals — no direct view-to-view coupling.
 - **GD&T feature control frames** are composite items laid out from `QFontMetricsF` (symbol cell + tolerance cell + datum cells), with modifiers Ⓜ/Ⓛ/Ⓟ/Ⓔ as Unicode enclosed characters.
 
 ### PDF annotation mapping (M4)
 
-When saving, items are converted to native `fitz.Annot` types: Rectangle→`Square`, Ellipse→`Circle`, Line→`Line`, Arrow→`Line` with `endStyle`, Freehand→`Ink`, Text→`FreeText`, GD&T→`Stamp` (rasterized) **with a JSON blob in `Contents`** so the next open can rebuild the editable item.
+When saving, items are converted to native `fitz.Annot` types: Rectangle→`Square`, Ellipse→`Circle`, Line→`Line`, Arrow→`Line` with `endStyle`, Freehand→`Ink`, Text→`FreeText`, GD&T→`Square` **with a JSON blob in `Contents`** (rebuilds the editable item on reopen) **plus a rasterized appearance stream** so Acrobat/Foxit display the actual frame. Owned annots also persist exact geometry (`rect_pt`/`pos_pt`, in points) in the `/Subject` JSON because MuPDF pads `/Rect` by the border width — always prefer that payload when reading.
 
 ## Milestones — strict order
 

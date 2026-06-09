@@ -19,7 +19,7 @@ Standalone, install-free, single-user PDF annotator for **mechanical engineering
 
 ### Rendering & cache
 - Base render DPI: **150 DPI** (good lisibility/RAM trade-off; ~3500x5000 px on A0, ~50 MB RGBA).
-- High-DPI re-render threshold: **200 % zoom -> re-rasterize at 300 DPI**. Disabled in M1 (would orphan child annotations); enabled in M4 with a re-parenting step.
+- High-DPI re-render: **hysteretic** -- above 200 % zoom the page is re-rasterized at 300 DPI, below 150 % it drops back to base DPI. The supersampled pixmap carries a `devicePixelRatio` equal to the scale factor, so its *logical* scene size is unchanged: child annotations, undo history and the save path are unaffected. No re-parenting step needed.
 - LRU pixmap cache: **3 pages** (current + previous + next). Sufficient given drawings have few pages.
 
 ### Annotations
@@ -82,7 +82,6 @@ Standalone, install-free, single-user PDF annotator for **mechanical engineering
 ## 5. Open questions tracked for later milestones
 
 - **M3**: full GD&T dialog UX (composite datums, datum modifiers, datum targets) — present a mockup before coding.
-- **M4**: exact strategy for re-parenting child annotations during a high-DPI re-render (transactional swap of the parent pixmap item, preserving child transforms).
 - **M4**: rotation currently re-rasterizes the page server-side (PyMuPDF matrix), which means annotations do **not** follow the rotated page. Acceptable for M2; revisit in M4 by rotating via `QGraphicsItem.setRotation()` instead so children cascade.
 - **M5**: confirm on a clean Windows VM that the onefile `.exe` boots from a USB stick under a non-admin account; document any antivirus false-positive workaround if encountered.
 
@@ -117,10 +116,9 @@ Standalone, install-free, single-user PDF annotator for **mechanical engineering
 
 ## M4 deviations / notes
 
-- **GD&T persistence stores a Square annot + JSON in `/Contents`** (prefix `annoter.gdt:`), tagged via `/T = "Annoter:gdt"`. We do **not** rasterize the frame as a Stamp annot in v1: PyMuPDF's `add_stamp_annot` only accepts a fixed list of predefined names, and inserting the rendered image as a separate page object would drift across saves. The structured JSON survives a round-trip through Acrobat (Acrobat preserves `/Contents` on Square annots). Acrobat will display the GD&T frame as a plain rectangle; Annoter rebuilds the editable item on reopen.
+- **GD&T persistence stores a Square annot + JSON in `/Contents`** (prefix `annoter.gdt:`), tagged via `/T = "Annoter:gdt"`. The structured JSON survives a round-trip through Acrobat (Acrobat preserves `/Contents` on Square annots); Annoter rebuilds the editable item on reopen. Since the post-v1 hardening pass, the annot also carries a **custom appearance stream** (rasterized frame as an image XObject with SMask, wired into `/AP/N` via `xref` surgery) so Acrobat/Foxit display the actual feature control frame instead of an empty rectangle.
 - **Owned annotations are tagged with `/T = "Annoter"`** so a re-save cleans them out before re-emitting from the current scene state. Foreign annotations (created by Acrobat) are read back as editable items by subtype — Square/Circle/Line/Ink/FreeText all map cleanly — but they are not deleted on save.
 - **Save flow** copies the document to a sibling `*.tmp.pdf`, closes the original, then atomically replaces the target. Required on Windows because PyMuPDF holds the source file open. Save reopens the file after replacement so editing can continue.
-- **High-DPI re-render is deferred**: the threshold in `config.HIGH_DPI_ZOOM_THRESHOLD` stays effectively disabled in v1. Enabling it requires a per-item geometry rescale (multiply pos/rect/points by `new_dpi/old_dpi`) AND a font-size rescale for `TextAnnotationItem` / `GdtAnnotationItem` so they keep their physical size on the page. Lands as a follow-up.
 - **Page rotation is view-only**: rotated annotations are not transformed to PDF user space on save. The save assumes the viewing rotation is 0; rotating then saving is acceptable for visual review but not recommended for round-trip fidelity. Documented for the user.
 - **Themes** ship as simple QSS files in `resources/themes/`. The dark theme also restyles `QGraphicsView` so the page chrome reads against dark backgrounds.
 - **Prefs persisted** via `QSettings("Annoter", "Annoter")`: window geometry, dock state, theme. The recent-files list was already persisted in M1 via the same settings backend.
@@ -134,3 +132,22 @@ Standalone, install-free, single-user PDF annotator for **mechanical engineering
 - `ChangeGdtCommand` does not merge consecutive edits. Each accept of the dialog is one undo step; this matches `ChangeColor`/`ChangeStroke` semantics and keeps the history readable.
 - GD&T frames default to black (`#212121`) regardless of the current `ToolController` color. Color can still be changed via the color toolbar after placement.
 - `PdfScene.gdtPlacementRequested(QPointF)` is a new signal — the scene cannot run a modal dialog from inside `mousePressEvent`, so `MainWindow` opens `GdtDialog` and pushes the `Add` via `scene.push_add()`.
+
+---
+
+## Post-v1 hardening (2026-06-09)
+
+Changes landed after the M5 milestone, in git history from the initial commit onward:
+
+- **Git history starts here**: the project was not under version control during M1-M5.
+- **Ink read fix**: a multi-stroke Ink annotation (e.g. from Acrobat) now yields one `FreehandItem` per stroke instead of a single polyline with spurious connecting segments (`_annot_to_items` returns a list).
+- **High-DPI re-render enabled** via pixmap `devicePixelRatio` (see "Rendering & cache" above). `config.HIGH_DPI_ZOOM_EXIT` (1.5) provides the hysteresis low side.
+- **GD&T appearance stream**: external viewers now render the actual frame (see M4 notes above).
+- **Exact geometry round-trip**: MuPDF pads the stored `/Rect` of Square/Circle annots by the border width, which made items drift on every save/reopen cycle (worst for GD&T, whose writer also used `boundingRect` including the selection margin). Owned annots now persist exact geometry in points inside the `/Subject` JSON (`rect_pt` for rect/ellipse/GD&T, `pos_pt` for text); the reader prefers it over `/Rect`.
+
+### Known remaining issues
+
+- Page rotation is still view-only (see M4 notes).
+- `PageRenderer` renders pages with `annots=True`, so saved annotations are baked into the page pixmap *and* drawn again as editable items on top. The two coincide exactly, so this is invisible in practice, but rendering with `annots=False` would require keeping unknown foreign annot types visible some other way.
+- Rendering is synchronous on the UI thread; an A0 page render blocks the UI for its duration. A background-render + progressive-display pass is the next perf candidate for >100 MB files.
+- M5 clean-VM / USB-stick verification has still not been executed.

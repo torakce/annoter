@@ -1,0 +1,5 @@
+# Runtime dependencies. Pinned ranges match pyproject.toml.
+# For development, prefer: pip install -e .[dev]
+PySide6>=6.7,<7
+PyMuPDF>=1.24,<2
+Pillow>=10.0,<12

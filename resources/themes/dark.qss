@@ -1,0 +1,178 @@
+/* Dark theme: high-contrast palette tuned for engineering drawings. */
+
+QMainWindow,
+QDialog {
+    background: #2b2b2b;
+    color: #e0e0e0;
+}
+
+QMenuBar,
+QMenu,
+QStatusBar,
+QDockWidget {
+    background: #1e1e1e;
+    color: #e0e0e0;
+}
+
+QMenuBar::item:selected,
+QMenu::item:selected {
+    background: #3a3a3a;
+}
+
+QDockWidget::title {
+    background: #232323;
+    color: #e0e0e0;
+    padding: 4px 6px;
+    border-bottom: 1px solid #3a3a3a;
+}
+
+QGroupBox {
+    color: #e0e0e0;
+    border: 1px solid #3a3a3a;
+    border-radius: 4px;
+    margin-top: 12px;
+    padding: 8px 4px 4px 4px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
+    background: #2b2b2b;
+}
+
+QToolBar,
+QToolButton,
+QPushButton,
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox,
+QListWidget {
+    background: #2b2b2b;
+    color: #e0e0e0;
+    border: 1px solid #3a3a3a;
+}
+
+QToolButton:hover,
+QPushButton:hover {
+    background: #3a3a3a;
+}
+
+QToolButton:checked,
+QPushButton:checked {
+    background: #1E88E5;
+    color: white;
+    border: 1px solid #1565c0;
+}
+
+/* Disabled state: brighter than the background so labels stay legible
+   while still reading as inactive. */
+QPushButton:disabled,
+QToolButton:disabled,
+QLabel:disabled,
+QGroupBox:disabled,
+QGroupBox::title:disabled,
+QMenu::item:disabled,
+QMenuBar::item:disabled {
+    color: #707070;
+    background: transparent;
+}
+
+QPushButton:disabled,
+QToolButton:disabled {
+    border: 1px solid #333333;
+}
+
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+    selection-background-color: #1E88E5;
+    selection-color: white;
+}
+
+/* Explicit sub-control sizing for the spinbox up/down buttons -- see
+   matching comment in light.qss for the rationale. */
+QSpinBox,
+QDoubleSpinBox {
+    padding-right: 20px;
+    min-height: 20px;
+}
+
+QSpinBox::up-button,
+QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    border-left: 1px solid #3a3a3a;
+    border-bottom: 1px solid #3a3a3a;
+    background: #353535;
+}
+
+QSpinBox::down-button,
+QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    border-left: 1px solid #3a3a3a;
+    background: #353535;
+}
+
+QSpinBox::up-button:hover,
+QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover {
+    background: #404040;
+}
+
+QSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed,
+QDoubleSpinBox::up-button:pressed,
+QDoubleSpinBox::down-button:pressed {
+    background: #1E88E5;
+}
+
+QSpinBox::up-arrow,
+QDoubleSpinBox::up-arrow {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid #e0e0e0;
+}
+
+QSpinBox::down-arrow,
+QDoubleSpinBox::down-arrow {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #e0e0e0;
+}
+
+QListWidget::item:selected {
+    background: #1E88E5;
+    color: white;
+}
+
+QGraphicsView {
+    background: #1e1e1e;
+    border: 1px solid #3a3a3a;
+}
+
+QScrollBar:vertical,
+QScrollBar:horizontal {
+    background: #232323;
+    border: none;
+}
+
+QScrollBar::handle {
+    background: #4a4a4a;
+    border-radius: 3px;
+}
+
+QScrollBar::handle:hover {
+    background: #5a5a5a;
+}

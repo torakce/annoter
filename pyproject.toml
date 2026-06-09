@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "annoter"
+version = "0.1.0"
+description = "Standalone PDF annotator for mechanical engineering drawings (GD&T capable)."
+readme = "PLAN.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Annoter project" }]
+dependencies = [
+    "PySide6>=6.7,<7",
+    "PyMuPDF>=1.24,<2",
+    "Pillow>=10.0,<12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+    "pyinstaller>=6.6",
+]
+
+[project.scripts]
+annoter = "annoter.app:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning"]

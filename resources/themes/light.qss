@@ -1,0 +1,209 @@
+/* Light theme: explicit colors so Windows dark-mode does not bleed
+   through Qt's platform palette. */
+
+QMainWindow,
+QDialog,
+QWidget {
+    background: #f4f4f4;
+    color: #212121;
+}
+
+QStatusBar {
+    background: #ececec;
+    color: #212121;
+}
+
+QMenuBar {
+    background: #ececec;
+    color: #212121;
+}
+
+QMenuBar::item:selected {
+    background: #d9d9d9;
+}
+
+QMenu {
+    background: #ffffff;
+    color: #212121;
+    border: 1px solid #cccccc;
+}
+
+QMenu::item:selected {
+    background: #cfe3ff;
+    color: #212121;
+}
+
+QDockWidget {
+    color: #212121;
+}
+
+QDockWidget::title {
+    background: #e6e6e6;
+    color: #212121;
+    padding: 4px 6px;
+    border-bottom: 1px solid #cccccc;
+}
+
+QGroupBox {
+    color: #212121;
+    border: 1px solid #cccccc;
+    border-radius: 4px;
+    margin-top: 12px;
+    padding: 8px 4px 4px 4px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
+    background: #f4f4f4;
+    color: #212121;
+}
+
+QLabel {
+    color: #212121;
+    background: transparent;
+}
+
+QPushButton,
+QToolButton {
+    background: #ffffff;
+    color: #212121;
+    border: 1px solid #cccccc;
+    padding: 3px 6px;
+}
+
+QPushButton:hover,
+QToolButton:hover {
+    background: #ececec;
+}
+
+QPushButton:checked,
+QToolButton:checked {
+    background: #cfe3ff;
+    color: #0d47a1;
+    border: 1px solid #1E88E5;
+}
+
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox,
+QPlainTextEdit,
+QTextEdit {
+    background: #ffffff;
+    color: #212121;
+    border: 1px solid #cccccc;
+    selection-background-color: #1E88E5;
+    selection-color: white;
+}
+
+/* Explicit sub-control sizing for the spinbox up/down buttons; without
+   these, partial styling collapses them to zero width and the I-beam
+   cursor covers the area where the arrows should be. */
+QSpinBox,
+QDoubleSpinBox {
+    padding-right: 20px;
+    min-height: 20px;
+}
+
+QSpinBox::up-button,
+QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    border-left: 1px solid #cccccc;
+    border-bottom: 1px solid #cccccc;
+    background: #f5f5f5;
+}
+
+QSpinBox::down-button,
+QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    border-left: 1px solid #cccccc;
+    background: #f5f5f5;
+}
+
+QSpinBox::up-button:hover,
+QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover {
+    background: #e3eefb;
+}
+
+QSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed,
+QDoubleSpinBox::up-button:pressed,
+QDoubleSpinBox::down-button:pressed {
+    background: #cfe3ff;
+}
+
+QSpinBox::up-arrow,
+QDoubleSpinBox::up-arrow {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid #424242;
+}
+
+QSpinBox::down-arrow,
+QDoubleSpinBox::down-arrow {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #424242;
+}
+
+QListWidget {
+    background: #ffffff;
+    color: #212121;
+    border: 1px solid #cccccc;
+}
+
+QListWidget::item:selected {
+    background: #cfe3ff;
+    color: #0d47a1;
+}
+
+QGraphicsView {
+    background: #fafafa;
+    border: 1px solid #cccccc;
+}
+
+QScrollBar:vertical,
+QScrollBar:horizontal {
+    background: #ececec;
+    border: none;
+}
+
+QScrollBar::handle {
+    background: #c0c0c0;
+    border-radius: 3px;
+}
+
+QScrollBar::handle:hover {
+    background: #a8a8a8;
+}
+
+/* Disabled state: explicit so platform defaults don't disappear into
+   the background. */
+QPushButton:disabled,
+QToolButton:disabled,
+QLabel:disabled,
+QGroupBox:disabled,
+QGroupBox::title:disabled,
+QMenu::item:disabled,
+QMenuBar::item:disabled {
+    color: #9a9a9a;
+    background: transparent;
+}
+
+QPushButton:disabled,
+QToolButton:disabled {
+    border: 1px solid #dcdcdc;
+}

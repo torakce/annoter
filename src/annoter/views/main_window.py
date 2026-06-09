@@ -32,6 +32,9 @@ from PySide6.QtWidgets import (
 
 from annoter.config import (
     BASE_RENDER_DPI,
+    HIGH_DPI_ZOOM_EXIT,
+    HIGH_DPI_ZOOM_THRESHOLD,
+    HIGH_RENDER_DPI,
     MAX_RECENT_FILES,
     PIXMAP_CACHE_PAGES,
     STROKE_WIDTHS,
@@ -77,6 +80,9 @@ class MainWindow(QMainWindow):
         self._renderer: PageRenderer | None = None
         self._page_index: int = 0
         self._page_rotation: int = 0  # multiples of 90, in [0, 360)
+        # Supersampling factor for the current render (1.0 = base DPI).
+        # Driven hysteretically by the zoom factor; see _on_zoom_changed.
+        self._render_scale: float = 1.0
 
         # Per-page annotation buckets and undo stacks (M2: in-memory; M4
         # promotes them to native PDF annotations).
@@ -445,6 +451,7 @@ class MainWindow(QMainWindow):
         )
         self._page_index = 0
         self._page_rotation = 0
+        self._render_scale = 1.0
         self._page_stacks = {}
         # Reconstruct any annotations the PDF already contains so they
         # appear as editable items on first display of each page.
@@ -600,7 +607,9 @@ class MainWindow(QMainWindow):
             self._page_items[self._page_index] = self._scene.detach_children()
 
         self._page_index = index
-        pixmap = self._renderer.render(index, self._page_rotation)
+        pixmap = self._renderer.render(
+            index, self._page_rotation, self._render_scale
+        )
         self._scene.set_page_pixmap(pixmap)
 
         # Activate the page's undo stack (creating it on first visit).
@@ -661,6 +670,30 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _on_zoom_changed(self, factor: float) -> None:
         self._lbl_zoom.setText(f"{factor * 100:.0f} %")
+        self._maybe_rerender_for_zoom(factor)
+
+    def _maybe_rerender_for_zoom(self, factor: float) -> None:
+        """Hysteretic high-DPI re-render.
+
+        Above HIGH_DPI_ZOOM_THRESHOLD the page is re-rasterized at
+        HIGH_RENDER_DPI; below HIGH_DPI_ZOOM_EXIT it drops back to the
+        base DPI. The pixmap's devicePixelRatio keeps logical geometry
+        constant, so child annotations and undo history are untouched.
+        """
+        if self._renderer is None or self._doc is None:
+            return
+        target = self._render_scale
+        if factor >= HIGH_DPI_ZOOM_THRESHOLD:
+            target = HIGH_RENDER_DPI / BASE_RENDER_DPI
+        elif factor <= HIGH_DPI_ZOOM_EXIT:
+            target = 1.0
+        if target == self._render_scale:
+            return
+        self._render_scale = target
+        pixmap = self._renderer.render(
+            self._page_index, self._page_rotation, self._render_scale
+        )
+        self._scene.set_page_pixmap(pixmap)
 
     # ------------------------------------------------------------------
     # annotations: selection / edit ops

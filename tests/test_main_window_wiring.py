@@ -121,6 +121,46 @@ def test_close_clears_state(qapp, sample_pdf: Path) -> None:
         win.close()
 
 
+def test_high_dpi_rerender_hysteresis(qapp, sample_pdf: Path) -> None:
+    """Zooming past the threshold supersamples the page pixmap without
+    changing its logical (scene) geometry; dropping back below the exit
+    threshold returns to base DPI. In between, the scale is sticky."""
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        page = win._scene.page_item()
+        assert page is not None
+        base_rect = QRectF(page.boundingRect())
+        assert win._render_scale == 1.0
+
+        def assert_logical_geometry_kept() -> None:
+            # PyMuPDF rounds pixel dimensions per render, so the logical
+            # size may differ by up to one device pixel. Annotations are
+            # unaffected (their coordinates never change).
+            r = win._scene.page_item().boundingRect()
+            assert r.width() == pytest.approx(base_rect.width(), abs=1.0)
+            assert r.height() == pytest.approx(base_rect.height(), abs=1.0)
+
+        win._view._apply_zoom(2.5)  # above threshold (2.0)
+        assert win._render_scale == 2.0
+        pm = win._scene.page_item().pixmap()
+        assert pm.devicePixelRatio() == pytest.approx(2.0)
+        # Logical geometry unchanged -> child annotations stay put.
+        assert_logical_geometry_kept()
+
+        win._view._apply_zoom(1.7)  # between exit (1.5) and threshold
+        assert win._render_scale == 2.0  # hysteresis: stays high
+
+        win._view._apply_zoom(1.0)  # below exit
+        assert win._render_scale == 1.0
+        pm = win._scene.page_item().pixmap()
+        assert pm.devicePixelRatio() == pytest.approx(1.0)
+        assert_logical_geometry_kept()
+    finally:
+        win._on_close()
+        win.close()
+
+
 # ----------------------------------------------------------------------
 # M2 wiring
 # ----------------------------------------------------------------------

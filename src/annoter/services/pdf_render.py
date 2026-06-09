@@ -36,16 +36,26 @@ class PageRenderer:
             self._dpi = dpi
             self._cache.clear()
 
-    def render(self, page_index: int, rotation: int = 0) -> QPixmap:
+    def render(
+        self, page_index: int, rotation: int = 0, scale: float = 1.0
+    ) -> QPixmap:
+        """Rasterize a page at `self._dpi * scale`.
+
+        `scale > 1.0` produces a supersampled pixmap whose
+        devicePixelRatio is set so its *logical* size stays the same as
+        the base render. Scene geometry (and child annotation items)
+        are therefore unaffected by a high-DPI re-render; only the
+        pixel density changes.
+        """
         rotation = rotation % 360
-        key = (page_index, self._dpi, rotation)
+        key = (page_index, round(scale * 100), rotation)
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
             return cached
 
         page = self._doc.page(page_index)
-        zoom = self._dpi / 72.0
+        zoom = self._dpi * scale / 72.0
         matrix = fitz.Matrix(zoom, zoom)
         if rotation:
             matrix = matrix.prerotate(rotation)
@@ -59,6 +69,7 @@ class PageRenderer:
             QImage.Format_RGB888,
         ).copy()
         pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(scale)
 
         self._cache[key] = pixmap
         while len(self._cache) > self._cache_size:

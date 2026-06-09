@@ -8,7 +8,11 @@ from __future__ import annotations
 # Rendering
 BASE_RENDER_DPI = 150
 HIGH_RENDER_DPI = 300
-HIGH_DPI_ZOOM_THRESHOLD = 2.0  # Zoom factor above which we re-render at HIGH_RENDER_DPI (M4).
+# Hysteretic high-DPI re-render: switch to HIGH_RENDER_DPI when the zoom
+# factor rises above THRESHOLD, drop back to BASE_RENDER_DPI below EXIT.
+# The gap prevents flapping when the user hovers around the threshold.
+HIGH_DPI_ZOOM_THRESHOLD = 2.0
+HIGH_DPI_ZOOM_EXIT = 1.5
 
 # Zoom
 ZOOM_MIN = 0.1

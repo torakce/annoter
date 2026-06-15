@@ -69,6 +69,25 @@ def by_family() -> dict[Family, list[Characteristic]]:
 ALLOWED_TOLERANCE_MODIFIERS: tuple[str, ...] = ("M", "L", "P", "E")
 ALLOWED_DATUM_MODIFIERS: tuple[str, ...] = ("M", "L", "P", "F")
 
+# Tolerance zone prefixes, stored as the literal display string.
+TOLERANCE_PREFIXES: tuple[str, ...] = ("Ø", "R", "SØ", "SR")
+
+TOLERANCE_PREFIX_NAMES: dict[str, str] = {
+    "Ø": "Diameter (cylindrical zone)",
+    "R": "Radius",
+    "SØ": "Spherical diameter",
+    "SR": "Spherical radius",
+}
+
+# Full ISO 1101 names, used for tooltips in the editor UI.
+MODIFIER_NAMES: dict[str, str] = {
+    "M": "Maximum material requirement",
+    "L": "Least material requirement",
+    "P": "Projected tolerance zone",
+    "E": "Envelope requirement",
+    "F": "Free state",
+}
+
 
 _ENCLOSED = {
     "M": "Ⓜ",  # Ⓜ
@@ -122,7 +141,8 @@ class GdtState:
     """Full state of a feature control frame."""
 
     characteristic: Characteristic = Characteristic.PERPENDICULARITY
-    diameter_prefix: bool = False
+    # One of TOLERANCE_PREFIXES, or "" for none.
+    tolerance_prefix: str = ""
     tolerance_value: str = ""
     tolerance_modifier: str | None = None
     datum_primary: DatumRef = field(default_factory=DatumRef)
@@ -134,8 +154,8 @@ class GdtState:
     # ------------------------------------------------------------------
     def tolerance_display(self) -> str:
         parts: list[str] = []
-        if self.diameter_prefix:
-            parts.append("Ø")  # Ø
+        if self.tolerance_prefix:
+            parts.append(self.tolerance_prefix)
         if self.tolerance_value.strip():
             parts.append(self.tolerance_value.strip())
         text = " ".join(parts)
@@ -162,7 +182,7 @@ class GdtState:
     def to_dict(self) -> dict:
         return {
             "characteristic": self.characteristic.value,
-            "diameter_prefix": self.diameter_prefix,
+            "tolerance_prefix": self.tolerance_prefix,
             "tolerance_value": self.tolerance_value,
             "tolerance_modifier": self.tolerance_modifier,
             "datum_primary": self.datum_primary.to_dict(),
@@ -172,11 +192,16 @@ class GdtState:
 
     @classmethod
     def from_dict(cls, data: dict) -> GdtState:
+        # PDFs annotated before the prefix rework stored a boolean
+        # "diameter_prefix" -- map it to the literal prefix.
+        prefix = str(data.get("tolerance_prefix", ""))
+        if not prefix and data.get("diameter_prefix"):
+            prefix = "Ø"
         return cls(
             characteristic=Characteristic(
                 data.get("characteristic", Characteristic.PERPENDICULARITY.value)
             ),
-            diameter_prefix=bool(data.get("diameter_prefix", False)),
+            tolerance_prefix=prefix,
             tolerance_value=str(data.get("tolerance_value", "")),
             tolerance_modifier=data.get("tolerance_modifier"),
             datum_primary=DatumRef.from_dict(data.get("datum_primary", {})),

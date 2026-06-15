@@ -76,13 +76,31 @@ def test_datumref_display() -> None:
 def test_gdtstate_tolerance_display() -> None:
     s = GdtState(
         characteristic=Characteristic.POSITION,
-        diameter_prefix=True,
+        tolerance_prefix="Ø",
         tolerance_value="0.1",
         tolerance_modifier="M",
     )
     text = s.tolerance_display()
     assert text.startswith("Ø")
     assert "0.1" in text
+
+
+def test_gdtstate_tolerance_display_all_prefixes() -> None:
+    for prefix in ("Ø", "R", "SØ", "SR"):
+        s = GdtState(tolerance_prefix=prefix, tolerance_value="0.2")
+        assert s.tolerance_display().startswith(prefix)
+
+
+def test_gdtstate_from_dict_legacy_diameter_prefix() -> None:
+    # PDFs saved before the prefix rework stored a boolean.
+    s = GdtState.from_dict(
+        {"characteristic": "position", "diameter_prefix": True}
+    )
+    assert s.tolerance_prefix == "Ø"
+    s2 = GdtState.from_dict(
+        {"characteristic": "position", "diameter_prefix": False}
+    )
+    assert s2.tolerance_prefix == ""
 
 
 def test_gdtstate_datum_displays_drops_trailing_empty() -> None:
@@ -97,7 +115,7 @@ def test_gdtstate_datum_displays_drops_trailing_empty() -> None:
 def test_gdtstate_roundtrip_dict() -> None:
     s = GdtState(
         characteristic=Characteristic.CYLINDRICITY,
-        diameter_prefix=False,
+        tolerance_prefix="SR",
         tolerance_value="0.02",
         tolerance_modifier=None,
         datum_primary=DatumRef(["A", "B"], modifier="M"),

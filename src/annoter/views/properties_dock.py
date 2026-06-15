@@ -35,7 +35,8 @@ from annoter.views.items.base import AnnotationItem
 from annoter.views.items.freehand import FreehandItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
-from annoter.views.items.shapes import EllipseItem, RectangleItem
+from annoter.views.items.poly import PolygonItem, PolylineItem
+from annoter.views.items.shapes import CloudItem, EllipseItem, RectangleItem
 from annoter.views.items.text import TEXT_FONT_FAMILIES, TextAnnotationItem
 
 
@@ -137,6 +138,12 @@ class PropertiesDock(QDockWidget):
                 self._add_shape_rows(form, with_corner=True)
             elif issubclass(cls, EllipseItem):
                 self._add_shape_rows(form, with_corner=False)
+            elif issubclass(cls, CloudItem):
+                self._add_fill_rows(form)
+            elif issubclass(cls, PolygonItem):
+                self._add_fill_rows(form)
+            elif issubclass(cls, PolylineItem):
+                pass  # base + dash already covered
             elif issubclass(cls, ArrowItem):
                 self._add_arrow_rows(form)
             elif issubclass(cls, LineItem):
@@ -235,6 +242,23 @@ class PropertiesDock(QDockWidget):
             )
         )
         form.addRow("Text size", lbl_size)
+
+    def _add_fill_rows(self, form: QFormLayout) -> None:
+        first = self._items[0]
+        cb = QCheckBox("Filled")
+        cb.setChecked(bool(first.fill_enabled()))
+        cb.toggled.connect(
+            lambda checked: self._push_prop("fill_enabled", bool(checked))
+        )
+        form.addRow("Fill", cb)
+
+        fc_btn = _color_button(first.fill_color())
+        fc_btn.clicked.connect(
+            lambda: self._pick_color(
+                "fill_color", first.fill_color(), fc_btn
+            )
+        )
+        form.addRow("Fill color", fc_btn)
 
     def _add_arrow_rows(self, form: QFormLayout) -> None:
         first = self._items[0]

@@ -42,7 +42,7 @@ Work M1 → M5 sequentially. **Do not start a milestone until the previous one i
 
 1. **M1** — PDF viewer socle: open/close, page navigation, zoom (Ctrl+wheel, Ctrl+/-/0/1), pan (space + middle-click), drag&drop, recent files (`QSettings`, max 10), status bar. No annotations yet.
 2. **M2** — Classic annotations: tools (rect, ellipse, line, arrow, text, freehand), `ToolController`, `QUndoStack` (limit 200), tool palette + annotation list docks, all the Add/Delete/Move/ChangeColor/ChangeStroke commands, Ctrl+Z/Y/Del/Ctrl+A. Empty text after edit auto-rolls-back the add.
-3. **M3** — GD&T: 14 ISO 1101 symbols as `QPainterPath`, `GdtAnnotationItem`, `GdtDialog` (with live preview), `GdtPalette` dock grouped by family (Form / Profile / Orientation / Location / Runout).
+3. **M3** — GD&T: 14 ISO 1101 symbols as `QPainterPath`, `GdtAnnotationItem`, `GdtDialog` (with live preview), `GdtPalette` dock grouped by family (Form / Profile / Orientation / Location / Runout). *Post-v1: dialog and palette were replaced by the in-place `GdtInlineEditor` (see PLAN.md).*
 4. **M4** — Persistence (Save/Save As → native PDF annotations + reopen reconstructs items), light/dark theme switch (QSS), DPI re-render without orphaning annotations, persistent prefs (window size, dock state, theme).
 5. **M5** — Packaging: `build.py` runs PyInstaller twice (onefile then onedir), bundles `.qm`, fitz, fonts. Verify on a clean Windows VM from a USB stick with no admin rights.
 

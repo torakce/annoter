@@ -19,9 +19,13 @@ class Tool(Enum):
     SELECT = auto()
     RECTANGLE = auto()
     ELLIPSE = auto()
+    CLOUD = auto()
     LINE = auto()
     ARROW = auto()
+    POLYLINE = auto()
+    POLYGON = auto()
     TEXT = auto()
+    CALLOUT = auto()
     FREEHAND = auto()
     GDT = auto()
 

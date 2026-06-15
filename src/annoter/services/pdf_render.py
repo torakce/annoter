@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import OrderedDict
 
 import fitz
+from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QImage, QPixmap
 
 from annoter.model.document import PdfDocument
@@ -75,6 +76,62 @@ class PageRenderer:
         while len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
         return pixmap
+
+    def render_clip(
+        self,
+        page_index: int,
+        rotation: int,
+        clip: QRectF,
+        scale: float,
+    ) -> tuple[QPixmap, QPointF]:
+        """Rasterize the sub-rectangle `clip` of a page at `dpi * scale`.
+
+        `clip` is expressed in the *logical* coordinates of the full-page
+        pixmap produced by `render` (scale-independent thanks to the
+        devicePixelRatio convention). Returns the pixmap (with
+        devicePixelRatio = scale) and its top-left position in the same
+        logical coordinates.
+
+        Not cached: the clip is viewport-sized, so re-rendering it is
+        cheap compared to a full page and caching would thrash on pans.
+        """
+        rotation = rotation % 360
+        page = self._doc.page(page_index)
+        zoom0 = self._dpi / 72.0
+        m0 = fitz.Matrix(zoom0, zoom0)
+        if rotation:
+            m0 = m0.prerotate(rotation)
+        # A rotated matrix maps the page into negative coordinates; the
+        # full-page pixmap's logical origin is the bbox origin, not (0,0)
+        # of matrix space. Shift the clip accordingly.
+        bbox0 = page.rect * m0
+        inv = fitz.Matrix(m0)
+        inv.invert()
+        clip_m0 = fitz.Rect(
+            clip.left() + bbox0.x0,
+            clip.top() + bbox0.y0,
+            clip.right() + bbox0.x0,
+            clip.bottom() + bbox0.y0,
+        )
+        clip_page = clip_m0 * inv
+        matrix = fitz.Matrix(zoom0 * scale, zoom0 * scale)
+        if rotation:
+            matrix = matrix.prerotate(rotation)
+        pix = page.get_pixmap(matrix=matrix, clip=clip_page, alpha=False)
+        image = QImage(
+            pix.samples,
+            pix.width,
+            pix.height,
+            pix.stride,
+            QImage.Format_RGB888,
+        ).copy()
+        pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(scale)
+        pos = QPointF(
+            pix.x / scale - bbox0.x0,
+            pix.y / scale - bbox0.y0,
+        )
+        return pixmap, pos
 
     def clear_cache(self) -> None:
         self._cache.clear()

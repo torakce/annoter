@@ -31,10 +31,16 @@ from annoter.services.pdf_export import (  # noqa: E402
     read_annotations,
     write_annotations,
 )
+from annoter.views.items.callout import CalloutItem  # noqa: E402
 from annoter.views.items.freehand import FreehandItem  # noqa: E402
 from annoter.views.items.gdt import GdtAnnotationItem  # noqa: E402
 from annoter.views.items.lines import ArrowItem, LineItem  # noqa: E402
+from annoter.views.items.poly import (  # noqa: E402
+    PolygonItem,
+    PolylineItem,
+)
 from annoter.views.items.shapes import (  # noqa: E402
+    CloudItem,
     EllipseItem,
     RectangleItem,
 )
@@ -98,6 +104,114 @@ def test_ellipse_roundtrip(qapp, blank_doc) -> None:
     reopened.close()
     assert len(out[0]) == 1
     assert isinstance(out[0][0], EllipseItem)
+
+
+def test_cloud_roundtrip(qapp, blank_doc) -> None:
+    item = CloudItem(QRectF(40, 50, 160, 90))
+    item.set_color(QColor("#FB8C00"))
+    item.set_stroke(2.0)
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert len(out[0]) == 1
+    restored = out[0][0]
+    assert isinstance(restored, CloudItem)
+    # Exact geometry must survive: we store rect_pt, so the padded /Rect
+    # MuPDF computes for the cloudy border must not leak into the item.
+    scene = restored.rect().translated(restored.pos())
+    assert scene.x() == pytest.approx(40, abs=0.1)
+    assert scene.y() == pytest.approx(50, abs=0.1)
+    assert scene.width() == pytest.approx(160, abs=0.1)
+    assert scene.height() == pytest.approx(90, abs=0.1)
+
+
+def test_cloud_is_polygon_with_cloud_border(qapp, blank_doc) -> None:
+    """The native annot must be a Polygon carrying a cloudy border
+    effect so Acrobat/Foxit render the scallops."""
+    item = CloudItem(QRectF(40, 50, 160, 90))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = next(page.annots())
+    assert annot.type[1] == "Polygon"
+    be = reopened.xref_get_key(annot.xref, "BE")
+    reopened.close()
+    # /BE present with a cloudy style (/S /C).
+    assert be[0] != "null"
+    assert "/C" in be[1]
+
+
+def test_cloud_fill_roundtrip(qapp, blank_doc) -> None:
+    item = CloudItem(QRectF(40, 50, 160, 90))
+    item.set_fill_enabled(True)
+    item.set_fill_color(QColor("#FFEB3B"))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    c = out[0][0]
+    assert isinstance(c, CloudItem)
+    assert c.fill_enabled() is True
+    assert c.fill_color().name().lower() == "#ffeb3b"
+
+
+def test_polyline_roundtrip(qapp, blank_doc) -> None:
+    pts = [QPointF(10, 20), QPointF(80, 40), QPointF(60, 120), QPointF(150, 90)]
+    item = PolylineItem(pts)
+    item.set_color(QColor("#8E24AA"))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    assert next(page.annots()).type[1] == "PolyLine"
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert len(out[0]) == 1
+    restored = out[0][0]
+    assert isinstance(restored, PolylineItem)
+    rp = restored.points()
+    assert len(rp) == 4
+    assert rp[0].x() == pytest.approx(10, abs=0.1)
+    assert rp[2].y() == pytest.approx(120, abs=0.1)
+
+
+def test_polygon_roundtrip_with_fill(qapp, blank_doc) -> None:
+    pts = [QPointF(30, 30), QPointF(140, 50), QPointF(110, 150), QPointF(40, 120)]
+    item = PolygonItem(pts)
+    item.set_fill_enabled(True)
+    item.set_fill_color(QColor("#26A69A"))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    assert next(page.annots()).type[1] == "Polygon"
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert len(out[0]) == 1
+    restored = out[0][0]
+    assert isinstance(restored, PolygonItem)
+    assert len(restored.points()) == 4
+    assert restored.fill_enabled() is True
+    assert restored.fill_color().name().lower() == "#26a69a"
+
+
+def test_polygon_and_cloud_disambiguated(qapp, blank_doc) -> None:
+    """Both map to a PDF Polygon; the reader must tell them apart."""
+    cloud = CloudItem(QRectF(20, 20, 120, 80))
+    poly = PolygonItem(
+        [QPointF(200, 200), QPointF(300, 220), QPointF(250, 320)]
+    )
+    write_annotations(blank_doc, {0: [cloud, poly]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    kinds = sorted(type(it).__name__ for it in out[0])
+    assert kinds == ["CloudItem", "PolygonItem"]
 
 
 def test_line_roundtrip(qapp, blank_doc) -> None:
@@ -164,10 +278,48 @@ def test_text_roundtrip(qapp, blank_doc) -> None:
     assert "Hello world" in out[0][0].text()
 
 
+def test_callout_roundtrip(qapp, blank_doc) -> None:
+    item = CalloutItem(QPointF(120, 60), "See note")
+    item.set_tip(QPointF(-60, 40))  # tip at scene (60, 100)
+    item.set_color(QColor("#EF5350"))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = next(page.annots())
+    assert annot.type[1] == "FreeText"
+    # Native callout metadata is present for external viewers.
+    assert reopened.xref_get_key(annot.xref, "IT")[1] == "/FreeTextCallout"
+    assert reopened.xref_get_key(annot.xref, "CL")[0] == "array"
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert len(out[0]) == 1
+    restored = out[0][0]
+    assert isinstance(restored, CalloutItem)
+    assert "See note" in restored.text()
+    # Tip survives in scene coordinates.
+    tip_scene = restored.pos() + restored.tip()
+    assert tip_scene.x() == pytest.approx(60, abs=0.5)
+    assert tip_scene.y() == pytest.approx(100, abs=0.5)
+
+
+def test_callout_is_not_read_as_plain_text(qapp, blank_doc) -> None:
+    """A plain text annot must stay text, a callout must stay a callout."""
+    txt = TextAnnotationItem(QPointF(40, 40), "plain")
+    call = CalloutItem(QPointF(200, 200), "callout")
+    write_annotations(blank_doc, {0: [txt, call]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    kinds = sorted(type(it).__name__ for it in out[0])
+    assert kinds == ["CalloutItem", "TextAnnotationItem"]
+
+
 def test_gdt_roundtrip_preserves_state(qapp, blank_doc) -> None:
     state = GdtState(
         characteristic=Characteristic.POSITION,
-        diameter_prefix=True,
+        tolerance_prefix="SØ",
         tolerance_value="0.1",
         tolerance_modifier="M",
         datum_primary=DatumRef(["A", "B"], modifier="M"),

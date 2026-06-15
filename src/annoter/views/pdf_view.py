@@ -45,7 +45,12 @@ class PdfView(QGraphicsView):
         )
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setDragMode(QGraphicsView.NoDrag)
+        # SELECT (the startup tool) drags a rubber-band over empty page
+        # areas; presses on an annotation still move it (Qt only starts
+        # the band when no item consumes the press). Drawing tools
+        # switch to NoDrag -- see set_tool_cursor_for.
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+        self.setRubberBandSelectionMode(Qt.IntersectsItemShape)
         self.setMouseTracking(True)
 
         self._zoom: float = 1.0
@@ -121,8 +126,12 @@ class PdfView(QGraphicsView):
         if tool in (
             Tool.RECTANGLE,
             Tool.ELLIPSE,
+            Tool.CLOUD,
             Tool.LINE,
             Tool.ARROW,
+            Tool.POLYLINE,
+            Tool.POLYGON,
+            Tool.CALLOUT,
             Tool.FREEHAND,
             Tool.GDT,
         ):
@@ -132,6 +141,13 @@ class PdfView(QGraphicsView):
         else:
             cursor = Qt.ArrowCursor
         self._tool_cursor = cursor
+        # Rubber-band selection only makes sense for the Select tool;
+        # drawing tools own the drag gesture.
+        self.setDragMode(
+            QGraphicsView.RubberBandDrag
+            if tool is Tool.SELECT
+            else QGraphicsView.NoDrag
+        )
         # Only apply if no transient cursor (pan, zoom-window) is active.
         if (
             not self._panning
@@ -174,6 +190,16 @@ class PdfView(QGraphicsView):
             scene = self.scene()
             if scene is not None and hasattr(scene, "cancel_current_action"):
                 scene.cancel_current_action()
+                event.accept()
+                return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            scene = self.scene()
+            if (
+                scene is not None
+                and hasattr(scene, "poly_draft_active")
+                and scene.poly_draft_active()
+            ):
+                scene.finish_poly_draft()
                 event.accept()
                 return
         if event.key() in (

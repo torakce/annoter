@@ -52,8 +52,8 @@ class GdtAnnotationItem(AnnotationItem):
         super().__init__(parent)
         self._state: GdtState = state if state is not None else GdtState()
         # MainWindow sets this on every GD&T item it creates so a
-        # double-click opens the editor. Left None for items shown in
-        # standalone previews (e.g. inside GdtDialog).
+        # double-click opens the in-place editor. Left None for items
+        # shown in standalone previews.
         self._edit_callback = None  # type: ignore[var-annotated]
         self._color = QColor("#212121")  # GD&T frames default to black
         self._font_size: int = _DEFAULT_FONT_POINT_SIZE

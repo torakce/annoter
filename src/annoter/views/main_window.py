@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import QSize, Qt, QSettings, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QToolBar,
 )
 
 from annoter.config import (
@@ -35,6 +36,9 @@ from annoter.config import (
     HIGH_DPI_ZOOM_EXIT,
     HIGH_DPI_ZOOM_THRESHOLD,
     HIGH_RENDER_DPI,
+    HIRES_DEBOUNCE_MS,
+    HIRES_MAX_PIXELS,
+    HIRES_OVERLAY_MARGIN,
     MAX_RECENT_FILES,
     PIXMAP_CACHE_PAGES,
     STROKE_WIDTHS,
@@ -50,7 +54,7 @@ from annoter.controllers.commands import (
 )
 from annoter.controllers.tools import Tool, ToolController
 from annoter.model.document import PdfDocument
-from annoter.model.gdt import Characteristic, GdtState
+from annoter.model.gdt import GdtState
 from annoter.services.pdf_export import (
     read_annotations,
     write_annotations,
@@ -59,14 +63,30 @@ from annoter.services.pdf_render import PageRenderer
 from annoter.services.recent_files import RecentFiles
 from annoter.services.theme import Theme, apply as apply_theme
 from annoter.views.annotation_list import AnnotationListDock
-from annoter.views.gdt_dialog import GdtDialog
-from annoter.views.gdt_palette import GdtPalette
+from annoter.views.gdt_editor import GdtInlineEditor
+from annoter.views.icons import action_icon, tool_icon
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.pdf_scene import PdfScene
 from annoter.views.pdf_view import PdfView
 from annoter.views.properties_dock import PropertiesDock
 from annoter.views.tool_palette import ToolPalette
+
+
+_TOOLBAR_TOOLS: list[tuple[Tool, str]] = [
+    (Tool.SELECT, "Select"),
+    (Tool.RECTANGLE, "Rectangle"),
+    (Tool.ELLIPSE, "Ellipse"),
+    (Tool.CLOUD, "Cloud"),
+    (Tool.LINE, "Line"),
+    (Tool.ARROW, "Arrow"),
+    (Tool.POLYLINE, "Polyline"),
+    (Tool.POLYGON, "Polygon"),
+    (Tool.TEXT, "Text"),
+    (Tool.CALLOUT, "Callout"),
+    (Tool.FREEHAND, "Freehand"),
+    (Tool.GDT, "GD&T frame"),
+]
 
 
 class MainWindow(QMainWindow):
@@ -76,6 +96,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
         self.setAcceptDrops(True)
 
+        self._theme: Theme = Theme.LIGHT
         self._doc: PdfDocument | None = None
         self._renderer: PageRenderer | None = None
         self._page_index: int = 0
@@ -92,7 +113,13 @@ class MainWindow(QMainWindow):
 
         self._tool_controller = ToolController(self)
         self._tool_controller.toolChanged.connect(self._on_tool_changed)
-        self._pending_characteristic: Characteristic | None = None
+
+        # In-place GD&T editing (one editor at a time, anchored to the
+        # item being created or edited).
+        self._gdt_editor: GdtInlineEditor | None = None
+        self._gdt_edit_item: GdtAnnotationItem | None = None
+        self._gdt_edit_is_new: bool = False
+        self._gdt_old_state: GdtState | None = None
 
         self._scene = PdfScene(self)
         self._scene.set_tool_controller(self._tool_controller)
@@ -114,12 +141,6 @@ class MainWindow(QMainWindow):
         self._tool_palette = ToolPalette(self._tool_controller, self)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._tool_palette)
 
-        self._gdt_palette = GdtPalette(self)
-        self._gdt_palette.characteristicChosen.connect(
-            self._on_gdt_characteristic_chosen
-        )
-        self.addDockWidget(Qt.LeftDockWidgetArea, self._gdt_palette)
-
         self._annotation_list = AnnotationListDock(self)
         self._annotation_list.deleteRequested.connect(self._delete_selected)
         self.addDockWidget(Qt.RightDockWidgetArea, self._annotation_list)
@@ -133,6 +154,7 @@ class MainWindow(QMainWindow):
 
         self._build_actions()
         self._build_menus()
+        self._build_toolbar()
         self._build_status_bar()
         self._refresh_recent_menu()
 
@@ -140,9 +162,21 @@ class MainWindow(QMainWindow):
         self._on_zoom_changed(self._view.zoom())
         self._update_actions_enabled()
 
+        # Hi-res viewport overlay: refreshed shortly after the view
+        # settles (zoom, pan or page switch).
+        self._hires_timer = QTimer(self)
+        self._hires_timer.setSingleShot(True)
+        self._hires_timer.setInterval(HIRES_DEBOUNCE_MS)
+        self._hires_timer.timeout.connect(self._refresh_hires_overlay)
+        self._view.horizontalScrollBar().valueChanged.connect(
+            self._on_view_scrolled
+        )
+        self._view.verticalScrollBar().valueChanged.connect(
+            self._on_view_scrolled
+        )
+
         # Persistent prefs (window geometry / dock state / theme).
         self._settings = QSettings("Annoter", "Annoter")
-        self._theme: Theme = Theme.LIGHT
         self._restore_settings()
 
     # ------------------------------------------------------------------
@@ -361,6 +395,66 @@ class MainWindow(QMainWindow):
         m_page.addAction(self.act_last)
         m_page.addAction(self.act_goto)
 
+    def _build_toolbar(self) -> None:
+        tb = QToolBar("Quick Access", self)
+        tb.setObjectName("MainToolBar")
+        tb.setMovable(False)
+        tb.setIconSize(QSize(20, 20))
+        self.addToolBar(Qt.TopToolBarArea, tb)
+        self._toolbar = tb
+
+        tb.addAction(self.act_open)
+        tb.addAction(self.act_save)
+        tb.addSeparator()
+        tb.addAction(self.act_undo)
+        tb.addAction(self.act_redo)
+        tb.addSeparator()
+
+        self._tool_actions: dict[Tool, QAction] = {}
+        self._tool_action_group = QActionGroup(self)
+        self._tool_action_group.setExclusive(True)
+        for tool, label in _TOOLBAR_TOOLS:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, t=tool: (
+                    self._tool_controller.set_tool(t)
+                )
+            )
+            self._tool_action_group.addAction(act)
+            tb.addAction(act)
+            self._tool_actions[tool] = act
+        self._tool_actions[Tool.SELECT].setChecked(True)
+
+        tb.addSeparator()
+        tb.addAction(self.act_zoom_out)
+        tb.addAction(self.act_zoom_in)
+        tb.addAction(self.act_zoom_fit)
+        tb.addAction(self.act_zoom_actual)
+
+        # Tooltips advertise the keyboard shortcut where one exists.
+        for act in tb.actions():
+            seq = act.shortcut()
+            if not seq.isEmpty():
+                plain = act.text().replace("&", "")
+                act.setToolTip(f"{plain} ({seq.toString()})")
+
+        self._apply_icon_theme()
+
+    def _apply_icon_theme(self) -> None:
+        """Repaint code-drawn toolbar icons in the theme's glyph color."""
+        c = self._gdt_icon_color()
+        self.act_open.setIcon(action_icon("open", color=c))
+        self.act_save.setIcon(action_icon("save", color=c))
+        self.act_undo.setIcon(action_icon("undo", color=c))
+        self.act_redo.setIcon(action_icon("redo", color=c))
+        self.act_zoom_in.setIcon(action_icon("zoom-in", color=c))
+        self.act_zoom_out.setIcon(action_icon("zoom-out", color=c))
+        self.act_zoom_fit.setIcon(action_icon("zoom-fit", color=c))
+        self.act_zoom_actual.setIcon(action_icon("zoom-actual", color=c))
+        for tool, act in self._tool_actions.items():
+            act.setIcon(tool_icon(tool, color=c))
+
     def _build_status_bar(self) -> None:
         self._lbl_path = QLabel("")
         self._lbl_page = QLabel("-")
@@ -416,6 +510,8 @@ class MainWindow(QMainWindow):
             self.act_bring_front,
             self.act_send_back,
         ):
+            a.setEnabled(has_doc)
+        for a in getattr(self, "_tool_actions", {}).values():
             a.setEnabled(has_doc)
 
     # ------------------------------------------------------------------
@@ -491,6 +587,7 @@ class MainWindow(QMainWindow):
     def _on_save(self) -> None:
         if self._doc is None:
             return
+        self._commit_gdt_editor_if_open()
         target = self._doc.path
         confirm = QMessageBox.question(
             self,
@@ -507,6 +604,7 @@ class MainWindow(QMainWindow):
     def _on_save_as(self) -> None:
         if self._doc is None:
             return
+        self._commit_gdt_editor_if_open()
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save As",
@@ -571,6 +669,8 @@ class MainWindow(QMainWindow):
         self._open_path(str(target))
 
     def _on_close(self) -> None:
+        # Drop any in-progress GD&T edit with the document.
+        self._cancel_gdt_editor()
         if self._doc is not None:
             self._doc.close()
         self._doc = None
@@ -601,6 +701,8 @@ class MainWindow(QMainWindow):
         if self._renderer is None or self._doc is None:
             return
         index = max(0, min(self._doc.page_count - 1, index))
+        # An in-progress GD&T edit belongs to the leaving page.
+        self._commit_gdt_editor_if_open()
 
         # Stash the leaving page's annotations before swapping the pixmap.
         if not _is_initial and self._scene.page_item() is not None:
@@ -630,6 +732,8 @@ class MainWindow(QMainWindow):
         self._lbl_page.setText(
             f"Page {index + 1} / {self._doc.page_count}"
         )
+        if hasattr(self, "_hires_timer"):
+            self._hires_timer.start()
 
     def _goto_prev_page(self) -> None:
         self._show_page(self._page_index - 1)
@@ -671,6 +775,14 @@ class MainWindow(QMainWindow):
     def _on_zoom_changed(self, factor: float) -> None:
         self._lbl_zoom.setText(f"{factor * 100:.0f} %")
         self._maybe_rerender_for_zoom(factor)
+        if hasattr(self, "_hires_timer"):
+            self._hires_timer.start()
+        self._position_gdt_editor()
+
+    def _on_view_scrolled(self, _value: int) -> None:
+        if hasattr(self, "_hires_timer"):
+            self._hires_timer.start()
+        self._position_gdt_editor()
 
     def _maybe_rerender_for_zoom(self, factor: float) -> None:
         """Hysteretic high-DPI re-render.
@@ -694,6 +806,47 @@ class MainWindow(QMainWindow):
             self._page_index, self._page_rotation, self._render_scale
         )
         self._scene.set_page_pixmap(pixmap)
+
+    def _refresh_hires_overlay(self) -> None:
+        """Render the visible clip at exact screen resolution.
+
+        Runs after the view has settled (debounced). The overlay pixmap
+        is roughly viewport-sized regardless of the zoom level, so the
+        memory cost is bounded even on A0 plans at maximum zoom. When the
+        full-page pixmap is already sharp enough, the overlay is removed.
+        """
+        if self._renderer is None or self._doc is None:
+            return
+        page = self._scene.page_item()
+        if page is None:
+            return
+        dpr = self._view.viewport().devicePixelRatioF()
+        needed = self._view.zoom() * 72.0 / BASE_RENDER_DPI * dpr
+        if needed <= self._render_scale * 1.01:
+            self._scene.clear_hires_overlay()
+            return
+        visible = self._view.mapToScene(
+            self._view.viewport().rect()
+        ).boundingRect()
+        mx = visible.width() * HIRES_OVERLAY_MARGIN
+        my = visible.height() * HIRES_OVERLAY_MARGIN
+        clip = visible.adjusted(-mx, -my, mx, my).intersected(
+            page.boundingRect()
+        )
+        if clip.isEmpty():
+            self._scene.clear_hires_overlay()
+            return
+        max_scale = (
+            HIRES_MAX_PIXELS / (clip.width() * clip.height())
+        ) ** 0.5
+        scale = min(needed, max_scale)
+        if scale <= self._render_scale * 1.01:
+            self._scene.clear_hires_overlay()
+            return
+        pixmap, pos = self._renderer.render_clip(
+            self._page_index, self._page_rotation, clip, scale
+        )
+        self._scene.set_hires_overlay(pixmap, pos)
 
     # ------------------------------------------------------------------
     # annotations: selection / edit ops
@@ -920,46 +1073,89 @@ class MainWindow(QMainWindow):
             menu.exec(global_pos)
 
     # ------------------------------------------------------------------
-    # GD&T (M3)
+    # GD&T (M3) -- in-place editing
     # ------------------------------------------------------------------
     def _on_tool_changed(self, tool: Tool) -> None:
-        if tool is not Tool.GDT:
-            self._pending_characteristic = None
         # Keep the viewport cursor in sync with the active tool.
         self._view.set_tool_cursor_for(tool)
-
-    def _on_gdt_characteristic_chosen(
-        self, characteristic: Characteristic
-    ) -> None:
-        self._pending_characteristic = characteristic
-        self._tool_controller.set_tool(Tool.GDT)
+        # Mirror the change into the toolbar's checkable actions.
+        act = getattr(self, "_tool_actions", {}).get(tool)
+        if act is not None and not act.isChecked():
+            act.setChecked(True)
 
     def _on_gdt_placement(self, scene_pos) -> None:
         page = self._scene.page_item()
         if page is None:
             return
-        initial = GdtState()
-        if self._pending_characteristic is not None:
-            initial.characteristic = self._pending_characteristic
-        dlg = GdtDialog(initial, self)
-        if dlg.exec() != GdtDialog.Accepted:
-            return
-        new_state = dlg.result_state()
-        if new_state is None:
-            return
-        item = GdtAnnotationItem(new_state, scene_pos)
+        # Clicking elsewhere normally commits via the focus watcher, but
+        # be defensive against paths that bypass it.
+        self._commit_gdt_editor_if_open()
+        # Draft item: parented directly, no undo entry yet. The commit
+        # pushes the AddAnnotationCommand; cancel simply removes it
+        # (same rollback contract as empty text annotations).
+        item = GdtAnnotationItem(GdtState(), scene_pos)
         item.set_color(self._tool_controller.color())
         item.set_stroke(self._tool_controller.stroke())
         item.set_edit_callback(self._open_gdt_editor)
-        self._scene.push_add(item)
+        item.setParentItem(page)
+        self._open_gdt_inline(item, is_new=True)
 
     def _open_gdt_editor(self, item: GdtAnnotationItem) -> None:
-        old_state = item.state()
-        dlg = GdtDialog(old_state, self)
-        if dlg.exec() != GdtDialog.Accepted:
+        """Double-click entry point (edit callback on every GD&T item)."""
+        self._commit_gdt_editor_if_open()
+        self._open_gdt_inline(item, is_new=False)
+
+    def _open_gdt_inline(
+        self, item: GdtAnnotationItem, *, is_new: bool
+    ) -> None:
+        self._gdt_edit_item = item
+        self._gdt_edit_is_new = is_new
+        self._gdt_old_state = None if is_new else item.state()
+        editor = GdtInlineEditor(
+            item.state(),
+            self._view.viewport(),
+            icon_color=self._gdt_icon_color(),
+        )
+        editor.stateEdited.connect(self._on_gdt_state_edited)
+        editor.committed.connect(self._commit_gdt_editor)
+        editor.cancelled.connect(self._cancel_gdt_editor)
+        self._gdt_editor = editor
+        self._position_gdt_editor()
+        editor.open()
+
+    def _on_gdt_state_edited(self, state: GdtState) -> None:
+        # Live preview: the scene item itself shows every keystroke.
+        if self._gdt_edit_item is not None:
+            self._gdt_edit_item.set_state(state)
+            self._position_gdt_editor()
+
+    def _commit_gdt_editor_if_open(self) -> None:
+        if self._gdt_editor is not None:
+            self._commit_gdt_editor()
+
+    def _commit_gdt_editor(self) -> None:
+        editor = self._gdt_editor
+        item = self._gdt_edit_item
+        is_new = self._gdt_edit_is_new
+        old_state = self._gdt_old_state
+        if editor is None or item is None:
             return
-        new_state = dlg.result_state()
-        if new_state is None or new_state == old_state:
+        new_state = editor.current_state()
+        self._close_gdt_editor()
+
+        if is_new:
+            # Untouched frame -> rollback, like an empty text annotation.
+            if new_state == GdtState():
+                if item.scene() is not None:
+                    self._scene.removeItem(item)
+                return
+            item.set_state(new_state)
+            if item.scene() is not None:
+                self._scene.removeItem(item)
+            self._scene.push_add(item)
+            return
+
+        if old_state is None or new_state == old_state:
             return
         stack = self._undo_group.activeStack()
         cmd = ChangeGdtCommand(item, old_state, new_state)
@@ -968,6 +1164,49 @@ class MainWindow(QMainWindow):
         else:
             cmd.redo()
         self._on_annotations_changed()
+
+    def _cancel_gdt_editor(self) -> None:
+        item = self._gdt_edit_item
+        is_new = self._gdt_edit_is_new
+        old_state = self._gdt_old_state
+        self._close_gdt_editor()
+        if item is None:
+            return
+        if is_new:
+            if item.scene() is not None:
+                self._scene.removeItem(item)
+        elif old_state is not None:
+            item.set_state(old_state)
+
+    def _close_gdt_editor(self) -> None:
+        editor = self._gdt_editor
+        self._gdt_editor = None
+        self._gdt_edit_item = None
+        self._gdt_edit_is_new = False
+        self._gdt_old_state = None
+        if editor is not None:
+            editor.hide()
+            editor.deleteLater()
+        self._view.setFocus()
+
+    def _position_gdt_editor(self) -> None:
+        """Anchor the editor under the frame, clamped to the viewport."""
+        editor = self._gdt_editor
+        item = self._gdt_edit_item
+        if editor is None or item is None:
+            return
+        editor.adjustSize()
+        rect = item.mapToScene(item.content_rect()).boundingRect()
+        vp = self._view.viewport()
+        below = self._view.mapFromScene(rect.bottomLeft())
+        x = below.x()
+        y = below.y() + 8
+        if y + editor.height() > vp.height() - 4:
+            above = self._view.mapFromScene(rect.topLeft())
+            y = above.y() - editor.height() - 8
+        x = max(4, min(x, vp.width() - editor.width() - 4))
+        y = max(4, min(y, vp.height() - editor.height() - 4))
+        editor.move(int(x), int(y))
 
     # ------------------------------------------------------------------
     # drag & drop
@@ -1001,12 +1240,17 @@ class MainWindow(QMainWindow):
         apply_theme(theme)
         self.act_theme_light.setChecked(theme is Theme.LIGHT)
         self.act_theme_dark.setChecked(theme is Theme.DARK)
-        # GD&T symbol icons are pre-rasterized, so they need an explicit
+        # Code-drawn icons are pre-rasterized, so they need an explicit
         # repaint when the theme changes (light glyph on dark, vice versa).
-        icon_color = (
-            QColor("#e0e0e0") if theme is Theme.DARK else QColor("#212121")
+        self._tool_palette.set_icon_color(self._gdt_icon_color())
+        self._apply_icon_theme()
+
+    def _gdt_icon_color(self) -> QColor:
+        return (
+            QColor("#e0e0e0")
+            if self._theme is Theme.DARK
+            else QColor("#212121")
         )
-        self._gdt_palette.set_icon_color(icon_color)
 
     def _restore_settings(self) -> None:
         geom = self._settings.value("window/geometry")

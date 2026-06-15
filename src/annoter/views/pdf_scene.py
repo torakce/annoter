@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
@@ -29,9 +30,13 @@ from annoter.model.styles import HandleRole
 from annoter.controllers.tools import Tool, ToolController
 from annoter.views.items import (
     ArrowItem,
+    CalloutItem,
+    CloudItem,
     EllipseItem,
     FreehandItem,
     LineItem,
+    PolygonItem,
+    PolylineItem,
     RectangleItem,
     TextAnnotationItem,
 )
@@ -48,12 +53,21 @@ class PdfScene(QGraphicsScene):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._page_item: QGraphicsPixmapItem | None = None
+        # Hi-res viewport overlay: child of the page item, below the
+        # annotations (negative Z among siblings), purely visual.
+        self._hires_item: QGraphicsPixmapItem | None = None
         self._tool_controller: ToolController | None = None
         self._undo_stack: QUndoStack | None = None
 
         # Drawing state.
         self._draft_item: AnnotationItem | None = None
         self._draft_origin: QPointF | None = None
+
+        # Multi-click drawing state (polyline / polygon): the draft item
+        # shows the committed vertices plus a floating one tracking the
+        # cursor; clicks append, double-click / Enter finishes.
+        self._poly_draft: AnnotationItem | None = None
+        self._poly_points: list[QPointF] = []
 
         # Move tracking (SELECT tool).
         self._move_origins: dict[AnnotationItem, QPointF] = {}
@@ -69,6 +83,12 @@ class PdfScene(QGraphicsScene):
         self._dup_origin: QPointF | None = None
         self._dup_items: list[AnnotationItem] = []
         self._dup_start_positions: list[QPointF] = []
+        # Ctrl+press is ambiguous until the cursor moves: a plain click
+        # toggles the item's selection (multi-select), a drag past the
+        # platform drag threshold duplicates. Cloning is deferred.
+        self._dup_pending_item: AnnotationItem | None = None
+        self._dup_pending_scene: QPointF | None = None
+        self._dup_pending_screen: QPoint | None = None
 
     # ------------------------------------------------------------------
     # wiring
@@ -94,16 +114,42 @@ class PdfScene(QGraphicsScene):
             self.addItem(self._page_item)
         else:
             self._page_item.setPixmap(pixmap)
+        # The overlay belongs to the previous raster (possibly another
+        # page); MainWindow re-creates it after its debounce.
+        self.clear_hires_overlay()
         self.setSceneRect(self._page_item.boundingRect())
 
     def page_item(self) -> QGraphicsPixmapItem | None:
         return self._page_item
 
+    def set_hires_overlay(self, pixmap: QPixmap, pos: QPointF) -> None:
+        """Show `pixmap` at `pos` (page-local logical coords) over the page."""
+        if self._page_item is None:
+            return
+        if self._hires_item is None:
+            item = QGraphicsPixmapItem(self._page_item)
+            item.setTransformationMode(Qt.SmoothTransformation)
+            item.setZValue(-1.0)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            self._hires_item = item
+        self._hires_item.setPixmap(pixmap)
+        self._hires_item.setPos(pos)
+
+    def clear_hires_overlay(self) -> None:
+        if self._hires_item is None:
+            return
+        if self._hires_item.scene() is not None:
+            self.removeItem(self._hires_item)
+        self._hires_item = None
+
     def clear_page(self) -> None:
         self.clear()
         self._page_item = None
+        self._hires_item = None
         self._draft_item = None
         self._draft_origin = None
+        self._poly_draft = None
+        self._poly_points = []
         self._move_origins.clear()
         self._resize_item = None
         self._resize_role = None
@@ -112,6 +158,7 @@ class PdfScene(QGraphicsScene):
         self._dup_origin = None
         self._dup_items = []
         self._dup_start_positions = []
+        self._clear_dup_pending()
 
     def detach_children(self) -> list[AnnotationItem]:
         """Remove annotation children from the page item and return them.
@@ -121,6 +168,9 @@ class PdfScene(QGraphicsScene):
         """
         if self._page_item is None:
             return []
+        # A half-placed multi-click draft must not be persisted as a real
+        # annotation when the user navigates away.
+        self._discard_poly_draft()
         kids: list[AnnotationItem] = []
         for child in list(self._page_item.childItems()):
             if isinstance(child, AnnotationItem):
@@ -153,6 +203,8 @@ class PdfScene(QGraphicsScene):
                 pass
             self._draft_item = None
             self._draft_origin = None
+        self._discard_poly_draft()
+        self._clear_dup_pending()
         for it in list(self.selectedItems()):
             it.setSelected(False)
         if self._tool_controller is not None:
@@ -195,6 +247,12 @@ class PdfScene(QGraphicsScene):
             return
 
         tool = self._current_tool()
+        # Switching away from a poly tool mid-draft commits what's there.
+        if self._poly_draft is not None and tool not in (
+            Tool.POLYLINE,
+            Tool.POLYGON,
+        ):
+            self.finish_poly_draft()
         if not self._is_drawing_tool(tool):
             # Resize: hit-test handles on the topmost already-selected
             # item under the cursor. Must run before super() because
@@ -207,13 +265,25 @@ class PdfScene(QGraphicsScene):
                 self._resize_snapshot = item.geom_snapshot()
                 event.accept()
                 return
-            # Ctrl+click on an annotation starts a duplicate-drag. We
-            # short-circuit Qt's default to avoid its toggle-selection
-            # behavior on Ctrl+click, which would fight the duplicate.
+            # Shift+click toggles the clicked annotation in and out of
+            # the current selection (Qt only does this for Ctrl, which
+            # we reserve for duplicate-drag).
+            if event.modifiers() & Qt.ShiftModifier:
+                clicked = self._topmost_annotation_at(event.scenePos())
+                if clicked is not None:
+                    clicked.setSelected(not clicked.isSelected())
+                    event.accept()
+                    return
+            # Ctrl+press on an annotation: defer the decision -- a drag
+            # duplicates, a plain click toggles the selection. We
+            # short-circuit Qt's default either way so its own Ctrl
+            # handling does not fight the duplicate.
             if event.modifiers() & Qt.ControlModifier:
                 clicked = self._topmost_annotation_at(event.scenePos())
                 if clicked is not None:
-                    self._begin_duplicate_drag(clicked, event.scenePos())
+                    self._dup_pending_item = clicked
+                    self._dup_pending_scene = QPointF(event.scenePos())
+                    self._dup_pending_screen = QPoint(event.screenPos())
                     event.accept()
                     return
             super().mousePressEvent(event)
@@ -231,9 +301,14 @@ class PdfScene(QGraphicsScene):
             return
 
         if tool is Tool.GDT:
-            # Defer to MainWindow: opens GdtDialog and, on accept,
-            # constructs the item + pushes the Add command.
+            # Defer to MainWindow: spawns a draft frame and opens the
+            # in-place editor; the commit pushes the Add command.
             self.gdtPlacementRequested.emit(pos)
+            event.accept()
+            return
+
+        if tool in (Tool.POLYLINE, Tool.POLYGON):
+            self._poly_click(tool, pos)
             event.accept()
             return
 
@@ -245,9 +320,36 @@ class PdfScene(QGraphicsScene):
         event.accept()
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        if self._poly_draft is not None:
+            pos = event.scenePos()
+            if (
+                event.modifiers() & Qt.ShiftModifier
+                and self._poly_points
+            ):
+                pos = self._snap_angle(self._poly_points[-1], pos, 45.0)
+            self._poly_draft.set_points(self._poly_points + [pos])
+            event.accept()
+            return
         if self._resize_item is not None and self._resize_role is not None:
             local = self._resize_item.mapFromScene(event.scenePos())
             self._resize_item.apply_resize(self._resize_role, local)
+            event.accept()
+            return
+        if self._dup_pending_item is not None:
+            moved = (
+                event.screenPos() - self._dup_pending_screen
+            ).manhattanLength()
+            if moved >= QApplication.startDragDistance():
+                item = self._dup_pending_item
+                origin = self._dup_pending_scene
+                self._clear_dup_pending()
+                self._begin_duplicate_drag(item, origin)
+                # Catch up with the distance already travelled.
+                delta = event.scenePos() - origin
+                for it, start in zip(
+                    self._dup_items, self._dup_start_positions
+                ):
+                    it.setPos(start + delta)
             event.accept()
             return
         if self._dup_active and self._dup_origin is not None:
@@ -270,12 +372,25 @@ class PdfScene(QGraphicsScene):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        if self._poly_draft is not None:
+            # Vertices are placed on press; swallow the release so the
+            # base class does not start a selection / move on the draft.
+            event.accept()
+            return
         if event.button() != Qt.LeftButton:
             super().mouseReleaseEvent(event)
             return
 
         if self._resize_item is not None:
             self._flush_resize()
+            event.accept()
+            return
+
+        if self._dup_pending_item is not None:
+            # Ctrl+click without a drag: toggle the selection.
+            item = self._dup_pending_item
+            self._clear_dup_pending()
+            item.setSelected(not item.isSelected())
             event.accept()
             return
 
@@ -292,6 +407,78 @@ class PdfScene(QGraphicsScene):
         super().mouseReleaseEvent(event)
         self._flush_pending_moves()
 
+    def mouseDoubleClickEvent(
+        self, event: QGraphicsSceneMouseEvent
+    ) -> None:
+        if self._poly_draft is not None:
+            self.finish_poly_draft()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    # ------------------------------------------------------------------
+    # multi-click drafting (polyline / polygon)
+    # ------------------------------------------------------------------
+    _POLY_CLOSE_THRESHOLD = 8.0  # scene px to snap-close a polygon
+
+    def poly_draft_active(self) -> bool:
+        return self._poly_draft is not None
+
+    def _discard_poly_draft(self) -> None:
+        """Abandon any in-progress multi-click draft (no undo entry)."""
+        if self._poly_draft is not None:
+            if self._poly_draft.scene() is not None:
+                self.removeItem(self._poly_draft)
+            self._poly_draft = None
+            self._poly_points = []
+
+    def _poly_click(self, tool: Tool, pos: QPointF) -> None:
+        if self._page_item is None:
+            return
+        if self._poly_draft is None:
+            item: AnnotationItem = (
+                PolylineItem([pos, pos])
+                if tool is Tool.POLYLINE
+                else PolygonItem([pos, pos])
+            )
+            item.setParentItem(self._page_item)
+            self._apply_current_style(item)
+            self._poly_draft = item
+            self._poly_points = [QPointF(pos)]
+            return
+        # Click near the first vertex closes a polygon.
+        if (
+            isinstance(self._poly_draft, PolygonItem)
+            and len(self._poly_points) >= 3
+            and (pos - self._poly_points[0]).manhattanLength()
+            <= self._POLY_CLOSE_THRESHOLD
+        ):
+            self.finish_poly_draft()
+            return
+        self._poly_points.append(QPointF(pos))
+        self._poly_draft.set_points(self._poly_points + [QPointF(pos)])
+
+    def finish_poly_draft(self) -> None:
+        item = self._poly_draft
+        pts = list(self._poly_points)
+        self._poly_draft = None
+        self._poly_points = []
+        if item is None:
+            return
+        if item.scene() is not None:
+            self.removeItem(item)
+        # Drop consecutive near-duplicate vertices (e.g. the floating
+        # point coinciding with the last committed click).
+        cleaned: list[QPointF] = []
+        for p in pts:
+            if not cleaned or (p - cleaned[-1]).manhattanLength() > 0.5:
+                cleaned.append(p)
+        min_vertices = 3 if isinstance(item, PolygonItem) else 2
+        if len(cleaned) < min_vertices:
+            return  # not meaningful: drop without an undo entry
+        item.set_points(cleaned)
+        self._push_add(item)
+
     # ------------------------------------------------------------------
     # drafting
     # ------------------------------------------------------------------
@@ -303,12 +490,16 @@ class PdfScene(QGraphicsScene):
             return RectangleItem(rect)
         if tool is Tool.ELLIPSE:
             return EllipseItem(rect)
+        if tool is Tool.CLOUD:
+            return CloudItem(rect)
         if tool is Tool.LINE:
             return LineItem(pos, pos)
         if tool is Tool.ARROW:
             return ArrowItem(pos, pos)
         if tool is Tool.FREEHAND:
             return FreehandItem([pos])
+        if tool is Tool.CALLOUT:
+            return CalloutItem(pos)
         return None
 
     def _apply_current_style(self, item: AnnotationItem) -> None:
@@ -322,7 +513,7 @@ class PdfScene(QGraphicsScene):
         assert self._draft_origin is not None
         item = self._draft_item
         origin = self._draft_origin
-        if isinstance(item, (RectangleItem, EllipseItem)):
+        if isinstance(item, (RectangleItem, EllipseItem, CloudItem)):
             if constrained:
                 pos = self._square_from(origin, pos)
             item.set_rect(QRectF(origin, pos).normalized())
@@ -330,6 +521,11 @@ class PdfScene(QGraphicsScene):
             if constrained:
                 pos = self._snap_angle(origin, pos, step_deg=45.0)
             item.set_line_points(origin, pos)
+        elif isinstance(item, CalloutItem):
+            # Drag defines the leader: press = arrow tip (the feature),
+            # cursor = text-box anchor. Keep the tip pinned at `origin`.
+            item.setPos(pos)
+            item.set_tip(QPointF(origin.x() - pos.x(), origin.y() - pos.y()))
         elif isinstance(item, FreehandItem):
             item.add_point(pos)
 
@@ -377,6 +573,12 @@ class PdfScene(QGraphicsScene):
         if item is None or self._page_item is None:
             return
 
+        if isinstance(item, CalloutItem):
+            # Like text: stay parented and edit inline; the add command
+            # is pushed (or rolled back) when editing finishes.
+            self._finish_callout_draft(item)
+            return
+
         # Reject empty drafts (no drag).
         if not self._draft_is_meaningful(item):
             self.removeItem(item)
@@ -387,7 +589,7 @@ class PdfScene(QGraphicsScene):
         self._push_add(item)
 
     def _draft_is_meaningful(self, item: AnnotationItem) -> bool:
-        if isinstance(item, (RectangleItem, EllipseItem)):
+        if isinstance(item, (RectangleItem, EllipseItem, CloudItem)):
             r = item.rect()
             return r.width() > 1.0 and r.height() > 1.0
         if isinstance(item, (LineItem, ArrowItem)):
@@ -408,6 +610,14 @@ class PdfScene(QGraphicsScene):
         item = TextAnnotationItem(pos)
         self._apply_current_style(item)
         item.setParentItem(self._page_item)
+        item.editingFinished.connect(
+            lambda txt, it=item: self._on_text_edit_finished(it, txt)
+        )
+        item.begin_edit()
+
+    def _finish_callout_draft(self, item: CalloutItem) -> None:
+        # A click without a real drag leaves the tip at its default
+        # offset (set in the ctor), so the leader is always visible.
         item.editingFinished.connect(
             lambda txt, it=item: self._on_text_edit_finished(it, txt)
         )
@@ -525,6 +735,11 @@ class PdfScene(QGraphicsScene):
             if isinstance(it, AnnotationItem):
                 return it
         return None
+
+    def _clear_dup_pending(self) -> None:
+        self._dup_pending_item = None
+        self._dup_pending_scene = None
+        self._dup_pending_screen = None
 
     def _begin_duplicate_drag(
         self, clicked: AnnotationItem, origin: QPointF

@@ -3,10 +3,16 @@
 Mapping (M4):
     RectangleItem      -> Square
     EllipseItem        -> Circle
+    CloudItem          -> Polygon + cloudy border effect (/BE)
+    PolylineItem       -> PolyLine
+    PolygonItem        -> Polygon
     LineItem           -> Line
     ArrowItem          -> Line + endStyle OpenArrow
     FreehandItem       -> Ink
     TextAnnotationItem -> FreeText  (Helvetica only, for Acrobat compat)
+    CalloutItem        -> FreeText + /IT /FreeTextCallout + /CL leader
+                          line (leader geometry also in /Subject JSON, the
+                          authoritative source on reopen)
     GdtAnnotationItem  -> Square + JSON in `Contents` + rasterized
                           appearance stream (so Acrobat/Foxit show the
                           actual feature control frame)
@@ -37,10 +43,12 @@ from PySide6.QtWidgets import QStyleOptionGraphicsItem
 from annoter.model.gdt import GdtState
 from annoter.model.styles import DASH_PATTERNS, DashStyle, EndStyle, TextAlign
 from annoter.views.items.base import AnnotationItem
+from annoter.views.items.callout import CalloutItem
 from annoter.views.items.freehand import FreehandItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
-from annoter.views.items.shapes import EllipseItem, RectangleItem
+from annoter.views.items.poly import PolygonItem, PolylineItem
+from annoter.views.items.shapes import CloudItem, EllipseItem, RectangleItem
 from annoter.views.items.text import TextAnnotationItem
 
 
@@ -144,13 +152,17 @@ def _scene_rect(item) -> QRectF:
     `item.pos()` is the translation to apply to the local geometry.
     """
     pos = item.pos()
-    if isinstance(item, (RectangleItem, EllipseItem)):
+    if isinstance(item, (RectangleItem, EllipseItem, CloudItem)):
         r = item.rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
     if isinstance(item, GdtAnnotationItem):
         # content_rect, not boundingRect: the bounding rect includes the
         # selection/handle margin, which would shift the item's position
         # on every save/reopen cycle (the reader anchors on rect topleft).
+        r = item.content_rect()
+        return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
+    if isinstance(item, CalloutItem):
+        # The text box only; the leader is persisted separately.
         r = item.content_rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
     if isinstance(item, TextAnnotationItem):
@@ -178,7 +190,7 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
     """
     p: dict[str, object] = {"dash": item.dash_style().value}
     if isinstance(
-        item, (RectangleItem, EllipseItem, GdtAnnotationItem)
+        item, (RectangleItem, EllipseItem, CloudItem, GdtAnnotationItem)
     ):
         r = _scene_rect(item)
         p["rect_pt"] = [
@@ -205,6 +217,14 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
         if item.text():
             p["text"] = item.text()
             p["label_font_size"] = int(item.label_font_size())
+    elif isinstance(item, CloudItem):
+        p["poly"] = "cloud"
+        p["fill_enabled"] = bool(item.fill_enabled())
+        p["fill_color"] = item.fill_color().name()
+    elif isinstance(item, PolygonItem):
+        p["poly"] = "polygon"
+        p["fill_enabled"] = bool(item.fill_enabled())
+        p["fill_color"] = item.fill_color().name()
     elif isinstance(item, ArrowItem):
         p["start_end"] = item.start_end().value
         p["end_end"] = item.end_end().value
@@ -216,6 +236,15 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
         p["align"] = item.align().value
     elif isinstance(item, GdtAnnotationItem):
         p["font_size"] = int(item.font_size())
+    if isinstance(item, CalloutItem):
+        # Authoritative leader geometry (scene coords, in points): the
+        # native /CL is best-effort for external viewers only.
+        tip = item.tip()
+        pos = item.pos()
+        p["callout_tip_pt"] = [
+            _pt(pos.x() + tip.x(), dpi),
+            _pt(pos.y() + tip.y(), dpi),
+        ]
     return p
 
 
@@ -247,6 +276,11 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
             item.set_label_font_size(int(props["label_font_size"]))
         if "text" in props:
             item.set_text(str(props["text"]))
+    elif isinstance(item, (CloudItem, PolygonItem)):
+        if "fill_enabled" in props:
+            item.set_fill_enabled(bool(props["fill_enabled"]))
+        if "fill_color" in props:
+            item.set_fill_color(QColor(str(props["fill_color"])))
     elif isinstance(item, ArrowItem):
         try:
             if "start_end" in props:
@@ -316,6 +350,47 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         annot.update()
         return
 
+    if isinstance(item, CloudItem):
+        r = _scene_rect(item)
+        pts = [
+            fitz.Point(_pt(r.left(), dpi), _pt(r.top(), dpi)),
+            fitz.Point(_pt(r.right(), dpi), _pt(r.top(), dpi)),
+            fitz.Point(_pt(r.right(), dpi), _pt(r.bottom(), dpi)),
+            fitz.Point(_pt(r.left(), dpi), _pt(r.bottom(), dpi)),
+        ]
+        annot = page.add_polygon_annot(pts)
+        colors = {"stroke": color}
+        if item.fill_enabled():
+            colors["fill"] = _qcolor_to_rgb01(item.fill_color())
+        annot.set_colors(colors)
+        # Cloudy border effect so Acrobat/Foxit draw the scallops too.
+        annot.set_border(width=stroke, clouds=1)
+        annot.set_info(title=_OWNER_TAG, subject=subject)
+        annot.update()
+        return
+
+    if isinstance(item, (PolylineItem, PolygonItem)):
+        pos = item.pos()
+        pts = [
+            _point_pt(QPointF(p.x() + pos.x(), p.y() + pos.y()), dpi)
+            for p in item.points()
+        ]
+        if len(pts) < 2:
+            return
+        if isinstance(item, PolygonItem):
+            annot = page.add_polygon_annot(pts)
+            colors = {"stroke": color}
+            if item.fill_enabled():
+                colors["fill"] = _qcolor_to_rgb01(item.fill_color())
+            annot.set_colors(colors)
+        else:
+            annot = page.add_polyline_annot(pts)
+            annot.set_colors(stroke=color)
+        _set_dash_border(annot, stroke, item.dash_style())
+        annot.set_info(title=_OWNER_TAG, subject=subject)
+        annot.update()
+        return
+
     if isinstance(item, GdtAnnotationItem):
         rect_pt = _rect_pt(_scene_rect(item), dpi)
         annot = page.add_rect_annot(rect_pt)
@@ -375,6 +450,31 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         annot.update()
         return
 
+    if isinstance(item, CalloutItem):
+        rect = _scene_rect(item)
+        rect.adjust(0, 0, 4.0, 4.0)
+        rect_pt = _rect_pt(rect, dpi)
+        fontname = _TEXT_FONT_TO_PDF.get(item.font_family(), "Helv")
+        annot = page.add_freetext_annot(
+            rect_pt,
+            item.text(),
+            fontsize=int(item.font_size()),
+            fontname=fontname,
+            text_color=color,
+            border_color=None,
+            fill_color=None,
+        )
+        annot.set_info(title=_OWNER_TAG, subject=subject)
+        annot.update()
+        # Best-effort native callout line for external viewers. MuPDF's
+        # own appearance generator ignores /CL, but Acrobat honors it;
+        # Annoter rebuilds the leader from the JSON regardless.
+        try:
+            _set_callout_line(annot, item, dpi)
+        except Exception:
+            pass
+        return
+
     if isinstance(item, TextAnnotationItem):
         rect = _scene_rect(item)
         # Pad the rect a touch so Acrobat doesn't clip ascenders/descenders.
@@ -393,6 +493,42 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         annot.set_info(title=_OWNER_TAG, subject=subject)
         annot.update()
         return
+
+
+# ----------------------------------------------------------------------
+# callout leader line (native /CL for external viewers)
+# ----------------------------------------------------------------------
+def _set_callout_line(
+    annot: fitz.Annot, item: CalloutItem, dpi: int
+) -> None:
+    """Write /IT /FreeTextCallout and the /CL leader line.
+
+    /CL is in unrotated PDF user space (origin bottom-left, y up), so
+    each point's y is flipped through the page height. MuPDF does not
+    draw this in its generated appearance, but spec-compliant viewers
+    (Acrobat) do; Annoter itself rebuilds the leader from the JSON.
+    """
+    page = annot.parent
+    doc = page.parent
+    height = page.rect.height
+    pos = item.pos()
+    tip = item.tip()
+    conn = item.connection_point()
+
+    def to_pdf(local_x: float, local_y: float) -> tuple[float, float]:
+        x = _pt(pos.x() + local_x, dpi)
+        y = _pt(pos.y() + local_y, dpi)
+        return x, height - y
+
+    tx, ty = to_pdf(tip.x(), tip.y())
+    kx, ky = to_pdf(conn.x(), conn.y())
+    doc.xref_set_key(annot.xref, "IT", "/FreeTextCallout")
+    doc.xref_set_key(
+        annot.xref,
+        "CL",
+        f"[{tx:.2f} {ty:.2f} {kx:.2f} {ky:.2f}]",
+    )
+    doc.xref_set_key(annot.xref, "LE", "/OpenArrow")
 
 
 # ----------------------------------------------------------------------
@@ -519,6 +655,18 @@ def read_annotations(
     return out
 
 
+def _polygon_has_cloud_border(annot: fitz.Annot) -> bool:
+    """True if a Polygon annot carries a cloudy border effect (/BE /S /C).
+
+    Used to map foreign polygons (no Annoter props) to the right item.
+    """
+    try:
+        be = annot.parent.parent.xref_get_key(annot.xref, "BE")
+    except Exception:
+        return False
+    return be[0] != "null" and "/C" in (be[1] or "")
+
+
 def _annot_to_items(
     annot: fitz.Annot, dpi: int
 ) -> list[AnnotationItem]:
@@ -602,6 +750,58 @@ def _annot_to_items(
         _apply_props_to_item(item, props)
         return [item]
 
+    if subtype == "PolyLine":
+        verts = annot.vertices or []
+        pts = [QPointF(_px(x, dpi), _px(y, dpi)) for x, y in verts]
+        if len(pts) < 2:
+            return []
+        item = PolylineItem(pts)
+        item.set_color(qcolor)
+        item.set_stroke(width)
+        _apply_props_to_item(item, props)
+        return [item]
+
+    if subtype == "Polygon":
+        # Disambiguate our two Polygon-backed items. Explicit "poly" tag
+        # wins; otherwise a cloudy border (or a stored rect_pt) means a
+        # revision cloud, and a plain polygon maps to PolygonItem.
+        kind = props.get("poly")
+        is_cloud = (
+            kind == "cloud"
+            or (kind is None and "rect_pt" in props)
+            or (kind is None and _polygon_has_cloud_border(annot))
+        )
+        if is_cloud:
+            if "rect_pt" in props:
+                item = CloudItem(
+                    QRectF(0, 0, qrect.width(), qrect.height())
+                )
+                item.setPos(qrect.x(), qrect.y())
+            else:
+                verts = annot.vertices or []
+                if not verts:
+                    return []
+                xs = [_px(x, dpi) for x, y in verts]
+                ys = [_px(y, dpi) for x, y in verts]
+                bx, by = min(xs), min(ys)
+                item = CloudItem(
+                    QRectF(0, 0, max(xs) - bx, max(ys) - by)
+                )
+                item.setPos(bx, by)
+        else:
+            verts = annot.vertices or []
+            pts = [QPointF(_px(x, dpi), _px(y, dpi)) for x, y in verts]
+            if len(pts) < 3:
+                return []
+            item = PolygonItem(pts)
+        item.set_color(qcolor)
+        item.set_stroke(width)
+        if fill_rgb is not None and "fill_enabled" not in props:
+            item.set_fill_enabled(True)
+            item.set_fill_color(_rgb01_to_qcolor(fill_rgb))
+        _apply_props_to_item(item, props)
+        return [item]
+
     if subtype == "Line":
         verts = annot.vertices or []
         if len(verts) < 2:
@@ -664,7 +864,17 @@ def _annot_to_items(
                 pos = QPointF(_px(px, dpi), _px(py, dpi))
             except (TypeError, ValueError):
                 pass
-        item = TextAnnotationItem(pos, text)
+        if "callout_tip_pt" in props:
+            item = CalloutItem(pos, text)
+            try:
+                tx, ty = (float(v) for v in props["callout_tip_pt"])
+                item.set_tip(
+                    QPointF(_px(tx, dpi) - pos.x(), _px(ty, dpi) - pos.y())
+                )
+            except (TypeError, ValueError):
+                pass
+        else:
+            item = TextAnnotationItem(pos, text)
         item.set_color(qcolor)
         item.set_stroke(width)
         _apply_props_to_item(item, props)

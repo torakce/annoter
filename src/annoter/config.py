@@ -14,6 +14,14 @@ HIGH_RENDER_DPI = 300
 HIGH_DPI_ZOOM_THRESHOLD = 2.0
 HIGH_DPI_ZOOM_EXIT = 1.5
 
+# Hi-res viewport overlay. Beyond what the full-page pixmap can show
+# sharply, the visible clip is re-rasterized at exact screen resolution
+# after a short idle delay and laid over the page (memory stays bounded
+# by the viewport size, not the page size).
+HIRES_OVERLAY_MARGIN = 0.25  # extra border around the viewport (fraction)
+HIRES_MAX_PIXELS = 24_000_000  # safety cap for one overlay pixmap
+HIRES_DEBOUNCE_MS = 150
+
 # Zoom
 ZOOM_MIN = 0.1
 ZOOM_MAX = 16.0

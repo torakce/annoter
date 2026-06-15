@@ -32,9 +32,13 @@ _TOOL_LABELS: list[tuple[Tool, str]] = [
     (Tool.SELECT, "Select"),
     (Tool.RECTANGLE, "Rectangle"),
     (Tool.ELLIPSE, "Ellipse"),
+    (Tool.CLOUD, "Cloud"),
     (Tool.LINE, "Line"),
     (Tool.ARROW, "Arrow"),
+    (Tool.POLYLINE, "Polyline"),
+    (Tool.POLYGON, "Polygon"),
     (Tool.TEXT, "Text"),
+    (Tool.CALLOUT, "Callout"),
     (Tool.FREEHAND, "Freehand"),
 ]
 
@@ -211,6 +215,11 @@ class ToolPalette(QDockWidget):
     def _sync_tool_buttons(self, tool: Tool) -> None:
         for t, btn in self._tool_buttons.items():
             btn.setChecked(t is tool)
+
+    def set_icon_color(self, color: QColor) -> None:
+        """Repaint the tool icons. Called by MainWindow on theme change."""
+        for t, btn in self._tool_buttons.items():
+            btn.setIcon(tool_icon(t, color=color))
 
     def _sync_color_buttons(self, color: QColor) -> None:
         matched = False

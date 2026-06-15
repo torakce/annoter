@@ -8,8 +8,10 @@ round-trips preserve it.
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPen, QTextCursor
+from PySide6.QtGui import QBrush, QColor, QFont, QPainterPath, QPen, QTextCursor
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsSceneMouseEvent,
@@ -23,6 +25,69 @@ from annoter.views.items.base import AnnotationItem
 _DEFAULT_LABEL_FONT_FAMILY = "Helvetica"
 _DEFAULT_LABEL_POINT_SIZE = 11
 _LABEL_PADDING = 4.0
+
+# Target scallop radius (page pixels) for revision clouds.
+CLOUD_SCALLOP_RADIUS = 8.0
+
+
+def build_cloud_path(rect: QRectF, radius: float) -> QPainterPath:
+    """Revision-cloud outline: outward convex arcs along the rect
+    perimeter, traversed clockwise.
+
+    Each scallop arc is sampled into a few short line segments so the
+    result is independent of Qt's (y-down) arc-angle conventions and
+    fills cleanly. Used both by `CloudItem` and the tool icon.
+    """
+    path = QPainterPath()
+    r = QRectF(rect).normalized()
+    if r.width() < 1.0 or r.height() < 1.0:
+        path.addRect(r)
+        return path
+
+    corners = [
+        QPointF(r.left(), r.top()),
+        QPointF(r.right(), r.top()),
+        QPointF(r.right(), r.bottom()),
+        QPointF(r.left(), r.bottom()),
+    ]
+    target = max(2.0, 2.0 * radius)  # nominal scallop chord length
+    samples = 8
+    started = False
+    for i in range(4):
+        a = corners[i]
+        b = corners[(i + 1) % 4]
+        ex, ey = b.x() - a.x(), b.y() - a.y()
+        length = math.hypot(ex, ey)
+        if length < 1e-6:
+            continue
+        ex, ey = ex / length, ey / length
+        # Outward normal for clockwise traversal in screen (y-down) coords.
+        nx, ny = ey, -ex
+        n = max(1, round(length / target))
+        step = length / n
+        rad = step / 2.0
+        for k in range(n):
+            base_x = a.x() + ex * step * k
+            base_y = a.y() + ey * step * k
+            mid_x = base_x + ex * rad
+            mid_y = base_y + ey * rad
+            a0 = math.atan2(base_y - mid_y, base_x - mid_x)
+            # Sweep the half-circle whose midpoint bulges outward.
+            cand = a0 + math.pi / 2.0
+            sweep = math.pi
+            if math.cos(cand) * nx + math.sin(cand) * ny <= 0.0:
+                sweep = -math.pi
+            if not started:
+                path.moveTo(base_x, base_y)
+                started = True
+            for j in range(1, samples + 1):
+                ang = a0 + sweep * j / samples
+                path.lineTo(
+                    mid_x + rad * math.cos(ang),
+                    mid_y + rad * math.sin(ang),
+                )
+    path.closeSubpath()
+    return path
 
 
 class _ShapeTextItem(QGraphicsTextItem):
@@ -323,4 +388,49 @@ class EllipseItem(_ShapeItem):
         c.set_fill_color(self._fill_color)
         c.set_label_font_size(self._label_font_size)
         c.set_text(self._text)
+        return c
+
+
+class CloudItem(_ShapeItem):
+    """Revision cloud: a rectangle drawn with a scalloped (cloudy) border.
+
+    Reuses the shape resize/fill machinery; only the outline differs.
+    Persisted as a native PDF Polygon annotation with a cloudy border
+    effect so Acrobat/Foxit display the same scallops. Unlike the other
+    shapes, clouds carry no inline text label.
+    """
+
+    KIND = "cloud"
+
+    def scallop_radius(self) -> float:
+        return CLOUD_SCALLOP_RADIUS
+
+    def boundingRect(self) -> QRectF:
+        # The scallops bulge outward past `_rect`, so widen the margin.
+        m = (
+            self._stroke / 2.0
+            + self.scallop_radius()
+            + 1.0
+            + self.handles_extent()
+        )
+        return self._rect.adjusted(-m, -m, m, m)
+
+    def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
+        painter.setPen(self._pen())
+        painter.setBrush(self._brush())
+        painter.drawPath(build_cloud_path(self._rect, self.scallop_radius()))
+        self._draw_selection_marker(painter, self.boundingRect())
+
+    def mouseDoubleClickEvent(
+        self, event: QGraphicsSceneMouseEvent
+    ) -> None:
+        # Clouds have no text label; swallow the double-click so the base
+        # class does not drop the user into label-edit mode.
+        event.accept()
+
+    def clone(self) -> "CloudItem":
+        c = CloudItem(QRectF(self._rect))
+        self._copy_base_style_into(c)
+        c.set_fill_enabled(self._fill_enabled)
+        c.set_fill_color(self._fill_color)
         return c

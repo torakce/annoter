@@ -170,3 +170,66 @@ Changes landed after the M5 milestone, in git history from the initial commit on
 - Rendering is synchronous on the UI thread; an A0 page render blocks the UI for its duration. A background-render + progressive-display pass is the next perf candidate for >100 MB files.
 - Callout leaders are not drawn by MuPDF-based viewers (only Acrobat-class viewers honor `/CL`); making the leader visible everywhere would require authoring the FreeText `/AP` stream (text + line) with an expanded BBox, as the GD&T appearance does.
 - M5 clean-VM / USB-stick verification has still not been executed.
+
+## Roadmap / future work
+
+### How to add a new annotation tool (checklist)
+
+The four post-v1 tools (Cloud, Polyline/Polygon, Callout, Sticky Note)
+all touch the same set of files. Use this as the recipe for the next one:
+
+1. **Enum**: add the member to `controllers/tools.py::Tool` (the
+   palette/toolbar/icons iterate the enum, so ordering here is the
+   display order grouping).
+2. **Item**: add a `*Item(AnnotationItem)` (or subclass an existing item
+   to inherit behavior, as Callout does from text and Cloud from the
+   shape base) in `views/items/`. Implement `boundingRect`, `paint`,
+   `clone`, and -- if resizable -- `handle_positions` / `apply_resize` /
+   `geom_snapshot` / `apply_geom`. Handle "roles" are opaque to the
+   scene, so non-`HandleRole` keys (e.g. vertex indices) are fine.
+   Export it from `views/items/__init__.py`.
+3. **Drafting** in `views/pdf_scene.py`: drag-based tools go through
+   `_make_draft_item` / `_update_draft` / `_draft_is_meaningful`;
+   multi-click tools follow the polyline pattern (`_poly_*`); tools that
+   need MainWindow-level UI (text edit, GD&T frame, sticky note) emit a
+   `*PlacementRequested` signal and defer.
+4. **UI surfaces**: `views/tool_palette.py::_TOOL_LABELS`,
+   `views/main_window.py::_TOOLBAR_TOOLS`, a glyph in
+   `views/icons.py::tool_icon`, and the crosshair set in
+   `views/pdf_view.py::set_tool_cursor_for`. Icons are repainted on
+   theme change automatically (no extra wiring).
+5. **Properties dock** (`views/properties_dock.py`): add an
+   `issubclass` branch if the item has editable props beyond
+   color/stroke/dash.
+6. **Persistence** (`services/pdf_export.py`): map to a native
+   `fitz.Annot` subtype in `_write_item`, reconstruct in
+   `_annot_to_items`, and -- for anything MuPDF pads or cannot express
+   -- stash the authoritative geometry/props in the `/Subject` JSON
+   (`_props_payload` / `_apply_props_to_item`). Two of our items share
+   the `Polygon` subtype (Cloud vs Polygon), disambiguated by a `poly`
+   tag; keep new shared-subtype items disambiguable the same way.
+7. **Tests**: a round-trip in `tests/test_persistence.py` plus an
+   interaction test (`tests/test_poly.py`, `tests/test_callout.py`, or
+   `tests/test_main_window_wiring.py` for MainWindow-driven flows).
+8. Document the tool in this file's post-v1 section.
+
+### Backlog of candidate Acrobat-style tools (not yet built)
+
+Priority reflects value on mechanical drawings, not effort.
+
+- **Stamps** (already earmarked for v2 in CLAUDE.md): "APPROVED",
+  "REJECTED", "BON POUR EXECUTION", plus custom/date stamps. Native PDF
+  `Stamp` annotation with a rasterized or vector appearance stream
+  (reuse the GD&T appearance approach).
+- **Callout / sticky-note appearance for MuPDF viewers**: author the
+  FreeText `/AP` so the leader is visible everywhere, not only in
+  Acrobat (see Known issues).
+- **Dimension / measurement** (distance, with scale calibration): high
+  value in mechanical context but explicitly out of v1 scope; needs a
+  calibration UI. Native `Line`/`PolyLine` with a measure dictionary.
+- **Weld symbols** (ISO 2553): same composite-item approach as GD&T.
+- **File attachment** (`FileAttachment`) and **image stamp**: lower
+  priority for single-user plan review.
+- **Text markups** (Highlight / Underline / StrikeOut / Squiggly): low
+  value on scanned/vector plans with no selectable text layer; only
+  worth it if an OCR/text layer ever lands.

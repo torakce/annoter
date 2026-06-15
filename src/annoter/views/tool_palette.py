@@ -39,6 +39,7 @@ _TOOL_LABELS: list[tuple[Tool, str]] = [
     (Tool.POLYGON, "Polygon"),
     (Tool.TEXT, "Text"),
     (Tool.CALLOUT, "Callout"),
+    (Tool.STICKY_NOTE, "Sticky note"),
     (Tool.FREEHAND, "Freehand"),
 ]
 

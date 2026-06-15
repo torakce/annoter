@@ -33,6 +33,7 @@ from annoter.services.pdf_export import (  # noqa: E402
 )
 from annoter.views.items.callout import CalloutItem  # noqa: E402
 from annoter.views.items.freehand import FreehandItem  # noqa: E402
+from annoter.views.items.note import StickyNoteItem  # noqa: E402
 from annoter.views.items.gdt import GdtAnnotationItem  # noqa: E402
 from annoter.views.items.lines import ArrowItem, LineItem  # noqa: E402
 from annoter.views.items.poly import (  # noqa: E402
@@ -314,6 +315,24 @@ def test_callout_is_not_read_as_plain_text(qapp, blank_doc) -> None:
     reopened.close()
     kinds = sorted(type(it).__name__ for it in out[0])
     assert kinds == ["CalloutItem", "TextAnnotationItem"]
+
+
+def test_sticky_note_roundtrip(qapp, blank_doc) -> None:
+    item = StickyNoteItem(QPointF(80, 120), "Check this dimension")
+    item.set_color(QColor("#FFB300"))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    assert next(page.annots()).type[1] == "Text"
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert len(out[0]) == 1
+    restored = out[0][0]
+    assert isinstance(restored, StickyNoteItem)
+    assert restored.text() == "Check this dimension"
+    assert restored.pos().x() == pytest.approx(80, abs=0.5)
+    assert restored.pos().y() == pytest.approx(120, abs=0.5)
 
 
 def test_gdt_roundtrip_preserves_state(qapp, blank_doc) -> None:

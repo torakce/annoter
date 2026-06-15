@@ -26,6 +26,7 @@ class Tool(Enum):
     POLYGON = auto()
     TEXT = auto()
     CALLOUT = auto()
+    STICKY_NOTE = auto()
     FREEHAND = auto()
     GDT = auto()
 

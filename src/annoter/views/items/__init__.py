@@ -9,6 +9,7 @@ from annoter.views.items.callout import CalloutItem
 from annoter.views.items.freehand import FreehandItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
+from annoter.views.items.note import StickyNoteItem
 from annoter.views.items.poly import PolygonItem, PolylineItem
 from annoter.views.items.shapes import CloudItem, EllipseItem, RectangleItem
 from annoter.views.items.text import TextAnnotationItem
@@ -25,5 +26,6 @@ __all__ = [
     "PolygonItem",
     "PolylineItem",
     "RectangleItem",
+    "StickyNoteItem",
     "TextAnnotationItem",
 ]

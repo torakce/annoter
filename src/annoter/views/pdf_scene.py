@@ -49,6 +49,7 @@ class PdfScene(QGraphicsScene):
 
     annotationsChanged = Signal()  # emitted after add / delete
     gdtPlacementRequested = Signal(QPointF)  # GD&T tool clicked on the page
+    notePlacementRequested = Signal(QPointF)  # sticky-note tool clicked
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -304,6 +305,13 @@ class PdfScene(QGraphicsScene):
             # Defer to MainWindow: spawns a draft frame and opens the
             # in-place editor; the commit pushes the Add command.
             self.gdtPlacementRequested.emit(pos)
+            event.accept()
+            return
+
+        if tool is Tool.STICKY_NOTE:
+            # Defer to MainWindow: spawns a draft note and opens the
+            # floating note editor; commit pushes the Add command.
+            self.notePlacementRequested.emit(pos)
             event.accept()
             return
 

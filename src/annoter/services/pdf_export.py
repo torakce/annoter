@@ -13,6 +13,7 @@ Mapping (M4):
     CalloutItem        -> FreeText + /IT /FreeTextCallout + /CL leader
                           line (leader geometry also in /Subject JSON, the
                           authoritative source on reopen)
+    StickyNoteItem     -> Text (sticky note; note body in /Contents)
     GdtAnnotationItem  -> Square + JSON in `Contents` + rasterized
                           appearance stream (so Acrobat/Foxit show the
                           actual feature control frame)
@@ -47,6 +48,7 @@ from annoter.views.items.callout import CalloutItem
 from annoter.views.items.freehand import FreehandItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
+from annoter.views.items.note import StickyNoteItem
 from annoter.views.items.poly import PolygonItem, PolylineItem
 from annoter.views.items.shapes import CloudItem, EllipseItem, RectangleItem
 from annoter.views.items.text import TextAnnotationItem
@@ -200,6 +202,11 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
             _pt(r.height(), dpi),
         ]
     elif isinstance(item, TextAnnotationItem):
+        p["pos_pt"] = [
+            _pt(item.pos().x(), dpi),
+            _pt(item.pos().y(), dpi),
+        ]
+    elif isinstance(item, StickyNoteItem):
         p["pos_pt"] = [
             _pt(item.pos().x(), dpi),
             _pt(item.pos().y(), dpi),
@@ -446,6 +453,17 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         annot = page.add_ink_annot([stroke_pts])
         annot.set_colors(stroke=color)
         _set_dash_border(annot, stroke, item.dash_style())
+        annot.set_info(title=_OWNER_TAG, subject=subject)
+        annot.update()
+        return
+
+    if isinstance(item, StickyNoteItem):
+        pos = item.pos()
+        annot = page.add_text_annot(
+            _point_pt(QPointF(pos.x(), pos.y()), dpi),
+            item.text(),
+        )
+        annot.set_colors(stroke=color)
         annot.set_info(title=_OWNER_TAG, subject=subject)
         annot.update()
         return
@@ -747,6 +765,20 @@ def _annot_to_items(
         if fill_rgb is not None and "fill_enabled" not in props:
             item.set_fill_enabled(True)
             item.set_fill_color(_rgb01_to_qcolor(fill_rgb))
+        _apply_props_to_item(item, props)
+        return [item]
+
+    if subtype == "Text":
+        pos = QPointF(qrect.x(), qrect.y())
+        if "pos_pt" in props:
+            try:
+                px, py = (float(v) for v in props["pos_pt"])
+                pos = QPointF(_px(px, dpi), _px(py, dpi))
+            except (TypeError, ValueError):
+                pass
+        item = StickyNoteItem(pos, content)
+        item.set_color(qcolor)
+        item.set_stroke(width)
         _apply_props_to_item(item, props)
         return [item]
 

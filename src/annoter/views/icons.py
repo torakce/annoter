@@ -495,6 +495,30 @@ def tool_icon(tool: Tool, size: int = 64, color: QColor | None = None) -> QIcon:
             QPointF(divider_x + size * 0.08, mid_y),
             QPointF(frame.right() - size * 0.08, mid_y),
         )
+    elif tool is Tool.STICKY_NOTE:
+        # Speech bubble with a tail and a couple of text lines.
+        body = QRectF(margin, margin, size - 2 * margin, size * 0.5)
+        p.drawRoundedRect(body, size * 0.08, size * 0.08)
+        tail = QPolygonF([
+            QPointF(body.left() + body.width() * 0.2, body.bottom()),
+            QPointF(
+                body.left() + body.width() * 0.2,
+                body.bottom() + size * 0.18,
+            ),
+            QPointF(body.left() + body.width() * 0.46, body.bottom()),
+        ])
+        p.setBrush(c)
+        p.drawPolygon(tail)
+        p.setBrush(Qt.NoBrush)
+        line_pen = QPen(c)
+        line_pen.setWidthF(1.6)
+        p.setPen(line_pen)
+        for i in range(2):
+            y = body.top() + body.height() * (0.38 + i * 0.3)
+            p.drawLine(
+                QPointF(body.left() + size * 0.12, y),
+                QPointF(body.right() - size * 0.12, y),
+            )
     elif tool is Tool.FREEHAND:
         # Two cubic arcs forming a squiggle.
         path = QPainterPath()

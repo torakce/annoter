@@ -48,6 +48,7 @@ from annoter.controllers.commands import (
     AddAnnotationCommand,
     ChangeColorCommand,
     ChangeGdtCommand,
+    ChangePropsCommand,
     ChangeStrokeCommand,
     DeleteAnnotationsCommand,
     MoveAnnotationsCommand,
@@ -67,6 +68,8 @@ from annoter.views.gdt_editor import GdtInlineEditor
 from annoter.views.icons import action_icon, tool_icon
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.gdt import GdtAnnotationItem
+from annoter.views.items.note import StickyNoteItem
+from annoter.views.note_editor import NoteEditor
 from annoter.views.pdf_scene import PdfScene
 from annoter.views.pdf_view import PdfView
 from annoter.views.properties_dock import PropertiesDock
@@ -84,6 +87,7 @@ _TOOLBAR_TOOLS: list[tuple[Tool, str]] = [
     (Tool.POLYGON, "Polygon"),
     (Tool.TEXT, "Text"),
     (Tool.CALLOUT, "Callout"),
+    (Tool.STICKY_NOTE, "Sticky note"),
     (Tool.FREEHAND, "Freehand"),
     (Tool.GDT, "GD&T frame"),
 ]
@@ -121,11 +125,18 @@ class MainWindow(QMainWindow):
         self._gdt_edit_is_new: bool = False
         self._gdt_old_state: GdtState | None = None
 
+        # Floating sticky-note editor (one at a time, like the GD&T one).
+        self._note_editor: NoteEditor | None = None
+        self._note_edit_item: StickyNoteItem | None = None
+        self._note_edit_is_new: bool = False
+        self._note_old_text: str | None = None
+
         self._scene = PdfScene(self)
         self._scene.set_tool_controller(self._tool_controller)
         self._scene.annotationsChanged.connect(self._on_annotations_changed)
         self._scene.selectionChanged.connect(self._on_scene_selection_changed)
         self._scene.gdtPlacementRequested.connect(self._on_gdt_placement)
+        self._scene.notePlacementRequested.connect(self._on_note_placement)
 
         self._view = PdfView(self)
         self._view.setScene(self._scene)
@@ -555,12 +566,14 @@ class MainWindow(QMainWindow):
             self._page_items = read_annotations(doc.raw, BASE_RENDER_DPI)
         except Exception:
             self._page_items = {}
-        # Re-attach the GD&T edit callback that read_annotations could
-        # not know about.
+        # Re-attach the edit callbacks that read_annotations could not
+        # know about.
         for items in self._page_items.values():
             for it in items:
                 if isinstance(it, GdtAnnotationItem):
                     it.set_edit_callback(self._open_gdt_editor)
+                elif isinstance(it, StickyNoteItem):
+                    it.set_edit_callback(self._open_note_editor)
         self._recent.add(path)
         self._refresh_window_title()
         self._show_page(0, _is_initial=True)
@@ -588,6 +601,7 @@ class MainWindow(QMainWindow):
         if self._doc is None:
             return
         self._commit_gdt_editor_if_open()
+        self._commit_note_editor_if_open()
         target = self._doc.path
         confirm = QMessageBox.question(
             self,
@@ -605,6 +619,7 @@ class MainWindow(QMainWindow):
         if self._doc is None:
             return
         self._commit_gdt_editor_if_open()
+        self._commit_note_editor_if_open()
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save As",
@@ -669,8 +684,9 @@ class MainWindow(QMainWindow):
         self._open_path(str(target))
 
     def _on_close(self) -> None:
-        # Drop any in-progress GD&T edit with the document.
+        # Drop any in-progress in-place edits with the document.
         self._cancel_gdt_editor()
+        self._cancel_note_editor()
         if self._doc is not None:
             self._doc.close()
         self._doc = None
@@ -701,8 +717,9 @@ class MainWindow(QMainWindow):
         if self._renderer is None or self._doc is None:
             return
         index = max(0, min(self._doc.page_count - 1, index))
-        # An in-progress GD&T edit belongs to the leaving page.
+        # An in-progress in-place edit belongs to the leaving page.
         self._commit_gdt_editor_if_open()
+        self._commit_note_editor_if_open()
 
         # Stash the leaving page's annotations before swapping the pixmap.
         if not _is_initial and self._scene.page_item() is not None:
@@ -778,11 +795,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
         self._position_gdt_editor()
+        self._position_note_editor()
 
     def _on_view_scrolled(self, _value: int) -> None:
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
         self._position_gdt_editor()
+        self._position_note_editor()
 
     def _maybe_rerender_for_zoom(self, factor: float) -> None:
         """Hysteretic high-DPI re-render.
@@ -959,6 +978,8 @@ class MainWindow(QMainWindow):
             c.setPos(c.pos().x() + offset_x, c.pos().y() + offset_y)
             if isinstance(c, GdtAnnotationItem):
                 c.set_edit_callback(self._open_gdt_editor)
+            elif isinstance(c, StickyNoteItem):
+                c.set_edit_callback(self._open_note_editor)
             clones.append(c)
         if not clones:
             return
@@ -1204,6 +1225,118 @@ class MainWindow(QMainWindow):
         if y + editor.height() > vp.height() - 4:
             above = self._view.mapFromScene(rect.topLeft())
             y = above.y() - editor.height() - 8
+        x = max(4, min(x, vp.width() - editor.width() - 4))
+        y = max(4, min(y, vp.height() - editor.height() - 4))
+        editor.move(int(x), int(y))
+
+    # ------------------------------------------------------------------
+    # sticky note: floating editor lifecycle (mirrors the GD&T flow)
+    # ------------------------------------------------------------------
+    def _on_note_placement(self, scene_pos) -> None:
+        page = self._scene.page_item()
+        if page is None:
+            return
+        self._commit_note_editor_if_open()
+        item = StickyNoteItem(scene_pos)
+        item.set_color(self._tool_controller.color())
+        item.set_stroke(self._tool_controller.stroke())
+        item.set_edit_callback(self._open_note_editor)
+        item.setParentItem(page)
+        self._open_note_inline(item, is_new=True)
+
+    def _open_note_editor(self, item: StickyNoteItem) -> None:
+        """Double-click entry point (edit callback on every note item)."""
+        self._commit_note_editor_if_open()
+        self._open_note_inline(item, is_new=False)
+
+    def _open_note_inline(
+        self, item: StickyNoteItem, *, is_new: bool
+    ) -> None:
+        self._note_edit_item = item
+        self._note_edit_is_new = is_new
+        self._note_old_text = None if is_new else item.text()
+        editor = NoteEditor(item.text(), self._view.viewport())
+        editor.committed.connect(self._commit_note_editor)
+        editor.cancelled.connect(self._cancel_note_editor)
+        self._note_editor = editor
+        self._position_note_editor()
+        editor.open()
+
+    def _commit_note_editor_if_open(self) -> None:
+        if self._note_editor is not None:
+            self._commit_note_editor()
+
+    def _commit_note_editor(self) -> None:
+        editor = self._note_editor
+        item = self._note_edit_item
+        is_new = self._note_edit_is_new
+        old_text = self._note_old_text
+        if editor is None or item is None:
+            return
+        new_text = editor.current_text()
+        self._close_note_editor()
+
+        if is_new:
+            # An empty new note rolls back, like an empty text annotation.
+            if not new_text.strip():
+                if item.scene() is not None:
+                    self._scene.removeItem(item)
+                return
+            item.set_text(new_text)
+            if item.scene() is not None:
+                self._scene.removeItem(item)
+            self._scene.push_add(item)
+            return
+
+        if old_text is None or new_text == old_text:
+            return
+        stack = self._undo_group.activeStack()
+        cmd = ChangePropsCommand([(item, "text", old_text, new_text)])
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+        self._on_annotations_changed()
+
+    def _cancel_note_editor(self) -> None:
+        item = self._note_edit_item
+        is_new = self._note_edit_is_new
+        old_text = self._note_old_text
+        self._close_note_editor()
+        if item is None:
+            return
+        if is_new:
+            if item.scene() is not None:
+                self._scene.removeItem(item)
+        elif old_text is not None:
+            item.set_text(old_text)
+
+    def _close_note_editor(self) -> None:
+        editor = self._note_editor
+        self._note_editor = None
+        self._note_edit_item = None
+        self._note_edit_is_new = False
+        self._note_old_text = None
+        if editor is not None:
+            editor.hide()
+            editor.deleteLater()
+        self._view.setFocus()
+
+    def _position_note_editor(self) -> None:
+        editor = self._note_editor
+        item = self._note_edit_item
+        if editor is None or item is None:
+            return
+        editor.adjustSize()
+        rect = item.mapToScene(item.content_rect()).boundingRect()
+        vp = self._view.viewport()
+        below = self._view.mapFromScene(rect.bottomRight())
+        x = below.x() + 8
+        y = below.y() + 8
+        if x + editor.width() > vp.width() - 4:
+            x = self._view.mapFromScene(rect.topLeft()).x() - editor.width() - 8
+        if y + editor.height() > vp.height() - 4:
+            y = vp.height() - editor.height() - 4
         x = max(4, min(x, vp.width() - editor.width() - 4))
         y = max(4, min(y, vp.height() - editor.height() - 4))
         editor.move(int(x), int(y))

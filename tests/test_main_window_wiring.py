@@ -21,6 +21,7 @@ from annoter.controllers.commands import AddAnnotationCommand  # noqa: E402
 from annoter.controllers.tools import Tool  # noqa: E402
 from annoter.views.items import EllipseItem, RectangleItem  # noqa: E402
 from annoter.views.items.base import AnnotationItem  # noqa: E402
+from annoter.views.items.note import StickyNoteItem  # noqa: E402
 from annoter.views.main_window import MainWindow  # noqa: E402
 
 
@@ -182,6 +183,47 @@ def test_tool_palette_and_annotation_list_present(qapp) -> None:
         assert win._tool_palette is not None
         assert win._annotation_list is not None
     finally:
+        win.close()
+
+
+def _page_notes(win: MainWindow) -> list[StickyNoteItem]:
+    page = win._scene.page_item()
+    return [
+        c for c in page.childItems() if isinstance(c, StickyNoteItem)
+    ]
+
+
+def test_sticky_note_placement_and_commit(qapp, sample_pdf: Path) -> None:
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        win._tool_controller.set_tool(Tool.STICKY_NOTE)
+        win._on_note_placement(QPointF(100, 100))
+        assert win._note_editor is not None
+        win._note_editor._edit.setPlainText("Inspect weld")
+        win._commit_note_editor()
+        assert win._note_editor is None
+        notes = _page_notes(win)
+        assert len(notes) == 1
+        assert notes[0].text() == "Inspect weld"
+        # Committing a placement returns to the Select tool.
+        assert win._tool_controller.tool() is Tool.SELECT
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_sticky_note_empty_rolls_back(qapp, sample_pdf: Path) -> None:
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        win._tool_controller.set_tool(Tool.STICKY_NOTE)
+        win._on_note_placement(QPointF(120, 140))
+        win._note_editor._edit.setPlainText("   ")
+        win._commit_note_editor()
+        assert _page_notes(win) == []
+    finally:
+        win._on_close()
         win.close()
 
 

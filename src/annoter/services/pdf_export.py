@@ -14,6 +14,8 @@ Mapping (M4):
                           line (leader geometry also in /Subject JSON, the
                           authoritative source on reopen)
     StickyNoteItem     -> Text (sticky note; note body in /Contents)
+    StampItem          -> Stamp + rasterized appearance stream (text /
+                          size in /Subject JSON)
     GdtAnnotationItem  -> Square + JSON in `Contents` + rasterized
                           appearance stream (so Acrobat/Foxit show the
                           actual feature control frame)
@@ -51,6 +53,7 @@ from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.note import StickyNoteItem
 from annoter.views.items.poly import PolygonItem, PolylineItem
 from annoter.views.items.shapes import CloudItem, EllipseItem, RectangleItem
+from annoter.views.items.stamp import StampItem
 from annoter.views.items.text import TextAnnotationItem
 
 
@@ -163,8 +166,8 @@ def _scene_rect(item) -> QRectF:
         # on every save/reopen cycle (the reader anchors on rect topleft).
         r = item.content_rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
-    if isinstance(item, CalloutItem):
-        # The text box only; the leader is persisted separately.
+    if isinstance(item, (CalloutItem, StampItem)):
+        # The content box only (callout leader / stamp glyph aside).
         r = item.content_rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
     if isinstance(item, TextAnnotationItem):
@@ -192,7 +195,8 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
     """
     p: dict[str, object] = {"dash": item.dash_style().value}
     if isinstance(
-        item, (RectangleItem, EllipseItem, CloudItem, GdtAnnotationItem)
+        item,
+        (RectangleItem, EllipseItem, CloudItem, GdtAnnotationItem, StampItem),
     ):
         r = _scene_rect(item)
         p["rect_pt"] = [
@@ -242,6 +246,9 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
         p["italic"] = bool(item.italic())
         p["align"] = item.align().value
     elif isinstance(item, GdtAnnotationItem):
+        p["font_size"] = int(item.font_size())
+    elif isinstance(item, StampItem):
+        p["text"] = item.text()
         p["font_size"] = int(item.font_size())
     if isinstance(item, CalloutItem):
         # Authoritative leader geometry (scene coords, in points): the
@@ -311,6 +318,11 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
             except ValueError:
                 pass
     elif isinstance(item, GdtAnnotationItem):
+        if "font_size" in props:
+            item.set_font_size(int(props["font_size"]))
+    elif isinstance(item, StampItem):
+        if "text" in props:
+            item.set_text(str(props["text"]))
         if "font_size" in props:
             item.set_font_size(int(props["font_size"]))
 
@@ -407,7 +419,7 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         _set_dash_border(annot, stroke, item.dash_style())
         annot.update()
         try:
-            _set_gdt_appearance(annot, item, dpi)
+            _set_rasterized_appearance(annot, item, dpi)
         except Exception:
             # The appearance is cosmetic for external viewers; never let
             # it break a save. Acrobat falls back to a plain rectangle.
@@ -466,6 +478,20 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         annot.set_colors(stroke=color)
         annot.set_info(title=_OWNER_TAG, subject=subject)
         annot.update()
+        return
+
+    if isinstance(item, StampItem):
+        rect_pt = _rect_pt(_scene_rect(item), dpi)
+        annot = page.add_stamp_annot(rect_pt)
+        annot.set_colors(stroke=color)
+        annot.set_info(title=_OWNER_TAG, subject=subject)
+        annot.update()
+        try:
+            _set_rasterized_appearance(annot, item, dpi)
+        except Exception:
+            # Appearance is cosmetic for external viewers; never let it
+            # break a save. Annoter rebuilds the item from the JSON.
+            pass
         return
 
     if isinstance(item, CalloutItem):
@@ -550,15 +576,19 @@ def _set_callout_line(
 
 
 # ----------------------------------------------------------------------
-# GD&T appearance stream
+# rasterized appearance stream (shared by GD&T frames and stamps)
 # ----------------------------------------------------------------------
 _GDT_AP_PX_PER_PT = 3.0  # raster density of the appearance image
 
 
-def _gdt_frame_planes(
-    item: GdtAnnotationItem, dpi: int
+def _rasterize_item_planes(
+    item, dpi: int
 ) -> tuple[bytes, bytes, int, int]:
-    """Rasterize the frame to raw (RGB, alpha) planes, top-down rows."""
+    """Rasterize an item's `content_rect` to raw (RGB, alpha) planes.
+
+    Works for any item exposing `content_rect()` and `paint()`; used for
+    GD&T frames and stamps, whose native annot appearance we replace so
+    external viewers show the real glyphs."""
     src = item.content_rect()
     # Item units are page pixels at `dpi`; target density is
     # _GDT_AP_PX_PER_PT device pixels per PDF point.
@@ -594,20 +624,20 @@ def _gdt_frame_planes(
     return bytes(rgb), bytes(alpha), w, h
 
 
-def _set_gdt_appearance(
-    annot: fitz.Annot, item: GdtAnnotationItem, dpi: int
+def _set_rasterized_appearance(
+    annot: fitz.Annot, item, dpi: int
 ) -> None:
-    """Replace the Square's appearance stream with the rendered frame.
+    """Replace the annot's appearance stream with the rendered item.
 
     External viewers (Acrobat, Foxit) display whatever is in /AP/N, so
-    they show the actual feature control frame instead of an empty
-    rectangle. The image carries an /SMask so the page content stays
-    visible around the cells. Annoter itself ignores the appearance and
-    rebuilds the editable item from the JSON in /Contents.
+    they show the actual feature control frame / stamp instead of an
+    empty rectangle. The image carries an /SMask so the page content
+    stays visible around the glyphs. Annoter itself ignores the
+    appearance and rebuilds the editable item from the JSON.
     """
     page = annot.parent
     doc = page.parent
-    rgb, alpha, w, h = _gdt_frame_planes(item, dpi)
+    rgb, alpha, w, h = _rasterize_item_planes(item, dpi)
 
     smask_xref = doc.get_new_xref()
     doc.update_object(
@@ -640,7 +670,7 @@ def _set_gdt_appearance(
     y = rect.y1 - exact.y1
     content = (
         f"q {exact.width:.4f} 0 0 {exact.height:.4f} "
-        f"{x:.4f} {y:.4f} cm /AnnoterGdt Do Q"
+        f"{x:.4f} {y:.4f} cm /AnnoterAP Do Q"
     ).encode()
     doc.update_stream(ap_xref, content)
     doc.xref_set_key(ap_xref, "BBox", f"[0 0 {w_pt:.4f} {h_pt:.4f}]")
@@ -648,7 +678,7 @@ def _set_gdt_appearance(
     doc.xref_set_key(
         ap_xref,
         "Resources",
-        f"<</XObject<</AnnoterGdt {img_xref} 0 R>>>>",
+        f"<</XObject<</AnnoterAP {img_xref} 0 R>>>>",
     )
 
 
@@ -777,6 +807,16 @@ def _annot_to_items(
             except (TypeError, ValueError):
                 pass
         item = StickyNoteItem(pos, content)
+        item.set_color(qcolor)
+        item.set_stroke(width)
+        _apply_props_to_item(item, props)
+        return [item]
+
+    if subtype == "Stamp":
+        item = StampItem(
+            QPointF(qrect.x(), qrect.y()),
+            props.get("text", "") or content,
+        )
         item.set_color(qcolor)
         item.set_stroke(width)
         _apply_props_to_item(item, props)

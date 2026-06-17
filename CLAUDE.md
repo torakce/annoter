@@ -77,4 +77,4 @@ python build.py                  # M5: builds both onefile .exe and onedir zip
 
 ## Out of scope for v1
 
-Stamps ("APPROVED" / "REJECTED" / "BON POUR EXÉCUTION") — deferred to v2. No collaboration, no multi-user, no OCR, no scale calibration / measurement.
+Stamps ("APPROVED" / "REJECTED" / "BON POUR EXÉCUTION") were deferred from v1 but have since been implemented post-v1 (see PLAN.md). No collaboration, no multi-user, no OCR, no scale calibration / measurement.

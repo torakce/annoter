@@ -519,6 +519,28 @@ def tool_icon(tool: Tool, size: int = 64, color: QColor | None = None) -> QIcon:
                 QPointF(body.left() + size * 0.12, y),
                 QPointF(body.right() - size * 0.12, y),
             )
+    elif tool is Tool.STAMP:
+        # Double-bordered tilted box with a check mark (rubber stamp).
+        p.save()
+        p.translate(size / 2.0, size / 2.0)
+        p.rotate(-12.0)
+        p.translate(-size / 2.0, -size / 2.0)
+        box = QRectF(margin, size * 0.34, size - 2 * margin, size * 0.32)
+        p.drawRoundedRect(box, size * 0.05, size * 0.05)
+        inner_pen = QPen(c)
+        inner_pen.setWidthF(1.2)
+        p.setPen(inner_pen)
+        p.drawRoundedRect(
+            box.adjusted(size * 0.05, size * 0.05, -size * 0.05, -size * 0.05),
+            size * 0.03,
+            size * 0.03,
+        )
+        check = QPainterPath()
+        check.moveTo(box.left() + box.width() * 0.18, box.center().y())
+        check.lineTo(box.left() + box.width() * 0.38, box.bottom() - size * 0.06)
+        check.lineTo(box.left() + box.width() * 0.62, box.top() + size * 0.05)
+        p.drawPath(check)
+        p.restore()
     elif tool is Tool.FREEHAND:
         # Two cubic arcs forming a squiggle.
         path = QPainterPath()

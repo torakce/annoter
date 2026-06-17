@@ -37,6 +37,7 @@ from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.poly import PolygonItem, PolylineItem
 from annoter.views.items.shapes import CloudItem, EllipseItem, RectangleItem
+from annoter.views.items.stamp import STAMP_PRESETS, StampItem
 from annoter.views.items.text import TEXT_FONT_FAMILIES, TextAnnotationItem
 
 
@@ -152,6 +153,8 @@ class PropertiesDock(QDockWidget):
                 self._add_text_rows(form)
             elif issubclass(cls, GdtAnnotationItem):
                 self._add_gdt_rows(form)
+            elif issubclass(cls, StampItem):
+                self._add_stamp_rows(form)
             elif issubclass(cls, FreehandItem):
                 pass
 
@@ -326,6 +329,65 @@ class PropertiesDock(QDockWidget):
             lambda _i, c=align: self._push_prop("align", c.currentData())
         )
         form.addRow("Align", align)
+
+    def _add_stamp_rows(self, form: QFormLayout) -> None:
+        first = self._items[0]
+
+        preset = QComboBox()
+        for label, _hex in STAMP_PRESETS:
+            preset.addItem(label, label)
+        preset.addItem("Custom...", None)
+        match = next(
+            (i for i, (lbl, _h) in enumerate(STAMP_PRESETS)
+             if lbl == first.text()),
+            len(STAMP_PRESETS),  # "Custom"
+        )
+        preset.setCurrentIndex(match)
+        preset.activated.connect(
+            lambda _i, c=preset: self._apply_stamp_preset(c.currentData())
+        )
+        form.addRow("Preset", preset)
+
+        text_edit = QLineEdit()
+        text_edit.setText(first.text())
+        text_edit.editingFinished.connect(
+            lambda e=text_edit: self._push_prop("text", e.text())
+        )
+        form.addRow("Text", text_edit)
+
+        size = QSpinBox()
+        size.setRange(6, 96)
+        size.setValue(int(first.font_size()))
+        size.editingFinished.connect(
+            lambda s=size: self._push_prop("font_size", int(s.value()))
+        )
+        form.addRow("Size", size)
+
+    def _apply_stamp_preset(self, label: object) -> None:
+        """Set a preset's text and color in one undo step; 'Custom' is a
+        no-op (the user edits the text/color fields directly)."""
+        if not label or not self._items:
+            return
+        color_hex = next(
+            (h for lbl, h in STAMP_PRESETS if lbl == label), None
+        )
+        if color_hex is None:
+            return
+        new_color = QColor(color_hex)
+        changes = []
+        for it in self._items:
+            if it.text() != label:
+                changes.append((it, "text", it.text(), str(label)))
+            if it.color() != new_color:
+                changes.append((it, "color", it.color(), QColor(new_color)))
+        if not changes:
+            return
+        cmd = ChangePropsCommand(changes)
+        if self._undo_stack is not None:
+            self._undo_stack.push(cmd)
+        else:
+            cmd.redo()
+        self._rebuild()
 
     def _add_gdt_rows(self, form: QFormLayout) -> None:
         first = self._items[0]

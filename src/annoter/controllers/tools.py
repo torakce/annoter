@@ -27,6 +27,7 @@ class Tool(Enum):
     TEXT = auto()
     CALLOUT = auto()
     STICKY_NOTE = auto()
+    STAMP = auto()
     FREEHAND = auto()
     GDT = auto()
 

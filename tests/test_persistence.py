@@ -34,6 +34,7 @@ from annoter.services.pdf_export import (  # noqa: E402
 from annoter.views.items.callout import CalloutItem  # noqa: E402
 from annoter.views.items.freehand import FreehandItem  # noqa: E402
 from annoter.views.items.note import StickyNoteItem  # noqa: E402
+from annoter.views.items.stamp import StampItem  # noqa: E402
 from annoter.views.items.gdt import GdtAnnotationItem  # noqa: E402
 from annoter.views.items.lines import ArrowItem, LineItem  # noqa: E402
 from annoter.views.items.poly import (  # noqa: E402
@@ -333,6 +334,42 @@ def test_sticky_note_roundtrip(qapp, blank_doc) -> None:
     assert restored.text() == "Check this dimension"
     assert restored.pos().x() == pytest.approx(80, abs=0.5)
     assert restored.pos().y() == pytest.approx(120, abs=0.5)
+
+
+def test_stamp_roundtrip(qapp, blank_doc) -> None:
+    item = StampItem(QPointF(100, 80), "BON POUR EXÉCUTION")
+    item.set_color(QColor("#1565C0"))
+    item.set_font_size(18)
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    assert next(page.annots()).type[1] == "Stamp"
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert len(out[0]) == 1
+    restored = out[0][0]
+    assert isinstance(restored, StampItem)
+    assert restored.text() == "BON POUR EXÉCUTION"
+    assert restored.font_size() == 18
+    assert restored.pos().x() == pytest.approx(100, abs=0.5)
+    assert restored.pos().y() == pytest.approx(80, abs=0.5)
+
+
+def test_stamp_appearance_visible_in_external_viewer(qapp, blank_doc) -> None:
+    """The Stamp must carry an appearance stream that draws the label,
+    not just an empty rectangle (rendered via MuPDF as a viewer would)."""
+    item = StampItem(QPointF(100, 100), "APPROVED")
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = next(page.annots())
+    r = annot.rect
+    pix = page.get_pixmap(clip=r, matrix=fitz.Matrix(3, 3))
+    reopened.close()
+    dark = sum(1 for b in pix.samples if b < 128)
+    assert dark > 50, "appearance stream did not draw the stamp"
 
 
 def test_gdt_roundtrip_preserves_state(qapp, blank_doc) -> None:

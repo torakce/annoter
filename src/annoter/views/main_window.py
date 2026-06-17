@@ -88,6 +88,7 @@ _TOOLBAR_TOOLS: list[tuple[Tool, str]] = [
     (Tool.TEXT, "Text"),
     (Tool.CALLOUT, "Callout"),
     (Tool.STICKY_NOTE, "Sticky note"),
+    (Tool.STAMP, "Stamp"),
     (Tool.FREEHAND, "Freehand"),
     (Tool.GDT, "GD&T frame"),
 ]

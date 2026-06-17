@@ -12,6 +12,7 @@ from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.note import StickyNoteItem
 from annoter.views.items.poly import PolygonItem, PolylineItem
 from annoter.views.items.shapes import CloudItem, EllipseItem, RectangleItem
+from annoter.views.items.stamp import StampItem
 from annoter.views.items.text import TextAnnotationItem
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "PolygonItem",
     "PolylineItem",
     "RectangleItem",
+    "StampItem",
     "StickyNoteItem",
     "TextAnnotationItem",
 ]

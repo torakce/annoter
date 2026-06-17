@@ -38,6 +38,7 @@ from annoter.views.items import (
     PolygonItem,
     PolylineItem,
     RectangleItem,
+    StampItem,
     TextAnnotationItem,
 )
 from annoter.views.items.base import AnnotationItem
@@ -312,6 +313,15 @@ class PdfScene(QGraphicsScene):
             # Defer to MainWindow: spawns a draft note and opens the
             # floating note editor; commit pushes the Add command.
             self.notePlacementRequested.emit(pos)
+            event.accept()
+            return
+
+        if tool is Tool.STAMP:
+            # One-click placement of a default stamp; the user re-types
+            # the label / recolors it in the Properties dock.
+            item = StampItem(pos)
+            item.setParentItem(self._page_item)
+            self._push_add(item)
             event.accept()
             return
 

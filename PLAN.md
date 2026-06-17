@@ -163,6 +163,26 @@ Changes landed after the M5 milestone, in git history from the initial commit on
 
 - **Sticky Note tool** (2026-06-16): `Tool.STICKY_NOTE` -- a small comment-bubble marker with a text note, mirroring Acrobat's sticky note. `StickyNoteItem` (in `views/items/note.py`) is a fixed-size icon (page pixels, scales with zoom) carrying the note body; it has no resize handles (movable only), shows the note as a hover tooltip, and exposes `set_edit_callback` for double-click editing like `GdtAnnotationItem`. Editing uses a **floating popup**, `views/note_editor.py::NoteEditor` (a `QPlainTextEdit` in a `QFrame` parented to the viewport), following the same lifecycle contract as `GdtInlineEditor`: committed on Ctrl+Enter / confirm button / focus-out, cancelled on Escape, an empty new note rolls back like an empty text annotation. MainWindow drives it with the GD&T-parallel methods (`_on_note_placement`, `_open_note_inline`, `_commit_note_editor`, `_cancel_note_editor`, `_position_note_editor`) wired into the same hooks (save, page switch, document close, zoom/scroll reposition, edit-callback re-attach on read/paste); existing-note text edits go through `ChangePropsCommand("text")`. The scene emits `notePlacementRequested(QPointF)` on a click with the tool active. Persisted as a native PDF **Text** annotation (`add_text_annot`, note body in `/Contents`), so it opens as a real sticky note in Acrobat/Foxit; exact position round-trips via `pos_pt`. Tests in `tests/test_main_window_wiring.py` (placement + commit/rollback) and `tests/test_persistence.py` (round-trip).
 
+- **Stamp tool** (2026-06-16): `Tool.STAMP` -- a rubber-stamp marker
+  (preset labels APPROVED / REJECTED / BON POUR EXÉCUTION, or custom
+  text), the first item out of the post-v1 backlog and previously
+  earmarked for v2 in CLAUDE.md. `StampItem` (in `views/items/stamp.py`)
+  is a bold uppercase label in a double rounded border tinted with the
+  stamp color; the box auto-sizes to the text and font size is an
+  editable property (no resize handles, movable only), like the GD&T
+  frame. One-click placement in `PdfScene` (no editor) drops a default
+  APPROVED stamp and returns to Select; the user re-labels / recolors it
+  via the Properties dock, where a preset combo sets text+color in one
+  `ChangePropsCommand`. Persisted as a native PDF **Stamp** annotation
+  with a rasterized appearance stream so Acrobat/Foxit show the real
+  stamp, plus text/size in the `/Subject` JSON for editable
+  reconstruction. The GD&T appearance machinery was generalized for this:
+  `_gdt_frame_planes` -> `_rasterize_item_planes` and
+  `_set_gdt_appearance` -> `_set_rasterized_appearance` (resource name
+  `/AnnoterGdt` -> `/AnnoterAP`), now shared by both items. Tests in
+  `tests/test_stamp.py` (placement + preset) and
+  `tests/test_persistence.py` (round-trip + appearance-visible).
+
 ### Known remaining issues
 
 - Page rotation is still view-only (see M4 notes).
@@ -217,10 +237,10 @@ all touch the same set of files. Use this as the recipe for the next one:
 
 Priority reflects value on mechanical drawings, not effort.
 
-- **Stamps** (already earmarked for v2 in CLAUDE.md): "APPROVED",
-  "REJECTED", "BON POUR EXECUTION", plus custom/date stamps. Native PDF
-  `Stamp` annotation with a rasterized or vector appearance stream
-  (reuse the GD&T appearance approach).
+- ~~**Stamps**~~ DONE (2026-06-16, see post-v1 section). Possible
+  follow-ups: a pre-placement stamp picker in the palette (currently the
+  preset is chosen after placement via the dock), date/dynamic stamps,
+  and slight rotation for a more rubber-stamp look.
 - **Callout / sticky-note appearance for MuPDF viewers**: author the
   FreeText `/AP` so the leader is visible everywhere, not only in
   Acrobat (see Known issues).

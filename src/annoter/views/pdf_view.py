@@ -133,6 +133,7 @@ class PdfView(QGraphicsView):
             Tool.POLYGON,
             Tool.CALLOUT,
             Tool.STICKY_NOTE,
+            Tool.STAMP,
             Tool.FREEHAND,
             Tool.GDT,
         ):

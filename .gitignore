@@ -35,3 +35,6 @@ htmlcov/
 
 # Local config
 *.local
+
+# Dev screenshots / scratch images (root)
+/*.png

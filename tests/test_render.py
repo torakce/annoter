@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
-from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -13,7 +11,7 @@ import pytest
 pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
 
 import fitz  # noqa: E402
-from PySide6.QtCore import QPointF, QRectF  # noqa: E402
+from PySide6.QtCore import QRectF  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from annoter.model.document import PdfDocument  # noqa: E402

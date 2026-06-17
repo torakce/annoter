@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from annoter.controllers.tools import Tool, ToolController  # noqa: E402
-from annoter.views.items.base import AnnotationItem  # noqa: E402
 from annoter.views.items.stamp import StampItem  # noqa: E402
 from annoter.views.pdf_scene import PdfScene  # noqa: E402
 from annoter.views.properties_dock import PropertiesDock  # noqa: E402

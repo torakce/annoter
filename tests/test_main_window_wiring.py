@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from annoter.controllers.commands import AddAnnotationCommand  # noqa: E402
 from annoter.controllers.tools import Tool  # noqa: E402
-from annoter.views.items import EllipseItem, RectangleItem  # noqa: E402
+from annoter.views.items import RectangleItem  # noqa: E402
 from annoter.views.items.base import AnnotationItem  # noqa: E402
 from annoter.views.items.note import StickyNoteItem  # noqa: E402
 from annoter.views.main_window import MainWindow  # noqa: E402

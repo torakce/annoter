@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QUndoStack
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSpinBox,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -78,8 +77,6 @@ def _color_button(color: QColor) -> QPushButton:
 
 class PropertiesDock(QDockWidget):
     """Right-side dock; rebuilds its body when the selection changes."""
-
-    propsChangeRequested = Signal(object)  # ChangePropsCommand
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Properties", parent)

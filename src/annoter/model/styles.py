@@ -61,5 +61,3 @@ class HandleRole(Enum):
     # Line / arrow endpoints.
     P1 = "p1"
     P2 = "p2"
-    # Rectangle corner-radius adjustment handle (yellow PowerPoint-style).
-    RADIUS = "radius"

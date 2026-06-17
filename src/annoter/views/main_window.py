@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QFileDialog,
     QInputDialog,
-    QInputDialog as _QInputDialog,  # noqa: F401  (re-export safety)
     QLabel,
     QMainWindow,
     QMenu,
@@ -51,7 +50,6 @@ from annoter.controllers.commands import (
     ChangePropsCommand,
     ChangeStrokeCommand,
     DeleteAnnotationsCommand,
-    MoveAnnotationsCommand,
 )
 from annoter.controllers.tools import Tool, ToolController
 from annoter.model.document import PdfDocument

@@ -74,20 +74,6 @@ class PdfView(QGraphicsView):
     def zoom(self) -> float:
         return self._zoom
 
-    def render_dpi(self) -> int:
-        return self._render_dpi
-
-    def set_render_dpi(self, dpi: int) -> None:
-        """Update the DPI assumption used to convert factor -> view scale.
-
-        Called by the controller after a high-DPI re-render swap (M4).
-        Re-applies the current zoom so on-screen size stays the same.
-        """
-        if dpi == self._render_dpi:
-            return
-        self._render_dpi = dpi
-        self._apply_zoom(self._zoom)
-
     def zoom_in(self) -> None:
         self._apply_zoom(self._zoom * ZOOM_STEP)
 

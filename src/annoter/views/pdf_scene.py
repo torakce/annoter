@@ -14,7 +14,6 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
-    QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsSceneMouseEvent,
@@ -42,7 +41,6 @@ from annoter.views.items import (
     TextAnnotationItem,
 )
 from annoter.views.items.base import AnnotationItem
-from annoter.views.items.gdt import GdtAnnotationItem
 
 
 class PdfScene(QGraphicsScene):

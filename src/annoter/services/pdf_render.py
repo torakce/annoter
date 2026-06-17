@@ -32,11 +32,6 @@ class PageRenderer:
     def dpi(self) -> int:
         return self._dpi
 
-    def set_dpi(self, dpi: int) -> None:
-        if dpi != self._dpi:
-            self._dpi = dpi
-            self._cache.clear()
-
     def render(
         self, page_index: int, rotation: int = 0, scale: float = 1.0
     ) -> QPixmap:
@@ -132,6 +127,3 @@ class PageRenderer:
             pix.y / scale - bbox0.y0,
         )
         return pixmap, pos
-
-    def clear_cache(self) -> None:
-        self._cache.clear()

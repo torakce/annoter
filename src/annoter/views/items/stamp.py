@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPen
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsSceneMouseEvent
+from PySide6.QtWidgets import QGraphicsItem
 
 from annoter.views.items.base import AnnotationItem
 
@@ -124,14 +124,6 @@ class StampItem(AnnotationItem):
         painter.setFont(self._font())
         painter.drawText(r, Qt.AlignCenter, self._display_text())
         self._draw_selection_marker(painter, self.boundingRect())
-
-    # ------------------------------------------------------------------
-    # double-click toggles to the next preset (quick re-stamp)
-    # ------------------------------------------------------------------
-    def mouseDoubleClickEvent(
-        self, event: QGraphicsSceneMouseEvent
-    ) -> None:
-        event.accept()
 
     def clone(self) -> "StampItem":
         c = StampItem(QPointF(self.pos()), self._text)

@@ -22,7 +22,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsSceneMouseEvent
 
-from annoter.model.gdt import GdtState
+from annoter.model.gdt import Characteristic, GdtState
 from annoter.model.styles import HandleRole
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.gdt_symbols import symbol_path
@@ -60,9 +60,10 @@ class GdtAnnotationItem(AnnotationItem):
         self._font: QFont = QFont(
             _DEFAULT_FONT_FAMILY, self._font_size
         )
-        self._cells: list[tuple[QRectF, str]] = []  # (rect, kind)
-        self._cell_kinds: list[str] = []
-        self._cell_texts: list[str] = []
+        # Draw lists rebuilt by `_compute_layout`.
+        self._border_rects: list[QRectF] = []
+        self._symbol_draws: list[tuple[QRectF, Characteristic]] = []
+        self._text_draws: list[tuple[QRectF, str, object]] = []
         self._total_size: QRectF = QRectF()
         self._compute_layout()
         if pos is not None:
@@ -102,38 +103,111 @@ class GdtAnnotationItem(AnnotationItem):
     # ------------------------------------------------------------------
     def _compute_layout(self) -> None:
         fm = QFontMetricsF(self._font)
-        h = fm.height() + 2 * _CELL_PADDING_Y
-        cells: list[tuple[QRectF, str, str]] = []
+        pad_x, pad_y = _CELL_PADDING_X, _CELL_PADDING_Y
+        h = fm.height() + 2 * pad_y  # row height
+        text_h = fm.height()
+        gap = pad_y  # vertical gap between the frame and upper/lower text
 
-        # Symbol cell: square.
-        cells.append((QRectF(0.0, 0.0, h, h), "symbol", ""))
+        def cell_w(text: str) -> float:
+            return max(h, fm.horizontalAdvance(text) + 2 * pad_x)
 
-        # Tolerance cell.
-        tol_text = self._state.tolerance_display()
-        tol_w = max(h, fm.horizontalAdvance(tol_text) + 2 * _CELL_PADDING_X)
-        cells.append((QRectF(0.0, 0.0, tol_w, h), "tolerance", tol_text))
+        rows = self._state.all_rows()
+        n_rows = len(rows)
 
-        # Datum cells.
-        for d_text in self._state.datum_displays():
-            w = max(h, fm.horizontalAdvance(d_text) + 2 * _CELL_PADDING_X)
-            cells.append((QRectF(0.0, 0.0, w, h), "datum", d_text))
+        # Per-row cells: tolerance + datums. (width, text)
+        row_cells: list[list[tuple[float, str]]] = []
+        for row in rows:
+            cells: list[tuple[float, str]] = [
+                (cell_w(row.tolerance_display()), row.tolerance_display())
+            ]
+            for d_text in row.datum_displays():
+                cells.append((cell_w(d_text), d_text))
+            row_cells.append(cells)
 
-        # Place horizontally.
-        x = 0.0
-        placed: list[tuple[QRectF, str]] = []
-        texts: list[str] = []
-        kinds: list[str] = []
-        for rect, kind, text in cells:
-            placed_rect = QRectF(x, 0.0, rect.width(), rect.height())
-            placed.append((placed_rect, kind))
-            kinds.append(kind)
-            texts.append(text)
-            x += rect.width()
+        content_widths = [sum(w for w, _ in cells) for cells in row_cells]
+        max_content = max(content_widths) if content_widths else h
+        # Extend each row's last cell so the frame stays rectangular.
+        for cells, cw in zip(row_cells, content_widths):
+            if cells and cw < max_content:
+                w, text = cells[-1]
+                cells[-1] = (w + (max_content - cw), text)
 
-        self._cells = placed
-        self._cell_kinds = kinds
-        self._cell_texts = texts
-        self._total_size = QRectF(0.0, 0.0, x, h)
+        symbol_w = h
+        frame_w = symbol_w + max_content
+        frame_h = n_rows * h
+
+        upper = self._state.upper_text.strip()
+        lower = self._state.lower_text.strip()
+        frame_top = (text_h + gap) if upper else 0.0
+
+        borders: list[QRectF] = []
+        symbols: list[tuple[QRectF, Characteristic]] = []
+        texts: list[tuple[QRectF, str, object]] = []
+
+        # Symbol cell spans every row.
+        sym_rect = QRectF(0.0, frame_top, symbol_w, frame_h)
+        borders.append(sym_rect)
+        symbols.append((sym_rect, self._state.characteristic))
+
+        for i, cells in enumerate(row_cells):
+            x = symbol_w
+            y = frame_top + i * h
+            for w, text in cells:
+                r = QRectF(x, y, w, h)
+                borders.append(r)
+                if text:
+                    texts.append((r, text, Qt.AlignCenter))
+                x += w
+
+        total_w = frame_w
+
+        # Optional auxiliary frame appended to the right, vertically
+        # centered against the main frame.
+        aux_active = (
+            self._state.aux_symbol is not None
+            or bool(self._state.aux_text.strip())
+        )
+        if aux_active:
+            ax = frame_w + h * 0.4
+            ay = frame_top + (frame_h - h) / 2.0
+            if self._state.aux_symbol is not None:
+                ar = QRectF(ax, ay, h, h)
+                borders.append(ar)
+                symbols.append((ar, self._state.aux_symbol))
+                ax += h
+            aux_txt = self._state.aux_text.strip()
+            if aux_txt or self._state.aux_symbol is None:
+                aw = cell_w(aux_txt)
+                ar = QRectF(ax, ay, aw, h)
+                borders.append(ar)
+                if aux_txt:
+                    texts.append((ar, aux_txt, Qt.AlignCenter))
+                ax += aw
+            total_w = max(total_w, ax)
+
+        # Upper / lower text, left-aligned with the frame's left edge.
+        if upper:
+            w = max(total_w, fm.horizontalAdvance(upper))
+            texts.append(
+                (QRectF(0.0, 0.0, w, text_h), upper,
+                 Qt.AlignLeft | Qt.AlignVCenter)
+            )
+            total_w = max(total_w, w)
+        bottom = frame_top + frame_h
+        if lower:
+            ly = bottom + gap
+            w = max(total_w, fm.horizontalAdvance(lower))
+            texts.append(
+                (QRectF(0.0, ly, w, text_h), lower,
+                 Qt.AlignLeft | Qt.AlignVCenter)
+            )
+            total_w = max(total_w, w)
+            bottom = ly + text_h
+
+        self._border_rects = borders
+        self._symbol_draws = symbols
+        self._text_draws = texts
+        self._total_size = QRectF(0.0, 0.0, total_w, bottom)
 
     def boundingRect(self) -> QRectF:
         m = self._stroke / 2.0 + 1.0 + self.handles_extent()
@@ -241,25 +315,39 @@ class GdtAnnotationItem(AnnotationItem):
         pen.setJoinStyle(Qt.MiterJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
-        painter.setFont(self._font)
 
-        for (rect, kind), text in zip(self._cells, self._cell_texts):
+        for rect in self._border_rects:
             painter.drawRect(rect)
-            if kind == "symbol":
-                self._paint_symbol(painter, rect)
-            else:
-                painter.drawText(rect, Qt.AlignCenter, text)
+        for rect, characteristic in self._symbol_draws:
+            self._paint_symbol(painter, rect, characteristic)
+
+        painter.setPen(QPen(self._color))
+        painter.setFont(self._font)
+        for rect, text, align in self._text_draws:
+            painter.drawText(rect, align, text)
 
         self._draw_selection_marker(painter, self.boundingRect())
 
-    def _paint_symbol(self, painter, rect: QRectF) -> None:
-        """Scale the unit-box symbol path into `rect` and stroke it."""
-        path: QPainterPath = symbol_path(self._state.characteristic)
+    def _paint_symbol(
+        self, painter, rect: QRectF, characteristic: Characteristic
+    ) -> None:
+        """Stroke the unit-box symbol path into a square centered in `rect`.
+
+        Centering in a square (rather than filling the cell) keeps the
+        glyph undistorted even when the symbol cell spans several rows of
+        a composite frame."""
+        path: QPainterPath = symbol_path(characteristic)
+        side = min(rect.width(), rect.height())
+        inset = side * 0.15
+        cx, cy = rect.center().x(), rect.center().y()
+        target = QRectF(
+            cx - side / 2 + inset,
+            cy - side / 2 + inset,
+            side - 2 * inset,
+            side - 2 * inset,
+        )
         painter.save()
-        # Inset so the symbol does not touch the cell border.
-        inset = min(rect.width(), rect.height()) * 0.15
-        target = rect.adjusted(inset, inset, -inset, -inset)
-        # Map unit-box [0, 1] into the target rectangle.
+        # Map unit-box [0, 1] into the target square.
         painter.translate(target.left(), target.top())
         painter.scale(target.width(), target.height())
         # Use a cosmetic pen so the stroke width stays in device pixels.

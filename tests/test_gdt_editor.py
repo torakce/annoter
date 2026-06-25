@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 from annoter.model.gdt import (  # noqa: E402
     Characteristic,
     DatumRef,
+    GdtRow,
     GdtState,
 )
 from annoter.views.gdt_editor import GdtInlineEditor  # noqa: E402
@@ -55,9 +56,10 @@ def test_initial_state_roundtrip(host) -> None:
 
 def test_field_edits_reflected_in_state(host) -> None:
     editor = GdtInlineEditor(GdtState(), host)
-    editor._tol_edit.setText("0.25")
-    editor._set_prefix("Ø")
-    editor._datum_edits[0].setText("a-b")
+    row = editor._row_editors[0]
+    row._value_edit.setText("0.25")
+    row._set_prefix("Ø")
+    row._datum_edits[0].setText("a-b")
     out = editor.current_state()
     assert out.tolerance_value == "0.25"
     assert out.tolerance_prefix == "Ø"
@@ -66,18 +68,19 @@ def test_field_edits_reflected_in_state(host) -> None:
 
 def test_prefix_setter_cycles_all_values(host) -> None:
     editor = GdtInlineEditor(GdtState(), host)
+    row = editor._row_editors[0]
     for prefix in ("Ø", "R", "SØ", "SR", ""):
-        editor._set_prefix(prefix)
+        row._set_prefix(prefix)
         assert editor.current_state().tolerance_prefix == prefix
     # The button label falls back to the em dash when empty.
-    assert editor._prefix_btn.text() == "—"
+    assert row._prefix_btn.text() == "—"
 
 
 def test_state_edited_emitted_live(host) -> None:
     editor = GdtInlineEditor(GdtState(), host)
     seen: list[GdtState] = []
     editor.stateEdited.connect(seen.append)
-    editor._tol_edit.setText("0.5")
+    editor._row_editors[0]._value_edit.setText("0.5")
     assert seen
     assert seen[-1].tolerance_value == "0.5"
 
@@ -93,12 +96,13 @@ def test_characteristic_menu_updates_state(host) -> None:
 
 def test_modifier_setters(host) -> None:
     editor = GdtInlineEditor(GdtState(), host)
-    editor._set_tol_modifier("M")
-    editor._set_datum_modifier(1, "L")
+    row = editor._row_editors[0]
+    row._set_tol_modifier("M")
+    row._set_datum_modifier(1, "L")
     out = editor.current_state()
     assert out.tolerance_modifier == "M"
     assert out.datum_secondary.modifier == "L"
-    editor._set_tol_modifier(None)
+    row._set_tol_modifier(None)
     assert editor.current_state().tolerance_modifier is None
 
 
@@ -106,8 +110,9 @@ def test_enter_commits_once(host) -> None:
     editor = GdtInlineEditor(GdtState(), host)
     commits: list[int] = []
     editor.committed.connect(lambda: commits.append(1))
-    editor._tol_edit.returnPressed.emit()
-    editor._tol_edit.returnPressed.emit()  # second Enter is a no-op
+    editor._row_editors[0]._value_edit.returnPressed.emit()
+    # second Enter is a no-op
+    editor._row_editors[0]._value_edit.returnPressed.emit()
     assert len(commits) == 1
 
 
@@ -161,12 +166,38 @@ def test_focus_check_ignores_focus_inside(qapp, host) -> None:
     host.show()
     editor = GdtInlineEditor(GdtState(), host)
     editor.show()
-    editor._tol_edit.setFocus()
+    editor._row_editors[0]._value_edit.setFocus()
     qapp.processEvents()
     commits: list[int] = []
     editor.committed.connect(lambda: commits.append(1))
     editor._maybe_commit_on_focus_loss()
     assert commits == []
+
+
+def test_add_and_remove_rows(host) -> None:
+    editor = GdtInlineEditor(GdtState(), host)
+    assert len(editor._row_editors) == 1
+    editor._add_row_editor(GdtRow(tolerance_value="0.5"))
+    assert len(editor._row_editors) == 2
+    assert len(editor.current_state().all_rows()) == 2
+    # Removing returns to a single row; the first row cannot be removed.
+    editor._remove_row_editor(editor._row_editors[-1])
+    assert len(editor._row_editors) == 1
+    editor._remove_row_editor(editor._row_editors[0])  # no-op at one row
+    assert len(editor._row_editors) == 1
+
+
+def test_upper_lower_aux_in_state(host) -> None:
+    editor = GdtInlineEditor(GdtState(), host)
+    editor._upper_edit.setText("2x")
+    editor._lower_edit.setText("VALID FOR BOTH PARTS")
+    editor._set_aux_symbol(Characteristic.PARALLELISM)
+    editor._aux_edit.setText("A-B")
+    out = editor.current_state()
+    assert out.upper_text == "2x"
+    assert out.lower_text == "VALID FOR BOTH PARTS"
+    assert out.aux_symbol is Characteristic.PARALLELISM
+    assert out.aux_text == "A-B"
 
 
 def test_cancel_after_commit_is_noop(host) -> None:

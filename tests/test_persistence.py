@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from annoter.model.gdt import (  # noqa: E402
     Characteristic,
     DatumRef,
+    GdtRow,
     GdtState,
 )
 from annoter.model.styles import (  # noqa: E402
@@ -394,6 +395,32 @@ def test_gdt_roundtrip_preserves_state(qapp, blank_doc) -> None:
     # stores the content rect, whose topleft is exactly item.pos()).
     assert restored.pos().x() == pytest.approx(120, abs=0.5)
     assert restored.pos().y() == pytest.approx(80, abs=0.5)
+
+
+def test_gdt_composite_roundtrip(qapp, blank_doc) -> None:
+    state = GdtState(
+        characteristic=Characteristic.POSITION,
+        tolerance_prefix="Ø",
+        tolerance_value="2",
+        tolerance_modifier="P",
+        datum_primary=DatumRef(["A"]),
+        datum_secondary=DatumRef(["B", "B"]),
+        datum_tertiary=DatumRef(["C"], modifier="M"),
+        additional_rows=[GdtRow(tolerance_prefix="Ø", tolerance_value="0.5CZ")],
+        upper_text="2x",
+        lower_text="VALID FOR BOTH PARTS",
+        aux_symbol=Characteristic.PARALLELISM,
+        aux_text="A-B",
+    )
+    item = GdtAnnotationItem(state, QPointF(100, 90))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert len(out[0]) == 1
+    restored = out[0][0]
+    assert isinstance(restored, GdtAnnotationItem)
+    assert restored.state() == state
 
 
 def test_gdt_appearance_visible_in_external_viewer(qapp, blank_doc) -> None:

@@ -20,6 +20,7 @@ from annoter.model.gdt import (  # noqa: E402
     Characteristic,
     DatumRef,
     Family,
+    GdtRow,
     GdtState,
     by_family,
     enclosed,
@@ -33,6 +34,62 @@ from annoter.views.pdf_scene import PdfScene  # noqa: E402
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+def _composite_state() -> GdtState:
+    return GdtState(
+        characteristic=Characteristic.POSITION,
+        tolerance_prefix="Ø",
+        tolerance_value="2",
+        tolerance_modifier="P",
+        datum_primary=DatumRef(["A"]),
+        datum_secondary=DatumRef(["B", "B"]),
+        datum_tertiary=DatumRef(["C"], modifier="M"),
+        additional_rows=[GdtRow(tolerance_prefix="Ø", tolerance_value="0.5CZ")],
+        upper_text="2x",
+        lower_text="VALID FOR BOTH PARTS",
+        aux_symbol=Characteristic.PARALLELISM,
+        aux_text="A-B",
+    )
+
+
+def test_composite_state_roundtrip() -> None:
+    state = _composite_state()
+    assert GdtState.from_dict(state.to_dict()) == state
+    assert len(state.all_rows()) == 2
+
+
+def test_backward_compat_single_row_dict() -> None:
+    """An FCF persisted before the composite rework (no rows/texts/aux)
+    must reload as a one-row frame with empty extras."""
+    old = {
+        "characteristic": "position",
+        "tolerance_prefix": "Ø",
+        "tolerance_value": "0.1",
+        "tolerance_modifier": "M",
+        "datum_primary": {"letters": ["A"], "modifier": None},
+        "datum_secondary": {"letters": [], "modifier": None},
+        "datum_tertiary": {"letters": [], "modifier": None},
+    }
+    state = GdtState.from_dict(old)
+    assert state.additional_rows == []
+    assert state.upper_text == "" and state.lower_text == ""
+    assert state.aux_symbol is None
+    assert len(state.all_rows()) == 1
+    assert state.tolerance_value == "0.1"
+
+
+def test_composite_item_layout_grows(qapp) -> None:
+    single = GdtAnnotationItem(
+        GdtState(characteristic=Characteristic.POSITION, tolerance_value="2"),
+        QPointF(0, 0),
+    )
+    composite = GdtAnnotationItem(_composite_state(), QPointF(0, 0))
+    # Extra rows make it taller; upper/lower text and aux make it wider.
+    assert composite.content_rect().height() > single.content_rect().height()
+    assert composite.content_rect().width() > single.content_rect().width()
+    # Two symbols are drawn (main + auxiliary).
+    assert len(composite._symbol_draws) == 2
 
 
 # ----------------------------------------------------------------------

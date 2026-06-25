@@ -136,12 +136,37 @@ class DatumRef:
         )
 
 
-@dataclass
-class GdtState:
-    """Full state of a feature control frame."""
+def _tolerance_display(prefix: str, value: str, modifier: str | None) -> str:
+    parts: list[str] = []
+    if prefix:
+        parts.append(prefix)
+    if value.strip():
+        parts.append(value.strip())
+    text = " ".join(parts)
+    if modifier:
+        text += enclosed(modifier)
+    return text
 
-    characteristic: Characteristic = Characteristic.PERPENDICULARITY
-    # One of TOLERANCE_PREFIXES, or "" for none.
+
+def _datum_displays(
+    d1: DatumRef, d2: DatumRef, d3: DatumRef
+) -> list[str]:
+    cells = [d1.display(), d2.display(), d3.display()]
+    # Drop trailing empty cells; keep gaps in the middle (rare but legal).
+    while cells and not cells[-1]:
+        cells.pop()
+    return cells
+
+
+@dataclass
+class GdtRow:
+    """One tolerance line of a (possibly composite) feature control frame.
+
+    A composite FCF stacks several rows under a single shared
+    characteristic symbol; each row carries its own tolerance value and
+    datum references.
+    """
+
     tolerance_prefix: str = ""
     tolerance_value: str = ""
     tolerance_modifier: str | None = None
@@ -149,39 +174,30 @@ class GdtState:
     datum_secondary: DatumRef = field(default_factory=DatumRef)
     datum_tertiary: DatumRef = field(default_factory=DatumRef)
 
-    # ------------------------------------------------------------------
-    # display
-    # ------------------------------------------------------------------
     def tolerance_display(self) -> str:
-        parts: list[str] = []
-        if self.tolerance_prefix:
-            parts.append(self.tolerance_prefix)
-        if self.tolerance_value.strip():
-            parts.append(self.tolerance_value.strip())
-        text = " ".join(parts)
-        if self.tolerance_modifier:
-            text += enclosed(self.tolerance_modifier)
-        return text
+        return _tolerance_display(
+            self.tolerance_prefix,
+            self.tolerance_value,
+            self.tolerance_modifier,
+        )
 
     def datum_displays(self) -> list[str]:
-        """Returns the trailing non-empty datum cells (kept in order)."""
-        cells = [
-            self.datum_primary.display(),
-            self.datum_secondary.display(),
-            self.datum_tertiary.display(),
-        ]
-        # Drop trailing empty cells; keep gaps in the middle (rare but
-        # legal -- e.g. primary + tertiary -- by promoting the tertiary).
-        while cells and not cells[-1]:
-            cells.pop()
-        return cells
+        return _datum_displays(
+            self.datum_primary, self.datum_secondary, self.datum_tertiary
+        )
 
-    # ------------------------------------------------------------------
-    # serialization
-    # ------------------------------------------------------------------
+    def is_empty(self) -> bool:
+        return (
+            not self.tolerance_prefix
+            and not self.tolerance_value.strip()
+            and not self.tolerance_modifier
+            and self.datum_primary.is_empty()
+            and self.datum_secondary.is_empty()
+            and self.datum_tertiary.is_empty()
+        )
+
     def to_dict(self) -> dict:
         return {
-            "characteristic": self.characteristic.value,
             "tolerance_prefix": self.tolerance_prefix,
             "tolerance_value": self.tolerance_value,
             "tolerance_modifier": self.tolerance_modifier,
@@ -191,12 +207,110 @@ class GdtState:
         }
 
     @classmethod
+    def from_dict(cls, data: dict) -> GdtRow:
+        prefix = str(data.get("tolerance_prefix", ""))
+        if not prefix and data.get("diameter_prefix"):
+            prefix = "Ø"
+        return cls(
+            tolerance_prefix=prefix,
+            tolerance_value=str(data.get("tolerance_value", "")),
+            tolerance_modifier=data.get("tolerance_modifier"),
+            datum_primary=DatumRef.from_dict(data.get("datum_primary", {})),
+            datum_secondary=DatumRef.from_dict(data.get("datum_secondary", {})),
+            datum_tertiary=DatumRef.from_dict(data.get("datum_tertiary", {})),
+        )
+
+
+@dataclass
+class GdtState:
+    """Full state of a feature control frame.
+
+    The first tolerance row is held in the flat `tolerance_*` / `datum_*`
+    fields (backward compatible with single-row FCFs persisted before the
+    composite rework); extra composite rows live in `additional_rows`.
+    `upper_text` / `lower_text` are the texts shown above / below the
+    frame, and an optional auxiliary frame (`aux_symbol` + `aux_text`) is
+    appended to the right.
+    """
+
+    characteristic: Characteristic = Characteristic.PERPENDICULARITY
+    # One of TOLERANCE_PREFIXES, or "" for none.
+    tolerance_prefix: str = ""
+    tolerance_value: str = ""
+    tolerance_modifier: str | None = None
+    datum_primary: DatumRef = field(default_factory=DatumRef)
+    datum_secondary: DatumRef = field(default_factory=DatumRef)
+    datum_tertiary: DatumRef = field(default_factory=DatumRef)
+    # Composite rows beyond the first.
+    additional_rows: list[GdtRow] = field(default_factory=list)
+    upper_text: str = ""
+    lower_text: str = ""
+    # Optional auxiliary frame appended to the right (e.g. // | A-B).
+    aux_symbol: Characteristic | None = None
+    aux_text: str = ""
+
+    # ------------------------------------------------------------------
+    # rows
+    # ------------------------------------------------------------------
+    def row0(self) -> GdtRow:
+        """The first row, synthesized from the flat fields."""
+        return GdtRow(
+            tolerance_prefix=self.tolerance_prefix,
+            tolerance_value=self.tolerance_value,
+            tolerance_modifier=self.tolerance_modifier,
+            datum_primary=self.datum_primary,
+            datum_secondary=self.datum_secondary,
+            datum_tertiary=self.datum_tertiary,
+        )
+
+    def all_rows(self) -> list[GdtRow]:
+        """First row plus every composite row, in display order."""
+        return [self.row0(), *self.additional_rows]
+
+    # ------------------------------------------------------------------
+    # display (row 0 -- kept for backward compatibility)
+    # ------------------------------------------------------------------
+    def tolerance_display(self) -> str:
+        return self.row0().tolerance_display()
+
+    def datum_displays(self) -> list[str]:
+        return self.row0().datum_displays()
+
+    # ------------------------------------------------------------------
+    # serialization
+    # ------------------------------------------------------------------
+    def to_dict(self) -> dict:
+        data = {
+            "characteristic": self.characteristic.value,
+            "tolerance_prefix": self.tolerance_prefix,
+            "tolerance_value": self.tolerance_value,
+            "tolerance_modifier": self.tolerance_modifier,
+            "datum_primary": self.datum_primary.to_dict(),
+            "datum_secondary": self.datum_secondary.to_dict(),
+            "datum_tertiary": self.datum_tertiary.to_dict(),
+        }
+        if self.additional_rows:
+            data["additional_rows"] = [
+                r.to_dict() for r in self.additional_rows
+            ]
+        if self.upper_text:
+            data["upper_text"] = self.upper_text
+        if self.lower_text:
+            data["lower_text"] = self.lower_text
+        if self.aux_symbol is not None:
+            data["aux_symbol"] = self.aux_symbol.value
+        if self.aux_text:
+            data["aux_text"] = self.aux_text
+        return data
+
+    @classmethod
     def from_dict(cls, data: dict) -> GdtState:
         # PDFs annotated before the prefix rework stored a boolean
         # "diameter_prefix" -- map it to the literal prefix.
         prefix = str(data.get("tolerance_prefix", ""))
         if not prefix and data.get("diameter_prefix"):
             prefix = "Ø"
+        aux_raw = data.get("aux_symbol")
         return cls(
             characteristic=Characteristic(
                 data.get("characteristic", Characteristic.PERPENDICULARITY.value)
@@ -207,4 +321,12 @@ class GdtState:
             datum_primary=DatumRef.from_dict(data.get("datum_primary", {})),
             datum_secondary=DatumRef.from_dict(data.get("datum_secondary", {})),
             datum_tertiary=DatumRef.from_dict(data.get("datum_tertiary", {})),
+            additional_rows=[
+                GdtRow.from_dict(r)
+                for r in data.get("additional_rows", [])
+            ],
+            upper_text=str(data.get("upper_text", "")),
+            lower_text=str(data.get("lower_text", "")),
+            aux_symbol=Characteristic(aux_raw) if aux_raw else None,
+            aux_text=str(data.get("aux_text", "")),
         )

@@ -45,7 +45,13 @@ def _composite_state() -> GdtState:
         datum_primary=DatumRef(["A"]),
         datum_secondary=DatumRef(["B", "B"]),
         datum_tertiary=DatumRef(["C"], modifier="M"),
-        additional_rows=[GdtRow(tolerance_prefix="Ø", tolerance_value="0.5CZ")],
+        additional_rows=[
+            GdtRow(
+                characteristic=Characteristic.POSITION,
+                tolerance_prefix="Ø",
+                tolerance_value="0.5CZ",
+            )
+        ],
         upper_text="2x",
         lower_text="VALID FOR BOTH PARTS",
         aux_symbol=Characteristic.PARALLELISM,
@@ -57,6 +63,34 @@ def test_composite_state_roundtrip() -> None:
     state = _composite_state()
     assert GdtState.from_dict(state.to_dict()) == state
     assert len(state.all_rows()) == 2
+
+
+def test_symbol_cell_merges_only_when_same(qapp) -> None:
+    base = dict(tolerance_value="0.1")
+    # Two rows, same characteristic -> a single merged symbol cell.
+    same = GdtAnnotationItem(
+        GdtState(
+            characteristic=Characteristic.POSITION,
+            tolerance_value="0.2",
+            additional_rows=[
+                GdtRow(characteristic=Characteristic.POSITION, **base)
+            ],
+        ),
+        QPointF(0, 0),
+    )
+    assert len(same._symbol_draws) == 1
+    # Two rows, different characteristics -> two symbol cells.
+    diff = GdtAnnotationItem(
+        GdtState(
+            characteristic=Characteristic.POSITION,
+            tolerance_value="0.2",
+            additional_rows=[
+                GdtRow(characteristic=Characteristic.PARALLELISM, **base)
+            ],
+        ),
+        QPointF(0, 0),
+    )
+    assert len(diff._symbol_draws) == 2
 
 
 def test_backward_compat_single_row_dict() -> None:
@@ -88,7 +122,8 @@ def test_composite_item_layout_grows(qapp) -> None:
     # Extra rows make it taller; upper/lower text and aux make it wider.
     assert composite.content_rect().height() > single.content_rect().height()
     assert composite.content_rect().width() > single.content_rect().width()
-    # Two symbols are drawn (main + auxiliary).
+    # One merged main symbol cell (both rows share POSITION) + the
+    # auxiliary symbol = 2 symbol draws.
     assert len(composite._symbol_draws) == 2
 
 

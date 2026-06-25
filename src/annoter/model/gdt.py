@@ -162,11 +162,12 @@ def _datum_displays(
 class GdtRow:
     """One tolerance line of a (possibly composite) feature control frame.
 
-    A composite FCF stacks several rows under a single shared
-    characteristic symbol; each row carries its own tolerance value and
-    datum references.
+    Each row carries its own characteristic symbol, tolerance value and
+    datum references. The item merges the symbol cell only across
+    consecutive rows that share the same `characteristic`.
     """
 
+    characteristic: Characteristic = Characteristic.PERPENDICULARITY
     tolerance_prefix: str = ""
     tolerance_value: str = ""
     tolerance_modifier: str | None = None
@@ -198,6 +199,7 @@ class GdtRow:
 
     def to_dict(self) -> dict:
         return {
+            "characteristic": self.characteristic.value,
             "tolerance_prefix": self.tolerance_prefix,
             "tolerance_value": self.tolerance_value,
             "tolerance_modifier": self.tolerance_modifier,
@@ -212,6 +214,11 @@ class GdtRow:
         if not prefix and data.get("diameter_prefix"):
             prefix = "Ø"
         return cls(
+            characteristic=Characteristic(
+                data.get(
+                    "characteristic", Characteristic.PERPENDICULARITY.value
+                )
+            ),
             tolerance_prefix=prefix,
             tolerance_value=str(data.get("tolerance_value", "")),
             tolerance_modifier=data.get("tolerance_modifier"),
@@ -255,6 +262,7 @@ class GdtState:
     def row0(self) -> GdtRow:
         """The first row, synthesized from the flat fields."""
         return GdtRow(
+            characteristic=self.characteristic,
             tolerance_prefix=self.tolerance_prefix,
             tolerance_value=self.tolerance_value,
             tolerance_modifier=self.tolerance_modifier,

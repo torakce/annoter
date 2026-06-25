@@ -72,8 +72,9 @@ def test_prefix_setter_cycles_all_values(host) -> None:
     for prefix in ("Ø", "R", "SØ", "SR", ""):
         row._set_prefix(prefix)
         assert editor.current_state().tolerance_prefix == prefix
-    # The button label falls back to the em dash when empty.
-    assert row._prefix_btn.text() == "—"
+    # The button label falls back to the em dash (plus the drop-down
+    # arrow) when empty.
+    assert row._prefix_btn.text().startswith("—")
 
 
 def test_state_edited_emitted_live(host) -> None:
@@ -87,11 +88,23 @@ def test_state_edited_emitted_live(host) -> None:
 
 def test_characteristic_menu_updates_state(host) -> None:
     editor = GdtInlineEditor(GdtState(), host)
-    editor._set_characteristic(Characteristic.FLATNESS)
+    editor._row_editors[0]._set_characteristic(Characteristic.FLATNESS)
     assert (
         editor.current_state().characteristic
         is Characteristic.FLATNESS
     )
+
+
+def test_per_row_characteristic(host) -> None:
+    """Each row keeps its own symbol; only same-symbol rows merge later."""
+    editor = GdtInlineEditor(GdtState(), host)
+    editor._row_editors[0]._set_characteristic(Characteristic.POSITION)
+    editor._add_row_editor(GdtRow())
+    editor._row_editors[1]._set_characteristic(Characteristic.PARALLELISM)
+    state = editor.current_state()
+    rows = state.all_rows()
+    assert rows[0].characteristic is Characteristic.POSITION
+    assert rows[1].characteristic is Characteristic.PARALLELISM
 
 
 def test_modifier_setters(host) -> None:
@@ -136,7 +149,7 @@ def test_focus_check_skips_when_popup_open(qapp, host) -> None:
     editor.show()
     commits: list[int] = []
     editor.committed.connect(lambda: commits.append(1))
-    menu = editor._symbol_btn.menu()
+    menu = editor._row_editors[0]._symbol_btn.menu()
     menu.popup(host.mapToGlobal(host.rect().center()))
     qapp.processEvents()
     assert QApplication.activePopupWidget() is menu

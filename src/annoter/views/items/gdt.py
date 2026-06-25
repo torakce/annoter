@@ -144,10 +144,20 @@ class GdtAnnotationItem(AnnotationItem):
         symbols: list[tuple[QRectF, Characteristic]] = []
         texts: list[tuple[QRectF, str, object]] = []
 
-        # Symbol cell spans every row.
-        sym_rect = QRectF(0.0, frame_top, symbol_w, frame_h)
-        borders.append(sym_rect)
-        symbols.append((sym_rect, self._state.characteristic))
+        # Symbol cells: one per run of consecutive rows that share the
+        # same characteristic (so different characteristics get their own
+        # cell, identical ones are merged into a single spanning cell).
+        i = 0
+        while i < n_rows:
+            characteristic = rows[i].characteristic
+            j = i
+            while j + 1 < n_rows and rows[j + 1].characteristic == characteristic:
+                j += 1
+            span = j - i + 1
+            sym_rect = QRectF(0.0, frame_top + i * h, symbol_w, span * h)
+            borders.append(sym_rect)
+            symbols.append((sym_rect, characteristic))
+            i = j + 1
 
         for i, cells in enumerate(row_cells):
             x = symbol_w

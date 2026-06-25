@@ -3,15 +3,17 @@
 A vertical panel shown over the page near the item being edited,
 inspired by CATIA's Geometrical Tolerance dialog but kept in-place so
 the scene item stays its own live preview. It supports composite
-(multi-row) frames, upper/lower texts and an optional auxiliary frame:
+(multi-row) frames where **each row has its own characteristic symbol**
+(the item merges the symbol cell only across consecutive rows that share
+one), plus upper/lower texts and an optional auxiliary frame:
 
-    [symbol]  Top text [______________]
-    row 1: [Ø][value][mod]  [A][m] [B][m] [C][m]   [-]
-    row 2: [Ø][value][mod]  [A][m] [B][m] [C][m]   [-]
+    Top text [______________]
+    line 1: [sym v][Ø v][value][mod v]  [A][m v][B][m v][C][m v]  [-]
+    line 2: [sym v][Ø v][value][mod v]  [A][m v][B][m v][C][m v]  [-]
     [+ line]
-    Aux [sym][text]
+    Aux [sym v][text]
     Bottom text [______________]
-                                         [OK] [Cancel]
+                                              [OK] [Cancel]
 
 Lifecycle contract (driven by MainWindow):
     - `stateEdited(GdtState)` on every change -- apply to the item.
@@ -23,7 +25,7 @@ Lifecycle contract (driven by MainWindow):
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -54,10 +56,42 @@ from annoter.model.gdt import (
 from annoter.views.icons import action_icon, gdt_symbol_icon
 
 
-_NO_MODIFIER_LABEL = "—"  # em dash
-_SYMBOL_ICON_SIZE = 22
+_NONE_LABEL = "—"  # em dash, shown when a slot has no value
+_ARROW = "▾"  # explicit drop-down affordance appended to menu buttons
+_SYMBOL_ICON_SIZE = 20
 _MENU_ICON_SIZE = 20
 _ACTION_ICON_SIZE = 16
+
+_ACCENT = "#1E88E5"
+_FIELD_BORDER = "#9aa0a6"
+
+_PANEL_QSS = f"""
+#GdtInlineEditor {{
+    border: 2px solid {_ACCENT};
+    border-radius: 6px;
+}}
+#GdtInlineEditor QLineEdit {{
+    border: 1px solid {_FIELD_BORDER};
+    border-radius: 3px;
+    padding: 1px 3px;
+}}
+#GdtInlineEditor QToolButton {{
+    border: 1px solid {_FIELD_BORDER};
+    border-radius: 3px;
+    padding: 1px 4px;
+}}
+#GdtInlineEditor QToolButton:hover {{
+    border: 1px solid {_ACCENT};
+}}
+#GdtInlineEditor QToolButton:disabled {{
+    color: #b0b0b0;
+    border-color: #d8d8d8;
+}}
+#GdtInlineEditor QToolButton::menu-indicator {{
+    image: none;
+    width: 0;
+}}
+"""
 
 
 def _parse_datum_text(text: str) -> list[str]:
@@ -65,16 +99,60 @@ def _parse_datum_text(text: str) -> list[str]:
     return [tok.strip().upper() for tok in text.split("-") if tok.strip()]
 
 
+def _fill_characteristic_menu(
+    menu: QMenu, icon_color: QColor, setter, on_hide, *, allow_none: bool
+) -> None:
+    menu.aboutToHide.connect(on_hide)
+    if allow_none:
+        act = menu.addAction(f"{_NONE_LABEL}  None")
+        act.triggered.connect(lambda: setter(None))
+    families = by_family()
+    for i, fam in enumerate(Family):
+        if i or allow_none:
+            menu.addSeparator()
+        header = menu.addAction(fam.value)
+        header.setEnabled(False)  # textless section header under the QSS
+        for c in families[fam]:
+            _, name = CHARACTERISTIC_META[c]
+            act = menu.addAction(
+                gdt_symbol_icon(c, _MENU_ICON_SIZE, icon_color), name
+            )
+            act.triggered.connect(lambda _c=False, ch=c: setter(ch))
+
+
+def _sync_symbol_button(
+    btn: QToolButton,
+    characteristic: Characteristic | None,
+    icon_color: QColor,
+) -> None:
+    btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+    if characteristic is None:
+        btn.setIcon(QIcon())
+        btn.setText(f"{_NONE_LABEL} {_ARROW}")
+        btn.setToolTip("Auxiliary symbol (none)")
+    else:
+        btn.setIcon(
+            gdt_symbol_icon(characteristic, _SYMBOL_ICON_SIZE, icon_color)
+        )
+        btn.setText(_ARROW)
+        _, name = CHARACTERISTIC_META[characteristic]
+        btn.setToolTip(f"Characteristic: {name}")
+
+
 class _RowEditor(QWidget):
-    """One tolerance row: prefix, value, modifier and three datum cells."""
+    """One tolerance row: symbol, prefix, value, modifier, three datums."""
 
     changed = Signal()
     commitRequested = Signal()
     removeRequested = Signal(object)  # self
 
-    def __init__(self, row: GdtRow, on_menu_hide, parent=None) -> None:
+    def __init__(
+        self, row: GdtRow, icon_color: QColor, on_menu_hide, parent=None
+    ) -> None:
         super().__init__(parent)
+        self._icon_color = icon_color
         self._on_menu_hide = on_menu_hide
+        self._characteristic: Characteristic = row.characteristic
         self._prefix: str = row.tolerance_prefix
         self._tol_modifier: str | None = row.tolerance_modifier
         datums = (row.datum_primary, row.datum_secondary, row.datum_tertiary)
@@ -82,14 +160,29 @@ class _RowEditor(QWidget):
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(2)
+        lay.setSpacing(3)
+
+        self._symbol_btn = QToolButton(self)
+        self._symbol_btn.setPopupMode(QToolButton.InstantPopup)
+        self._symbol_btn.setFocusPolicy(Qt.ClickFocus)
+        self._symbol_btn.setIconSize(
+            QSize(_SYMBOL_ICON_SIZE, _SYMBOL_ICON_SIZE)
+        )
+        menu = QMenu(self._symbol_btn)
+        _fill_characteristic_menu(
+            menu, icon_color, self._set_characteristic, on_menu_hide,
+            allow_none=False,
+        )
+        self._symbol_btn.setMenu(menu)
+        _sync_symbol_button(self._symbol_btn, self._characteristic, icon_color)
+        lay.addWidget(self._symbol_btn)
 
         self._prefix_btn = self._prefix_button(row.tolerance_prefix)
         lay.addWidget(self._prefix_btn)
 
         self._value_edit = QLineEdit(row.tolerance_value, self)
         self._value_edit.setPlaceholderText("0.05")
-        self._value_edit.setFixedWidth(60)
+        self._value_edit.setFixedWidth(58)
         self._value_edit.setToolTip("Tolerance value")
         self._value_edit.textChanged.connect(self.changed)
         self._value_edit.returnPressed.connect(self.commitRequested)
@@ -111,7 +204,7 @@ class _RowEditor(QWidget):
         ):
             edit = QLineEdit("-".join(datum.letters), self)
             edit.setPlaceholderText(placeholder)
-            edit.setFixedWidth(34)
+            edit.setFixedWidth(32)
             edit.setAlignment(Qt.AlignCenter)
             edit.setToolTip("Datum letter(s); join with '-' (e.g. A-B)")
             edit.textChanged.connect(self.changed)
@@ -129,7 +222,7 @@ class _RowEditor(QWidget):
         lay.addSpacing(4)
         self._remove_btn = QToolButton(self)
         self._remove_btn.setFocusPolicy(Qt.ClickFocus)
-        self._remove_btn.setText("−")  # minus
+        self._remove_btn.setText("✕")
         self._remove_btn.setToolTip("Remove this line")
         self._remove_btn.clicked.connect(
             lambda: self.removeRequested.emit(self)
@@ -150,13 +243,13 @@ class _RowEditor(QWidget):
         btn.setToolTip("Tolerance zone prefix")
         menu = QMenu(btn)
         menu.aboutToHide.connect(self._on_menu_hide)
-        act = menu.addAction(f"{_NO_MODIFIER_LABEL}  No prefix")
+        act = menu.addAction(f"{_NONE_LABEL}  No prefix")
         act.triggered.connect(lambda: self._set_prefix(""))
         for prefix in TOLERANCE_PREFIXES:
             act = menu.addAction(f"{prefix}  {TOLERANCE_PREFIX_NAMES[prefix]}")
             act.triggered.connect(lambda _c=False, pf=prefix: self._set_prefix(pf))
         btn.setMenu(menu)
-        btn.setText(current if current else _NO_MODIFIER_LABEL)
+        btn.setText(self._prefix_label(current))
         return btn
 
     def _modifier_button(self, allowed, current, setter) -> QToolButton:
@@ -166,32 +259,41 @@ class _RowEditor(QWidget):
         btn.setToolTip("Modifier")
         menu = QMenu(btn)
         menu.aboutToHide.connect(self._on_menu_hide)
-        act = menu.addAction(f"{_NO_MODIFIER_LABEL}  No modifier")
+        act = menu.addAction(f"{_NONE_LABEL}  No modifier")
         act.triggered.connect(lambda: setter(None))
         for letter in allowed:
             act = menu.addAction(f"{enclosed(letter)}  {MODIFIER_NAMES[letter]}")
             act.triggered.connect(lambda _c=False, lt=letter: setter(lt))
         btn.setMenu(menu)
-        btn.setText(enclosed(current) if current else _NO_MODIFIER_LABEL)
+        btn.setText(self._mod_label(current))
         return btn
+
+    @staticmethod
+    def _prefix_label(value: str) -> str:
+        return f"{value if value else _NONE_LABEL} {_ARROW}"
+
+    @staticmethod
+    def _mod_label(value: str | None) -> str:
+        return f"{enclosed(value) if value else _NONE_LABEL} {_ARROW}"
+
+    def _set_characteristic(self, c: Characteristic) -> None:
+        self._characteristic = c
+        _sync_symbol_button(self._symbol_btn, c, self._icon_color)
+        self.changed.emit()
 
     def _set_prefix(self, value: str) -> None:
         self._prefix = value
-        self._prefix_btn.setText(value if value else _NO_MODIFIER_LABEL)
+        self._prefix_btn.setText(self._prefix_label(value))
         self.changed.emit()
 
     def _set_tol_modifier(self, value: str | None) -> None:
         self._tol_modifier = value
-        self._tol_mod_btn.setText(
-            enclosed(value) if value else _NO_MODIFIER_LABEL
-        )
+        self._tol_mod_btn.setText(self._mod_label(value))
         self.changed.emit()
 
     def _set_datum_modifier(self, index: int, value: str | None) -> None:
         self._datum_modifiers[index] = value
-        self._datum_mod_btns[index].setText(
-            enclosed(value) if value else _NO_MODIFIER_LABEL
-        )
+        self._datum_mod_btns[index].setText(self._mod_label(value))
         self.changed.emit()
 
     def set_remove_enabled(self, enabled: bool) -> None:
@@ -202,6 +304,7 @@ class _RowEditor(QWidget):
 
     def row_state(self) -> GdtRow:
         return GdtRow(
+            characteristic=self._characteristic,
             tolerance_prefix=self._prefix,
             tolerance_value=self._value_edit.text(),
             tolerance_modifier=self._tol_modifier,
@@ -238,11 +341,11 @@ class GdtInlineEditor(QFrame):
         self.setObjectName("GdtInlineEditor")
         self.setFrameShape(QFrame.StyledPanel)
         self.setAutoFillBackground(True)
+        self.setStyleSheet(_PANEL_QSS)
         self._icon_color = (
             QColor(icon_color) if icon_color is not None
             else QColor("#212121")
         )
-        self._characteristic: Characteristic = initial.characteristic
         self._aux_symbol: Characteristic | None = initial.aux_symbol
         self._finished = False
         self._watching_focus = False
@@ -252,28 +355,23 @@ class GdtInlineEditor(QFrame):
         self._ready = False
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(6, 4, 6, 4)
-        outer.setSpacing(4)
+        outer.setContentsMargins(8, 6, 8, 6)
+        outer.setSpacing(6)
 
-        # Header: shared symbol + upper text.
-        header = QHBoxLayout()
-        header.setSpacing(4)
-        self._symbol_btn = self._build_symbol_button(
-            lambda: self._characteristic, self._set_characteristic,
-            allow_none=False,
-        )
-        header.addWidget(self._symbol_btn)
-        header.addWidget(QLabel("Top", self))
+        # Upper text.
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        top.addWidget(self._field_label("Top"))
         self._upper_edit = QLineEdit(initial.upper_text, self)
         self._upper_edit.setPlaceholderText("upper text (e.g. 2x)")
         self._upper_edit.textChanged.connect(self._emit_state)
         self._upper_edit.returnPressed.connect(self._commit)
-        header.addWidget(self._upper_edit)
-        outer.addLayout(header)
+        top.addWidget(self._upper_edit)
+        outer.addLayout(top)
 
-        # Tolerance rows.
+        # Tolerance rows (each with its own symbol).
         self._rows_box = QVBoxLayout()
-        self._rows_box.setSpacing(2)
+        self._rows_box.setSpacing(4)
         outer.addLayout(self._rows_box)
         for row in initial.all_rows():
             self._add_row_editor(row)
@@ -285,17 +383,27 @@ class GdtInlineEditor(QFrame):
         add_btn.clicked.connect(lambda: self._add_row_editor(GdtRow()))
         outer.addWidget(add_btn, 0, Qt.AlignLeft)
 
+        outer.addWidget(self._h_separator())
+
         # Auxiliary frame.
         aux = QHBoxLayout()
-        aux.setSpacing(4)
-        aux.addWidget(QLabel("Aux", self))
-        self._aux_btn = self._build_symbol_button(
-            lambda: self._aux_symbol, self._set_aux_symbol, allow_none=True
+        aux.setSpacing(6)
+        aux.addWidget(self._field_label("Aux"))
+        self._aux_btn = QToolButton(self)
+        self._aux_btn.setPopupMode(QToolButton.InstantPopup)
+        self._aux_btn.setFocusPolicy(Qt.ClickFocus)
+        self._aux_btn.setIconSize(QSize(_SYMBOL_ICON_SIZE, _SYMBOL_ICON_SIZE))
+        aux_menu = QMenu(self._aux_btn)
+        _fill_characteristic_menu(
+            aux_menu, self._icon_color, self._set_aux_symbol,
+            self._refocus_after_menu, allow_none=True,
         )
+        self._aux_btn.setMenu(aux_menu)
+        _sync_symbol_button(self._aux_btn, self._aux_symbol, self._icon_color)
         aux.addWidget(self._aux_btn)
         self._aux_edit = QLineEdit(initial.aux_text, self)
         self._aux_edit.setPlaceholderText("aux text (e.g. A-B)")
-        self._aux_edit.setFixedWidth(90)
+        self._aux_edit.setFixedWidth(96)
         self._aux_edit.textChanged.connect(self._emit_state)
         self._aux_edit.returnPressed.connect(self._commit)
         aux.addWidget(self._aux_edit)
@@ -304,14 +412,16 @@ class GdtInlineEditor(QFrame):
 
         # Lower text.
         low = QHBoxLayout()
-        low.setSpacing(4)
-        low.addWidget(QLabel("Bottom", self))
+        low.setSpacing(6)
+        low.addWidget(self._field_label("Bottom"))
         self._lower_edit = QLineEdit(initial.lower_text, self)
         self._lower_edit.setPlaceholderText("lower text")
         self._lower_edit.textChanged.connect(self._emit_state)
         self._lower_edit.returnPressed.connect(self._commit)
         low.addWidget(self._lower_edit)
         outer.addLayout(low)
+
+        outer.addWidget(self._h_separator())
 
         # Confirm / cancel.
         btns = QHBoxLayout()
@@ -336,10 +446,24 @@ class GdtInlineEditor(QFrame):
         self._ready = True
 
     # ------------------------------------------------------------------
+    # small builders
+    # ------------------------------------------------------------------
+    def _field_label(self, text: str) -> QLabel:
+        lbl = QLabel(text, self)
+        lbl.setFixedWidth(46)
+        return lbl
+
+    def _h_separator(self) -> QFrame:
+        line = QFrame(self)
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        return line
+
+    # ------------------------------------------------------------------
     # rows
     # ------------------------------------------------------------------
     def _add_row_editor(self, row: GdtRow) -> None:
-        editor = _RowEditor(row, self._refocus_after_menu, self)
+        editor = _RowEditor(row, self._icon_color, self._refocus_after_menu, self)
         editor.changed.connect(self._emit_state)
         editor.commitRequested.connect(self._commit)
         editor.removeRequested.connect(self._remove_row_editor)
@@ -365,66 +489,9 @@ class GdtInlineEditor(QFrame):
         for re in self._row_editors:
             re.set_remove_enabled(multi)
 
-    # ------------------------------------------------------------------
-    # symbol button (shared by the main symbol and the auxiliary one)
-    # ------------------------------------------------------------------
-    def _build_symbol_button(
-        self, getter, setter, *, allow_none: bool
-    ) -> QToolButton:
-        btn = QToolButton(self)
-        btn.setPopupMode(QToolButton.InstantPopup)
-        btn.setFocusPolicy(Qt.ClickFocus)
-        btn.setIconSize(QSize(_SYMBOL_ICON_SIZE, _SYMBOL_ICON_SIZE))
-        btn.setToolTip("Geometric characteristic")
-        menu = QMenu(btn)
-        menu.aboutToHide.connect(self._refocus_after_menu)
-        if allow_none:
-            act = menu.addAction(f"{_NO_MODIFIER_LABEL}  None")
-            act.triggered.connect(lambda: setter(None))
-        families = by_family()
-        for i, fam in enumerate(Family):
-            if i:
-                menu.addSeparator()
-            header = menu.addAction(fam.value)
-            header.setEnabled(False)
-            for c in families[fam]:
-                _, name = CHARACTERISTIC_META[c]
-                act = menu.addAction(
-                    gdt_symbol_icon(c, _MENU_ICON_SIZE, self._icon_color),
-                    name,
-                )
-                act.triggered.connect(
-                    lambda _c=False, ch=c: setter(ch)
-                )
-        btn.setMenu(menu)
-        self._sync_symbol_button(btn, getter())
-        return btn
-
-    def _sync_symbol_button(
-        self, btn: QToolButton, characteristic: Characteristic | None
-    ) -> None:
-        if characteristic is None:
-            btn.setIcon(action_icon("cancel", color=QColor(0, 0, 0, 0)))
-            btn.setText(_NO_MODIFIER_LABEL)
-            btn.setToolTip("No auxiliary symbol")
-        else:
-            btn.setText("")
-            btn.setIcon(
-                gdt_symbol_icon(
-                    characteristic, _SYMBOL_ICON_SIZE, self._icon_color
-                )
-            )
-            _, name = CHARACTERISTIC_META[characteristic]
-            btn.setToolTip(f"Geometric characteristic: {name}")
-
-    def _set_characteristic(self, c: Characteristic) -> None:
-        self._characteristic = c
-        self._sync_symbol_button(self._symbol_btn, c)
-        self._emit_state()
-
     def _set_aux_symbol(self, c: Characteristic | None) -> None:
         self._aux_symbol = c
-        self._sync_symbol_button(self._aux_btn, c)
+        _sync_symbol_button(self._aux_btn, c, self._icon_color)
         self._emit_state()
 
     # ------------------------------------------------------------------
@@ -434,7 +501,7 @@ class GdtInlineEditor(QFrame):
         rows = [re.row_state() for re in self._row_editors] or [GdtRow()]
         row0 = rows[0]
         return GdtState(
-            characteristic=self._characteristic,
+            characteristic=row0.characteristic,
             tolerance_prefix=row0.tolerance_prefix,
             tolerance_value=row0.tolerance_value,
             tolerance_modifier=row0.tolerance_modifier,

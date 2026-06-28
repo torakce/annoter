@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "annoter"
-version = "0.1.0"
+version = "0.1.1"
 description = "Standalone PDF annotator for mechanical engineering drawings (GD&T capable)."
 readme = "PLAN.md"
 requires-python = ">=3.12"

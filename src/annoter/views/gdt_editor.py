@@ -5,32 +5,33 @@ inspired by CATIA's Geometrical Tolerance dialog but kept in-place so
 the scene item stays its own live preview. It supports composite
 (multi-row) frames where **each row has its own characteristic symbol**
 (the item merges the symbol cell only across consecutive rows that share
-one), plus upper/lower texts and an optional auxiliary frame:
+one), plus upper/lower texts.
 
     Top text [______________]
-    line 1: [sym v][Ø v][value][mod v]  [A][m v][B][m v][C][m v]  [-]
-    line 2: [sym v][Ø v][value][mod v]  [A][m v][B][m v][C][m v]  [-]
+    line 1: [sym v][Ø v][value][mod v]  [A][m v]  [B][m v]  [C][m v]  [x]
+    line 2: [sym v][Ø v][value][mod v]  [A][m v]  [B][m v]  [C][m v]  [x]
     [+ line]
-    Aux [sym v][text]
     Bottom text [______________]
                                               [OK] [Cancel]
 
-Lifecycle contract (driven by MainWindow):
-    - `stateEdited(GdtState)` on every change -- apply to the item.
-    - `committed()` on Enter, the confirm button, or when focus leaves
-      the editor. Caller pushes the undo command and closes the editor.
+The editor only closes when the user explicitly commits or cancels:
+    - `committed()` on Enter, the confirm button. Caller pushes the undo
+      command and closes the editor.
     - `cancelled()` on Escape or the cancel button. Caller rolls back.
+Clicking elsewhere does NOT close it; MainWindow still commits it on
+document save, page switch, or when another frame is opened.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QMenu,
     QToolButton,
@@ -61,6 +62,7 @@ _ARROW = "▾"  # explicit drop-down affordance appended to menu buttons
 _SYMBOL_ICON_SIZE = 20
 _MENU_ICON_SIZE = 20
 _ACTION_ICON_SIZE = 16
+_DATUM_GROUP_GAP = 10  # extra space between datum+modifier groups
 
 _ACCENT = "#1E88E5"
 _FIELD_BORDER = "#9aa0a6"
@@ -91,6 +93,10 @@ _PANEL_QSS = f"""
     image: none;
     width: 0;
 }}
+#GdtDatumGroup {{
+    border: 1px solid #c8ccd0;
+    border-radius: 4px;
+}}
 """
 
 
@@ -100,15 +106,12 @@ def _parse_datum_text(text: str) -> list[str]:
 
 
 def _fill_characteristic_menu(
-    menu: QMenu, icon_color: QColor, setter, on_hide, *, allow_none: bool
+    menu: QMenu, icon_color: QColor, setter, on_hide
 ) -> None:
     menu.aboutToHide.connect(on_hide)
-    if allow_none:
-        act = menu.addAction(f"{_NONE_LABEL}  None")
-        act.triggered.connect(lambda: setter(None))
     families = by_family()
     for i, fam in enumerate(Family):
-        if i or allow_none:
+        if i:
             menu.addSeparator()
         header = menu.addAction(fam.value)
         header.setEnabled(False)  # textless section header under the QSS
@@ -121,22 +124,13 @@ def _fill_characteristic_menu(
 
 
 def _sync_symbol_button(
-    btn: QToolButton,
-    characteristic: Characteristic | None,
-    icon_color: QColor,
+    btn: QToolButton, characteristic: Characteristic, icon_color: QColor
 ) -> None:
     btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-    if characteristic is None:
-        btn.setIcon(QIcon())
-        btn.setText(f"{_NONE_LABEL} {_ARROW}")
-        btn.setToolTip("Auxiliary symbol (none)")
-    else:
-        btn.setIcon(
-            gdt_symbol_icon(characteristic, _SYMBOL_ICON_SIZE, icon_color)
-        )
-        btn.setText(_ARROW)
-        _, name = CHARACTERISTIC_META[characteristic]
-        btn.setToolTip(f"Characteristic: {name}")
+    btn.setIcon(gdt_symbol_icon(characteristic, _SYMBOL_ICON_SIZE, icon_color))
+    btn.setText(_ARROW)
+    _, name = CHARACTERISTIC_META[characteristic]
+    btn.setToolTip(f"Characteristic: {name}")
 
 
 class _RowEditor(QWidget):
@@ -170,8 +164,7 @@ class _RowEditor(QWidget):
         )
         menu = QMenu(self._symbol_btn)
         _fill_characteristic_menu(
-            menu, icon_color, self._set_characteristic, on_menu_hide,
-            allow_none=False,
+            menu, icon_color, self._set_characteristic, on_menu_hide
         )
         self._symbol_btn.setMenu(menu)
         _sync_symbol_button(self._symbol_btn, self._characteristic, icon_color)
@@ -197,29 +190,39 @@ class _RowEditor(QWidget):
 
         lay.addWidget(self._v_separator())
 
+        # Each datum is grouped with its modifier (tight), with extra
+        # space between the three groups for readability.
         self._datum_edits: list[QLineEdit] = []
         self._datum_mod_btns: list[QToolButton] = []
         for i, (datum, placeholder) in enumerate(
             zip(datums, ("A", "B", "C"))
         ):
-            edit = QLineEdit("-".join(datum.letters), self)
+            if i:
+                lay.addSpacing(_DATUM_GROUP_GAP)
+            group = QWidget(self)
+            group.setObjectName("GdtDatumGroup")
+            g = QHBoxLayout(group)
+            g.setContentsMargins(3, 1, 3, 1)
+            g.setSpacing(2)
+            edit = QLineEdit("-".join(datum.letters), group)
             edit.setPlaceholderText(placeholder)
             edit.setFixedWidth(32)
             edit.setAlignment(Qt.AlignCenter)
             edit.setToolTip("Datum letter(s); join with '-' (e.g. A-B)")
             edit.textChanged.connect(self.changed)
             edit.returnPressed.connect(self.commitRequested)
-            lay.addWidget(edit)
-            self._datum_edits.append(edit)
+            g.addWidget(edit)
             btn = self._modifier_button(
                 ALLOWED_DATUM_MODIFIERS,
                 datum.modifier,
                 lambda v, idx=i: self._set_datum_modifier(idx, v),
             )
-            lay.addWidget(btn)
+            g.addWidget(btn)
+            lay.addWidget(group)
+            self._datum_edits.append(edit)
             self._datum_mod_btns.append(btn)
 
-        lay.addSpacing(4)
+        lay.addSpacing(6)
         self._remove_btn = QToolButton(self)
         self._remove_btn.setFocusPolicy(Qt.ClickFocus)
         self._remove_btn.setText("✕")
@@ -346,17 +349,22 @@ class GdtInlineEditor(QFrame):
             QColor(icon_color) if icon_color is not None
             else QColor("#212121")
         )
+        # Preserve auxiliary state we no longer expose, so round-trips of
+        # frames that already carry one are not silently dropped.
         self._aux_symbol: Characteristic | None = initial.aux_symbol
+        self._aux_text: str = initial.aux_text
         self._finished = False
-        self._watching_focus = False
         self._row_editors: list[_RowEditor] = []
         # Suppress live emissions until every widget exists (rows are
-        # added before the lower/aux fields during construction).
+        # added before the lower-text field during construction).
         self._ready = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(6)
+        # Track the layout's size so adding/removing rows grows/shrinks
+        # the panel instead of crushing the new line.
+        outer.setSizeConstraint(QLayout.SetFixedSize)
 
         # Upper text.
         top = QHBoxLayout()
@@ -384,31 +392,6 @@ class GdtInlineEditor(QFrame):
         outer.addWidget(add_btn, 0, Qt.AlignLeft)
 
         outer.addWidget(self._h_separator())
-
-        # Auxiliary frame.
-        aux = QHBoxLayout()
-        aux.setSpacing(6)
-        aux.addWidget(self._field_label("Aux"))
-        self._aux_btn = QToolButton(self)
-        self._aux_btn.setPopupMode(QToolButton.InstantPopup)
-        self._aux_btn.setFocusPolicy(Qt.ClickFocus)
-        self._aux_btn.setIconSize(QSize(_SYMBOL_ICON_SIZE, _SYMBOL_ICON_SIZE))
-        aux_menu = QMenu(self._aux_btn)
-        _fill_characteristic_menu(
-            aux_menu, self._icon_color, self._set_aux_symbol,
-            self._refocus_after_menu, allow_none=True,
-        )
-        self._aux_btn.setMenu(aux_menu)
-        _sync_symbol_button(self._aux_btn, self._aux_symbol, self._icon_color)
-        aux.addWidget(self._aux_btn)
-        self._aux_edit = QLineEdit(initial.aux_text, self)
-        self._aux_edit.setPlaceholderText("aux text (e.g. A-B)")
-        self._aux_edit.setFixedWidth(96)
-        self._aux_edit.textChanged.connect(self._emit_state)
-        self._aux_edit.returnPressed.connect(self._commit)
-        aux.addWidget(self._aux_edit)
-        aux.addStretch(1)
-        outer.addLayout(aux)
 
         # Lower text.
         low = QHBoxLayout()
@@ -470,7 +453,6 @@ class GdtInlineEditor(QFrame):
         self._row_editors.append(editor)
         self._rows_box.addWidget(editor)
         self._update_remove_buttons()
-        self.adjustSize()
         self._emit_state()
 
     def _remove_row_editor(self, editor: _RowEditor) -> None:
@@ -481,18 +463,12 @@ class GdtInlineEditor(QFrame):
         editor.setParent(None)
         editor.deleteLater()
         self._update_remove_buttons()
-        self.adjustSize()
         self._emit_state()
 
     def _update_remove_buttons(self) -> None:
         multi = len(self._row_editors) > 1
         for re in self._row_editors:
             re.set_remove_enabled(multi)
-
-    def _set_aux_symbol(self, c: Characteristic | None) -> None:
-        self._aux_symbol = c
-        _sync_symbol_button(self._aux_btn, c, self._icon_color)
-        self._emit_state()
 
     # ------------------------------------------------------------------
     # state
@@ -512,7 +488,7 @@ class GdtInlineEditor(QFrame):
             upper_text=self._upper_edit.text(),
             lower_text=self._lower_edit.text(),
             aux_symbol=self._aux_symbol,
-            aux_text=self._aux_edit.text(),
+            aux_text=self._aux_text,
         )
 
     def _emit_state(self, *_args) -> None:
@@ -521,17 +497,13 @@ class GdtInlineEditor(QFrame):
         self.stateEdited.emit(self.current_state())
 
     # ------------------------------------------------------------------
-    # open / commit / cancel
+    # open / commit / cancel  (explicit only -- no commit on focus loss)
     # ------------------------------------------------------------------
     def open(self) -> None:
         self.adjustSize()
         self.show()
         self.raise_()
         self._focus_first_field()
-        app = QApplication.instance()
-        if app is not None and not self._watching_focus:
-            app.focusChanged.connect(self._on_app_focus_changed)
-            self._watching_focus = True
 
     def _focus_first_field(self) -> None:
         if self._row_editors:
@@ -544,23 +516,13 @@ class GdtInlineEditor(QFrame):
         if self._finished:
             return
         self._finished = True
-        self._stop_focus_watch()
         self.committed.emit()
 
     def _cancel(self) -> None:
         if self._finished:
             return
         self._finished = True
-        self._stop_focus_watch()
         self.cancelled.emit()
-
-    def _stop_focus_watch(self) -> None:
-        if not self._watching_focus:
-            return
-        self._watching_focus = False
-        app = QApplication.instance()
-        if app is not None:
-            app.focusChanged.disconnect(self._on_app_focus_changed)
 
     def _is_inside(self, widget) -> bool:
         # Walk parentWidget(): unlike isAncestorOf it crosses window
@@ -573,24 +535,9 @@ class GdtInlineEditor(QFrame):
             w = w.parentWidget()
         return False
 
-    def _on_app_focus_changed(self, _old, now) -> None:
-        if now is None or self._finished:
-            return
-        if self._is_inside(now):
-            return
-        QTimer.singleShot(0, self._maybe_commit_on_focus_loss)
-
-    def _maybe_commit_on_focus_loss(self) -> None:
-        if self._finished:
-            return
-        if QApplication.activePopupWidget() is not None:
-            return  # one of our menus is open; not a focus loss
-        w = QApplication.focusWidget()
-        if w is None or self._is_inside(w):
-            return
-        self._commit()
-
     def _refocus_after_menu(self) -> None:
+        # When a popup menu closes the focus stays on the (focus-less)
+        # button; pull it back into a field so Enter keeps committing.
         QTimer.singleShot(0, self._take_focus_back)
 
     def _take_focus_back(self) -> None:
@@ -611,7 +558,3 @@ class GdtInlineEditor(QFrame):
             event.accept()
             return
         super().keyPressEvent(event)
-
-    def hideEvent(self, event) -> None:  # noqa: ANN001
-        self._stop_focus_watch()
-        super().hideEvent(event)

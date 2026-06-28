@@ -141,49 +141,19 @@ def test_escape_cancels(host) -> None:
     assert commits == []
 
 
-def test_focus_check_skips_when_popup_open(qapp, host) -> None:
-    # Regression: opening a dropdown bounces focus to the view; the
-    # deferred check must not commit while the popup is active.
+def test_clicking_outside_does_not_commit(qapp, host) -> None:
+    # The editor must only close on explicit commit/cancel: moving focus
+    # to a neutral widget must not fire `committed`.
     host.show()
     editor = GdtInlineEditor(GdtState(), host)
     editor.show()
     commits: list[int] = []
     editor.committed.connect(lambda: commits.append(1))
-    menu = editor._row_editors[0]._symbol_btn.menu()
-    menu.popup(host.mapToGlobal(host.rect().center()))
-    qapp.processEvents()
-    assert QApplication.activePopupWidget() is menu
-    editor._maybe_commit_on_focus_loss()
-    assert commits == []
-    menu.hide()
-    qapp.processEvents()
-
-
-def test_focus_check_commits_when_focus_outside(qapp, host) -> None:
-    host.show()
-    editor = GdtInlineEditor(GdtState(), host)
-    editor.show()
     outside = QWidget(host)
     outside.setFocusPolicy(Qt.StrongFocus)
     outside.show()
     outside.setFocus()
     qapp.processEvents()
-    assert QApplication.focusWidget() is outside
-    commits: list[int] = []
-    editor.committed.connect(lambda: commits.append(1))
-    editor._maybe_commit_on_focus_loss()
-    assert commits == [1]
-
-
-def test_focus_check_ignores_focus_inside(qapp, host) -> None:
-    host.show()
-    editor = GdtInlineEditor(GdtState(), host)
-    editor.show()
-    editor._row_editors[0]._value_edit.setFocus()
-    qapp.processEvents()
-    commits: list[int] = []
-    editor.committed.connect(lambda: commits.append(1))
-    editor._maybe_commit_on_focus_loss()
     assert commits == []
 
 
@@ -200,17 +170,22 @@ def test_add_and_remove_rows(host) -> None:
     assert len(editor._row_editors) == 1
 
 
-def test_upper_lower_aux_in_state(host) -> None:
+def test_upper_lower_in_state(host) -> None:
     editor = GdtInlineEditor(GdtState(), host)
     editor._upper_edit.setText("2x")
     editor._lower_edit.setText("VALID FOR BOTH PARTS")
-    editor._set_aux_symbol(Characteristic.PARALLELISM)
-    editor._aux_edit.setText("A-B")
     out = editor.current_state()
     assert out.upper_text == "2x"
     assert out.lower_text == "VALID FOR BOTH PARTS"
-    assert out.aux_symbol is Characteristic.PARALLELISM
-    assert out.aux_text == "A-B"
+
+
+def test_adding_a_row_grows_the_panel(host) -> None:
+    editor = GdtInlineEditor(GdtState(), host)
+    editor.show()
+    before = editor.sizeHint().height()
+    editor._add_row_editor(GdtRow())
+    after = editor.sizeHint().height()
+    assert after > before
 
 
 def test_cancel_after_commit_is_noop(host) -> None:

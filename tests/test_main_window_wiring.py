@@ -227,6 +227,172 @@ def test_sticky_note_empty_rolls_back(qapp, sample_pdf: Path) -> None:
         win.close()
 
 
+def test_format_painter_copies_style_to_clicked_target(
+    qapp, sample_pdf: Path
+) -> None:
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        source = _push_rect(win, QRectF(0, 0, 10, 10))
+        source.set_color(QColor("#123456"))
+        source.set_stroke(5.0)
+        target = _push_rect(win, QRectF(50, 50, 10, 10))
+
+        source.setSelected(True)
+        win.act_format_painter.setChecked(True)
+        assert win._tool_controller.tool() is Tool.FORMAT_PAINTER
+        source.setSelected(False)
+
+        win._on_format_paint_requested(target)
+        assert target.color().name() == "#123456"
+        assert target.stroke() == pytest.approx(5.0)
+        # Sticky: stays active for further clicks until toggled off.
+        assert win._tool_controller.tool() is Tool.FORMAT_PAINTER
+
+        stack = win._undo_group.activeStack()
+        stack.undo()
+        assert target.stroke() != pytest.approx(5.0)
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_format_painter_requires_single_selection(
+    qapp, sample_pdf: Path
+) -> None:
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        win.act_format_painter.setChecked(True)
+        assert win.act_format_painter.isChecked() is False
+        assert win._tool_controller.tool() is Tool.SELECT
+
+        a = _push_rect(win, QRectF(0, 0, 10, 10))
+        b = _push_rect(win, QRectF(20, 20, 10, 10))
+        a.setSelected(True)
+        b.setSelected(True)
+        win.act_format_painter.setChecked(True)
+        assert win.act_format_painter.isChecked() is False
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_switching_tool_cancels_format_painter(qapp, sample_pdf: Path) -> None:
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        source = _push_rect(win, QRectF(0, 0, 10, 10))
+        source.setSelected(True)
+        win.act_format_painter.setChecked(True)
+        assert win._tool_controller.tool() is Tool.FORMAT_PAINTER
+
+        win._tool_controller.set_tool(Tool.RECTANGLE)
+        assert win.act_format_painter.isChecked() is False
+        assert win._format_paint_style is None
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_selection_toolbar_shows_and_hides_with_selection(
+    qapp, sample_pdf: Path
+) -> None:
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        assert win._selection_toolbar.isHidden()
+
+        item = _push_rect(win, QRectF(10, 10, 30, 30))
+        item.setSelected(True)
+        assert not win._selection_toolbar.isHidden()
+
+        item.setSelected(False)
+        assert win._selection_toolbar.isHidden()
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_selection_toolbar_duplicate_and_delete(qapp, sample_pdf: Path) -> None:
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        item = _push_rect(win, QRectF(10, 10, 30, 30))
+        item.setSelected(True)
+
+        win._selection_toolbar.duplicateClicked.emit()
+        page = win._scene.page_item()
+        annots = [c for c in page.childItems() if isinstance(c, RectangleItem)]
+        assert len(annots) == 2
+
+        for it in annots:
+            it.setSelected(True)
+        win._selection_toolbar.deleteClicked.emit()
+        remaining = [
+            c for c in page.childItems() if isinstance(c, RectangleItem)
+        ]
+        assert remaining == []
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_selection_toolbar_reflects_item_style(qapp, sample_pdf: Path) -> None:
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        item = _push_rect(win, QRectF(10, 10, 30, 30))
+        item.set_color(QColor("#00FF00"))
+        item.set_stroke(7.0)
+        item.setSelected(True)
+        assert win._selection_toolbar._stroke_btn.text() == "7 px"
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_group_and_ungroup_actions(qapp, sample_pdf: Path) -> None:
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        a = _push_rect(win, QRectF(0, 0, 10, 10))
+        b = _push_rect(win, QRectF(50, 50, 10, 10))
+        a.setSelected(True)
+        b.setSelected(True)
+
+        win.act_group.trigger()
+        assert win._scene.group_of(a) == {a, b}
+
+        win.act_ungroup.trigger()
+        assert win._scene.group_of(a) is None
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_align_selection_via_action(qapp, sample_pdf: Path) -> None:
+    from annoter.controllers.align import AlignMode
+
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+        a = _push_rect(win, QRectF(0, 0, 10, 10))
+        b = _push_rect(win, QRectF(0, 0, 10, 10))
+        b.setPos(50, 80)
+        a.setSelected(True)
+        b.setSelected(True)
+        win._align_selection(AlignMode.LEFT)
+        assert a.pos().x() == pytest.approx(b.pos().x())
+        # Undoable as a single step.
+        stack = win._undo_group.activeStack()
+        stack.undo()
+        assert b.pos().x() == pytest.approx(50)
+    finally:
+        win._on_close()
+        win.close()
+
+
 def test_tool_controller_changes_propagate(qapp) -> None:
     win = MainWindow()
     try:

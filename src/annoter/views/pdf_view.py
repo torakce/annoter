@@ -27,7 +27,9 @@ from annoter.config import (
     ZOOM_MIN,
     ZOOM_STEP,
 )
+from annoter.controllers.geometry import px_to_pt
 from annoter.controllers.tools import Tool
+from annoter.views.measurement_hud import MeasurementHud
 
 
 class PdfView(QGraphicsView):
@@ -67,6 +69,9 @@ class PdfView(QGraphicsView):
         # Tool-dependent cursor: drawing tools show a crosshair so the
         # user can see exactly where the next click will start.
         self._tool_cursor: Qt.CursorShape = Qt.ArrowCursor
+
+        # Live size/length readout while drafting or resizing a shape.
+        self._measurement_hud = MeasurementHud(self.viewport())
 
     # ------------------------------------------------------------------
     # zoom
@@ -126,6 +131,8 @@ class PdfView(QGraphicsView):
             cursor = Qt.CrossCursor
         elif tool is Tool.TEXT:
             cursor = Qt.IBeamCursor
+        elif tool is Tool.FORMAT_PAINTER:
+            cursor = Qt.PointingHandCursor
         else:
             cursor = Qt.ArrowCursor
         self._tool_cursor = cursor
@@ -306,6 +313,29 @@ class PdfView(QGraphicsView):
             return
 
         super().mouseMoveEvent(event)
+        self._update_measurement_hud(event.pos())
+
+    def _update_measurement_hud(self, view_pos: QPoint) -> None:
+        scene = self.scene()
+        measurement = (
+            scene.current_measurement()
+            if scene is not None and hasattr(scene, "current_measurement")
+            else None
+        )
+        if measurement is None:
+            self._measurement_hud.hide()
+            return
+        kind, a, b = measurement
+        if kind == "rect":
+            self._measurement_hud.show_rect(
+                px_to_pt(a), px_to_pt(b), view_pos
+            )
+        elif kind == "line":
+            self._measurement_hud.show_line(px_to_pt(a), b, view_pos)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001
+        self._measurement_hud.hide()
+        super().leaveEvent(event)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         scene_pos = self.mapToScene(event.pos())
@@ -353,3 +383,4 @@ class PdfView(QGraphicsView):
             return
 
         super().mouseReleaseEvent(event)
+        self._measurement_hud.hide()

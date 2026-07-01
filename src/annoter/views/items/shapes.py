@@ -120,6 +120,7 @@ class _ShapeItem(AnnotationItem):
         self._rect: QRectF = QRectF(rect).normalized()
         self._fill_enabled: bool = False
         self._fill_color: QColor = QColor("#FFEB3B")
+        self._fill_opacity: float = 1.0
         self._text: str = ""
         self._label_font_size: int = _DEFAULT_LABEL_POINT_SIZE
         self._inner: _ShapeTextItem | None = None
@@ -260,6 +261,16 @@ class _ShapeItem(AnnotationItem):
         self._fill_color = c
         self.update()
 
+    def fill_opacity(self) -> float:
+        return self._fill_opacity
+
+    def set_fill_opacity(self, opacity: float) -> None:
+        v = max(0.0, min(1.0, float(opacity)))
+        if v == self._fill_opacity:
+            return
+        self._fill_opacity = v
+        self.update()
+
     def boundingRect(self) -> QRectF:
         m = self._stroke / 2.0 + 1.0 + self.handles_extent()
         return self._rect.adjusted(-m, -m, m, m)
@@ -272,7 +283,9 @@ class _ShapeItem(AnnotationItem):
 
     def _brush(self) -> QBrush:
         if self._fill_enabled:
-            return QBrush(self._fill_color)
+            c = QColor(self._fill_color)
+            c.setAlphaF(self._fill_opacity)
+            return QBrush(c)
         return QBrush(Qt.NoBrush)
 
     # ------------------------------------------------------------------
@@ -366,6 +379,7 @@ class RectangleItem(_ShapeItem):
         self._copy_base_style_into(c)
         c.set_fill_enabled(self._fill_enabled)
         c.set_fill_color(self._fill_color)
+        c.set_fill_opacity(self._fill_opacity)
         c.set_corner_radius(self._corner_radius)
         c.set_label_font_size(self._label_font_size)
         c.set_text(self._text)
@@ -386,6 +400,7 @@ class EllipseItem(_ShapeItem):
         self._copy_base_style_into(c)
         c.set_fill_enabled(self._fill_enabled)
         c.set_fill_color(self._fill_color)
+        c.set_fill_opacity(self._fill_opacity)
         c.set_label_font_size(self._label_font_size)
         c.set_text(self._text)
         return c
@@ -433,4 +448,5 @@ class CloudItem(_ShapeItem):
         self._copy_base_style_into(c)
         c.set_fill_enabled(self._fill_enabled)
         c.set_fill_color(self._fill_color)
+        c.set_fill_opacity(self._fill_opacity)
         return c

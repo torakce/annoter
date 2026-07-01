@@ -218,6 +218,17 @@ class AnnotationItem(QGraphicsItem):
         # Tell Qt's BSP index so it doesn't keep a stale bounds cache.
         if change == QGraphicsItem.ItemSelectedHasChanged:
             self.prepareGeometryChange()
+        elif change == QGraphicsItem.ItemPositionChange:
+            # Smart-guide snapping (PowerPoint/Canva-style): let the
+            # scene adjust the proposed position during an interactive
+            # drag. Delegated (duck-typed) so this base class doesn't
+            # need to know about sibling items or page geometry; the
+            # scene ignores the request outside of a real mouse drag
+            # (e.g. undo/redo, Align commands), so programmatic moves
+            # are never perturbed.
+            scene = self.scene()
+            if scene is not None and hasattr(scene, "maybe_snap_move"):
+                return scene.maybe_snap_move(self, QPointF(value))
         return super().itemChange(change, value)
 
     # ------------------------------------------------------------------

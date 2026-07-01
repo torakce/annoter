@@ -218,6 +218,7 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
     if isinstance(item, RectangleItem) and not isinstance(item, EllipseItem):
         p["fill_enabled"] = bool(item.fill_enabled())
         p["fill_color"] = item.fill_color().name()
+        p["fill_opacity"] = float(item.fill_opacity())
         p["corner_radius"] = float(item.corner_radius())
         if item.text():
             p["text"] = item.text()
@@ -225,6 +226,7 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
     elif isinstance(item, EllipseItem):
         p["fill_enabled"] = bool(item.fill_enabled())
         p["fill_color"] = item.fill_color().name()
+        p["fill_opacity"] = float(item.fill_opacity())
         if item.text():
             p["text"] = item.text()
             p["label_font_size"] = int(item.label_font_size())
@@ -232,10 +234,12 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
         p["poly"] = "cloud"
         p["fill_enabled"] = bool(item.fill_enabled())
         p["fill_color"] = item.fill_color().name()
+        p["fill_opacity"] = float(item.fill_opacity())
     elif isinstance(item, PolygonItem):
         p["poly"] = "polygon"
         p["fill_enabled"] = bool(item.fill_enabled())
         p["fill_color"] = item.fill_color().name()
+        p["fill_opacity"] = float(item.fill_opacity())
     elif isinstance(item, ArrowItem):
         p["start_end"] = item.start_end().value
         p["end_end"] = item.end_end().value
@@ -275,6 +279,8 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
             item.set_fill_enabled(bool(props["fill_enabled"]))
         if "fill_color" in props:
             item.set_fill_color(QColor(str(props["fill_color"])))
+        if "fill_opacity" in props:
+            item.set_fill_opacity(float(props["fill_opacity"]))
         if "corner_radius" in props:
             item.set_corner_radius(float(props["corner_radius"]))
         if "label_font_size" in props:
@@ -286,6 +292,8 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
             item.set_fill_enabled(bool(props["fill_enabled"]))
         if "fill_color" in props:
             item.set_fill_color(QColor(str(props["fill_color"])))
+        if "fill_opacity" in props:
+            item.set_fill_opacity(float(props["fill_opacity"]))
         if "label_font_size" in props:
             item.set_label_font_size(int(props["label_font_size"]))
         if "text" in props:
@@ -295,6 +303,8 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
             item.set_fill_enabled(bool(props["fill_enabled"]))
         if "fill_color" in props:
             item.set_fill_color(QColor(str(props["fill_color"])))
+        if "fill_opacity" in props:
+            item.set_fill_opacity(float(props["fill_opacity"]))
     elif isinstance(item, ArrowItem):
         try:
             if "start_end" in props:
@@ -337,6 +347,19 @@ def _set_dash_border(
         annot.set_border(width=stroke)
 
 
+def _apply_fill_opacity(annot: fitz.Annot, item) -> None:
+    """Best-effort translucency for filled shapes.
+
+    PDF's Square/Circle/Polygon annotations have no fill-only alpha --
+    only a whole-annotation `/CA` opacity that covers stroke and fill
+    together. We only touch it when the fill is actually on and less
+    than fully opaque, so untouched shapes (opacity 1.0, the default)
+    keep writing byte-identical annotations to before this feature.
+    """
+    if item.fill_enabled() and item.fill_opacity() < 1.0:
+        annot.set_opacity(item.fill_opacity())
+
+
 def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
     color = _qcolor_to_rgb01(item.color())
     stroke = float(item.stroke())
@@ -352,6 +375,7 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         if item.fill_enabled():
             colors["fill"] = _qcolor_to_rgb01(item.fill_color())
         annot.set_colors(colors)
+        _apply_fill_opacity(annot, item)
         _set_dash_border(annot, stroke, item.dash_style())
         annot.set_info(title=_OWNER_TAG, subject=subject)
         annot.update()
@@ -364,6 +388,7 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         if item.fill_enabled():
             colors["fill"] = _qcolor_to_rgb01(item.fill_color())
         annot.set_colors(colors)
+        _apply_fill_opacity(annot, item)
         _set_dash_border(annot, stroke, item.dash_style())
         annot.set_info(title=_OWNER_TAG, subject=subject)
         annot.update()
@@ -382,6 +407,7 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         if item.fill_enabled():
             colors["fill"] = _qcolor_to_rgb01(item.fill_color())
         annot.set_colors(colors)
+        _apply_fill_opacity(annot, item)
         # Cloudy border effect so Acrobat/Foxit draw the scallops too.
         annot.set_border(width=stroke, clouds=1)
         annot.set_info(title=_OWNER_TAG, subject=subject)
@@ -402,6 +428,7 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
             if item.fill_enabled():
                 colors["fill"] = _qcolor_to_rgb01(item.fill_color())
             annot.set_colors(colors)
+            _apply_fill_opacity(annot, item)
         else:
             annot = page.add_polyline_annot(pts)
             annot.set_colors(stroke=color)

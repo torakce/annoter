@@ -1,22 +1,32 @@
 """PropertiesDock: per-type property editor for the current selection.
 
-The dock listens to the scene's selectionChanged signal, rebuilds an
-appropriate form, and pushes a `ChangePropsCommand` whenever an editor
-emits its "editing finished" signal. Live previews use the same path
-so each user gesture lands as one undo step.
+The dock listens to the scene's selectionChanged signal and rebuilds an
+appropriate form. Numeric/text fields (QSpinBox, QDoubleSpinBox,
+QLineEdit) use a live-preview-then-commit pattern: every keystroke or
+spin-arrow click applies the change directly to the item(s) so the
+canvas updates immediately (no need to click elsewhere first), while
+the undo command is only pushed once, when the field loses focus or
+Enter is pressed -- so a whole editing session (e.g. clicking the
+stroke spinner five times) still lands as a single undo step, exactly
+like a mouse drag. See `_wire_live_prop` / `_wire_live_geom`.
+Checkboxes, combo boxes and the color-picker button are already
+"live" by nature (their signals only fire on a real, discrete choice),
+so they still commit straight away via `_push_prop`.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Callable
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QUndoStack
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
     QDockWidget,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -27,7 +37,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from annoter.controllers.commands import ChangePropsCommand
+from annoter.controllers.commands import (
+    ChangePropsCommand,
+    MoveAnnotationsCommand,
+    ResizeCommand,
+)
+from annoter.controllers.geometry import (
+    item_local_rect,
+    item_scene_rect,
+    move_delta_for_rect,
+    pt_to_px,
+    px_to_pt,
+)
 from annoter.model.styles import DashStyle, EndStyle, TextAlign
 from annoter.views.icons import align_icon, dash_icon, end_icon
 from annoter.views.items.base import AnnotationItem
@@ -130,6 +151,8 @@ class PropertiesDock(QDockWidget):
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
         self._add_common_rows(form)
+        if len(self._items) == 1:
+            self._add_geometry_rows(form, self._items[0])
         if len(types) == 1:
             cls = next(iter(types))
             if issubclass(cls, RectangleItem):
@@ -176,9 +199,7 @@ class PropertiesDock(QDockWidget):
         spin = QSpinBox()
         spin.setRange(1, 20)
         spin.setValue(int(round(first.stroke())))
-        spin.editingFinished.connect(
-            lambda s=spin: self._push_prop("stroke", float(s.value()))
-        )
+        self._wire_live_prop(spin, "stroke", transform=float)
         form.addRow("Stroke", spin)
 
         # Dash style
@@ -191,6 +212,271 @@ class PropertiesDock(QDockWidget):
             )
         )
         form.addRow("Dash", combo)
+
+    def _add_geometry_rows(self, form: QFormLayout, item: AnnotationItem) -> None:
+        """Precise numeric position/size, mirroring the live measurement
+        HUD shown while dragging (same unit: PDF points). Live-previews
+        on every change (see `_wire_live_geom`) and lands as the same
+        undo command a manual drag would produce, once."""
+        rect = item_scene_rect(item)
+
+        x_spin = self._geometry_spin(px_to_pt(rect.x()))
+        self._wire_live_geom(
+            x_spin,
+            lambda v: self._apply_move_live(item, x=v),
+            lambda: QPointF(item.pos()),
+            lambda orig: self._commit_move(item, orig),
+        )
+        form.addRow("X (pt)", x_spin)
+
+        y_spin = self._geometry_spin(px_to_pt(rect.y()))
+        self._wire_live_geom(
+            y_spin,
+            lambda v: self._apply_move_live(item, y=v),
+            lambda: QPointF(item.pos()),
+            lambda orig: self._commit_move(item, orig),
+        )
+        form.addRow("Y (pt)", y_spin)
+
+        if isinstance(item, LineItem):
+            p1, p2 = item.line_points()
+            dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
+            length_px = math.hypot(dx, dy)
+            angle_deg = (-math.degrees(math.atan2(dy, dx))) % 360.0
+
+            len_spin = self._geometry_spin(
+                px_to_pt(length_px), minimum=0.1, maximum=100000.0
+            )
+            self._wire_live_geom(
+                len_spin,
+                lambda v: self._apply_line_geom_live(item, length_pt=v),
+                item.geom_snapshot,
+                lambda orig: self._commit_resize(item, orig),
+            )
+            form.addRow("Length (pt)", len_spin)
+
+            ang_spin = self._geometry_spin(
+                angle_deg, minimum=-3600.0, maximum=3600.0
+            )
+            self._wire_live_geom(
+                ang_spin,
+                lambda v: self._apply_line_geom_live(item, angle_deg=v),
+                item.geom_snapshot,
+                lambda orig: self._commit_resize(item, orig),
+            )
+            form.addRow("Angle (deg)", ang_spin)
+        elif hasattr(item, "rect") and hasattr(item, "set_rect"):
+            w_spin = self._geometry_spin(
+                px_to_pt(rect.width()), minimum=0.1, maximum=100000.0
+            )
+            self._wire_live_geom(
+                w_spin,
+                lambda v: self._apply_resize_live(item, w=v),
+                item.geom_snapshot,
+                lambda orig: self._commit_resize(item, orig),
+            )
+            form.addRow("Width (pt)", w_spin)
+
+            h_spin = self._geometry_spin(
+                px_to_pt(rect.height()), minimum=0.1, maximum=100000.0
+            )
+            self._wire_live_geom(
+                h_spin,
+                lambda v: self._apply_resize_live(item, h=v),
+                item.geom_snapshot,
+                lambda orig: self._commit_resize(item, orig),
+            )
+            form.addRow("Height (pt)", h_spin)
+
+    @staticmethod
+    def _geometry_spin(
+        value: float, *, minimum: float = -100000.0, maximum: float = 100000.0
+    ) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(1)
+        spin.setRange(minimum, maximum)
+        spin.setValue(value)
+        return spin
+
+    # -- live preview halves (no undo) --------------------------------
+    def _apply_move_live(
+        self, item: AnnotationItem, *, x: float | None = None, y: float | None = None
+    ) -> None:
+        current = item_scene_rect(item)
+        target_x_px = pt_to_px(x) if x is not None else current.x()
+        target_y_px = pt_to_px(y) if y is not None else current.y()
+        delta = move_delta_for_rect(item, QPointF(target_x_px, target_y_px))
+        item.setPos(item.pos() + delta)
+
+    def _apply_resize_live(
+        self, item: AnnotationItem, *, w: float | None = None, h: float | None = None
+    ) -> None:
+        local = item_local_rect(item)
+        new_w = pt_to_px(w) if w is not None else local.width()
+        new_h = pt_to_px(h) if h is not None else local.height()
+        if new_w <= 0 or new_h <= 0:
+            return
+        item.set_rect(QRectF(local.x(), local.y(), new_w, new_h))
+
+    def _apply_line_geom_live(
+        self,
+        item: AnnotationItem,
+        *,
+        length_pt: float | None = None,
+        angle_deg: float | None = None,
+    ) -> None:
+        p1, p2 = item.line_points()
+        dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
+        cur_length = math.hypot(dx, dy)
+        cur_angle = (-math.degrees(math.atan2(dy, dx))) % 360.0
+        target_length = (
+            pt_to_px(length_pt) if length_pt is not None else cur_length
+        )
+        target_angle = angle_deg if angle_deg is not None else cur_angle
+        if target_length <= 0:
+            return
+        math_angle = math.radians((-target_angle) % 360.0)
+        new_p2 = QPointF(
+            p1.x() + target_length * math.cos(math_angle),
+            p1.y() + target_length * math.sin(math_angle),
+        )
+        item.set_line_points(p1, new_p2)
+
+    # -- commit halves (pushes the undo command once) -----------------
+    def _commit_move(self, item: AnnotationItem, original_pos: QPointF) -> None:
+        new_pos = QPointF(item.pos())
+        if (new_pos - original_pos).manhattanLength() < 1e-6:
+            return
+        self._push_command(
+            MoveAnnotationsCommand(
+                [(item, original_pos, new_pos)], label="Move annotation"
+            )
+        )
+
+    def _commit_resize(self, item: AnnotationItem, original_snapshot: object) -> None:
+        new = item.geom_snapshot()
+        if original_snapshot == new:
+            return
+        self._push_command(ResizeCommand(item, original_snapshot, new))
+
+    # -- single-shot convenience wrappers (apply + commit in one call,
+    # e.g. for callers that don't need live preview) ------------------
+    def _push_move(
+        self, item: AnnotationItem, *, x: float | None = None, y: float | None = None
+    ) -> None:
+        original_pos = QPointF(item.pos())
+        self._apply_move_live(item, x=x, y=y)
+        self._commit_move(item, original_pos)
+
+    def _push_resize_rect(
+        self, item: AnnotationItem, *, w: float | None = None, h: float | None = None
+    ) -> None:
+        original = item.geom_snapshot()
+        self._apply_resize_live(item, w=w, h=h)
+        self._commit_resize(item, original)
+
+    def _push_line_geom(
+        self,
+        item: AnnotationItem,
+        *,
+        length_pt: float | None = None,
+        angle_deg: float | None = None,
+    ) -> None:
+        original = item.geom_snapshot()
+        self._apply_line_geom_live(item, length_pt=length_pt, angle_deg=angle_deg)
+        self._commit_resize(item, original)
+
+    def _push_command(self, cmd) -> None:
+        if self._undo_stack is not None:
+            self._undo_stack.push(cmd)
+        else:
+            cmd.redo()
+
+    # ------------------------------------------------------------------
+    # live-preview-then-commit wiring (see module docstring)
+    # ------------------------------------------------------------------
+    def _live_prop(self, name: str, value: object) -> None:
+        """Apply `name` directly to every selected item, no undo -- the
+        instant-feedback half of `_wire_live_prop`."""
+        for it in self._items:
+            setter = getattr(it, f"set_{name}", None)
+            if setter is not None:
+                setter(value)
+
+    def _wire_live_prop(
+        self,
+        widget,
+        name: str,
+        *,
+        is_line_edit: bool = False,
+        transform: Callable[[object], object] = lambda v: v,
+    ) -> None:
+        """Wire a QSpinBox/QDoubleSpinBox/QLineEdit so every change
+        previews live and a single `ChangePropsCommand` commits once
+        editing finishes. The pre-edit values are captured lazily, on
+        the *first* change of each editing session -- not when the
+        dock/field was built -- so editing the same field again later,
+        or editing a sibling field first, never uses a stale baseline.
+        """
+        originals: dict[AnnotationItem, object] = {}
+
+        def current_value():
+            raw = widget.text() if is_line_edit else widget.value()
+            return transform(raw)
+
+        def on_change(*_args) -> None:
+            if not originals:
+                for it in self._items:
+                    try:
+                        originals[it] = getattr(it, name)()
+                    except AttributeError:
+                        continue
+            self._live_prop(name, current_value())
+
+        def on_finish() -> None:
+            if not originals:
+                return
+            value = current_value()
+            changes = [
+                (it, name, old, value)
+                for it, old in originals.items()
+                if old != value
+            ]
+            originals.clear()
+            if changes:
+                self._push_command(ChangePropsCommand(changes))
+
+        if is_line_edit:
+            widget.textChanged.connect(on_change)
+        else:
+            widget.valueChanged.connect(on_change)
+        widget.editingFinished.connect(on_finish)
+
+    def _wire_live_geom(
+        self,
+        spin: QDoubleSpinBox,
+        apply_live: Callable[[float], None],
+        get_snapshot: Callable[[], object],
+        commit: Callable[[object], None],
+    ) -> None:
+        """Like `_wire_live_prop`, but for the single-item geometry
+        fields, which use `MoveAnnotationsCommand` / `ResizeCommand`
+        (opaque snapshots) instead of `ChangePropsCommand`."""
+        state: dict[str, object] = {"original": None}
+
+        def on_change(value: float) -> None:
+            if state["original"] is None:
+                state["original"] = get_snapshot()
+            apply_live(value)
+
+        def on_finish() -> None:
+            if state["original"] is None:
+                return
+            commit(state["original"])
+            state["original"] = None
+
+        spin.valueChanged.connect(on_change)
+        spin.editingFinished.connect(on_finish)
 
     def _add_shape_rows(
         self, form: QFormLayout, with_corner: bool
@@ -212,35 +498,26 @@ class PropertiesDock(QDockWidget):
             )
         )
         form.addRow("Fill color", fc_btn)
+        self._add_fill_opacity_row(form, first)
 
         if with_corner:
             spin = QSpinBox()
             spin.setRange(0, 200)
             spin.setValue(int(round(first.corner_radius())))
-            spin.editingFinished.connect(
-                lambda s=spin: self._push_prop(
-                    "corner_radius", float(s.value())
-                )
-            )
+            self._wire_live_prop(spin, "corner_radius", transform=float)
             form.addRow("Corner radius", spin)
 
         # Text label
         text_edit = QLineEdit()
         text_edit.setText(first.text())
-        text_edit.editingFinished.connect(
-            lambda e=text_edit: self._push_prop("text", e.text())
-        )
+        self._wire_live_prop(text_edit, "text", is_line_edit=True)
         form.addRow("Text", text_edit)
 
         # Label font size
         lbl_size = QSpinBox()
         lbl_size.setRange(4, 96)
         lbl_size.setValue(int(first.label_font_size()))
-        lbl_size.editingFinished.connect(
-            lambda s=lbl_size: self._push_prop(
-                "label_font_size", int(s.value())
-            )
-        )
+        self._wire_live_prop(lbl_size, "label_font_size", transform=int)
         form.addRow("Text size", lbl_size)
 
     def _add_fill_rows(self, form: QFormLayout) -> None:
@@ -259,6 +536,17 @@ class PropertiesDock(QDockWidget):
             )
         )
         form.addRow("Fill color", fc_btn)
+        self._add_fill_opacity_row(form, first)
+
+    def _add_fill_opacity_row(self, form: QFormLayout, first) -> None:
+        spin = QSpinBox()
+        spin.setRange(0, 100)
+        spin.setSuffix(" %")
+        spin.setValue(int(round(first.fill_opacity() * 100)))
+        self._wire_live_prop(
+            spin, "fill_opacity", transform=lambda v: v / 100.0
+        )
+        form.addRow("Fill opacity", spin)
 
     def _add_arrow_rows(self, form: QFormLayout) -> None:
         first = self._items[0]
@@ -294,9 +582,7 @@ class PropertiesDock(QDockWidget):
         size = QSpinBox()
         size.setRange(4, 144)
         size.setValue(int(first.font_size()))
-        size.editingFinished.connect(
-            lambda s=size: self._push_prop("font_size", int(s.value()))
-        )
+        self._wire_live_prop(size, "font_size", transform=int)
         form.addRow("Size", size)
 
         bold = QCheckBox("Bold")
@@ -347,17 +633,13 @@ class PropertiesDock(QDockWidget):
 
         text_edit = QLineEdit()
         text_edit.setText(first.text())
-        text_edit.editingFinished.connect(
-            lambda e=text_edit: self._push_prop("text", e.text())
-        )
+        self._wire_live_prop(text_edit, "text", is_line_edit=True)
         form.addRow("Text", text_edit)
 
         size = QSpinBox()
         size.setRange(6, 96)
         size.setValue(int(first.font_size()))
-        size.editingFinished.connect(
-            lambda s=size: self._push_prop("font_size", int(s.value()))
-        )
+        self._wire_live_prop(size, "font_size", transform=int)
         form.addRow("Size", size)
 
     def _apply_stamp_preset(self, label: object) -> None:
@@ -391,9 +673,7 @@ class PropertiesDock(QDockWidget):
         size = QSpinBox()
         size.setRange(6, 72)
         size.setValue(int(first.font_size()))
-        size.editingFinished.connect(
-            lambda s=size: self._push_prop("font_size", int(s.value()))
-        )
+        self._wire_live_prop(size, "font_size", transform=int)
         form.addRow("Frame size", size)
 
     # ------------------------------------------------------------------

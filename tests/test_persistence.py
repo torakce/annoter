@@ -162,6 +162,39 @@ def test_cloud_fill_roundtrip(qapp, blank_doc) -> None:
     assert c.fill_color().name().lower() == "#ffeb3b"
 
 
+def test_cloud_fill_opacity_roundtrip(qapp, blank_doc) -> None:
+    item = CloudItem(QRectF(40, 50, 160, 90))
+    item.set_fill_enabled(True)
+    item.set_fill_color(QColor("#FFEB3B"))
+    item.set_fill_opacity(0.4)
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = next(page.annots())
+    # Approximated as a whole-annotation /CA opacity on export.
+    assert annot.opacity == pytest.approx(0.4, abs=0.01)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    c = out[0][0]
+    assert c.fill_opacity() == pytest.approx(0.4, abs=0.01)
+
+
+def test_rect_fill_opacity_defaults_to_fully_opaque(qapp, blank_doc) -> None:
+    """Untouched shapes (opacity 1.0, the default) must not carry a /CA
+    at all -- PyMuPDF reports -1 ("unspecified", i.e. fully opaque) --
+    so files saved before this feature keep round-tripping unchanged."""
+    item = RectangleItem(QRectF(0, 0, 50, 50))
+    item.set_fill_enabled(True)
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+    reopened = _save_then_reopen(blank_doc)
+    annot = next(reopened[0].annots())
+    assert annot.opacity == -1
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert out[0][0].fill_opacity() == pytest.approx(1.0, abs=0.01)
+
+
 def test_polyline_roundtrip(qapp, blank_doc) -> None:
     pts = [QPointF(10, 20), QPointF(80, 40), QPointF(60, 120), QPointF(150, 90)]
     item = PolylineItem(pts)

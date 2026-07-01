@@ -43,6 +43,8 @@ from annoter.config import (
     STROKE_WIDTHS,
     UNDO_STACK_LIMIT,
 )
+from annoter.controllers.align import AlignMode, compute_align_moves
+from annoter.controllers.geometry import item_scene_rect
 from annoter.controllers.commands import (
     AddAnnotationCommand,
     ChangeColorCommand,
@@ -50,6 +52,7 @@ from annoter.controllers.commands import (
     ChangePropsCommand,
     ChangeStrokeCommand,
     DeleteAnnotationsCommand,
+    MoveAnnotationsCommand,
 )
 from annoter.controllers.tools import Tool, ToolController
 from annoter.model.document import PdfDocument
@@ -71,6 +74,7 @@ from annoter.views.note_editor import NoteEditor
 from annoter.views.pdf_scene import PdfScene
 from annoter.views.pdf_view import PdfView
 from annoter.views.properties_dock import PropertiesDock
+from annoter.views.selection_toolbar import SelectionToolbar
 from annoter.views.tool_palette import ToolPalette
 
 
@@ -90,6 +94,28 @@ _TOOLBAR_TOOLS: list[tuple[Tool, str]] = [
     (Tool.FREEHAND, "Freehand"),
     (Tool.GDT, "GD&T frame"),
 ]
+
+# Style properties the Format Painter may copy. Captured from the source
+# via `getattr(item, name)()`, applied to a target via `set_<name>` --
+# only when the target actually has that setter, so e.g. a GD&T frame's
+# font size never leaks onto a rectangle's corner radius.
+_PAINTABLE_PROPS: tuple[str, ...] = (
+    "color",
+    "stroke",
+    "dash_style",
+    "fill_enabled",
+    "fill_color",
+    "fill_opacity",
+    "corner_radius",
+    "font_family",
+    "font_size",
+    "bold",
+    "italic",
+    "align",
+    "label_font_size",
+    "start_end",
+    "end_end",
+)
 
 
 class MainWindow(QMainWindow):
@@ -136,6 +162,7 @@ class MainWindow(QMainWindow):
         self._scene.selectionChanged.connect(self._on_scene_selection_changed)
         self._scene.gdtPlacementRequested.connect(self._on_gdt_placement)
         self._scene.notePlacementRequested.connect(self._on_note_placement)
+        self._scene.formatPaintRequested.connect(self._on_format_paint_requested)
 
         self._view = PdfView(self)
         self._view.setScene(self._scene)
@@ -143,10 +170,27 @@ class MainWindow(QMainWindow):
         self._view.setFocus()
         self._view.contextMenuRequested.connect(self._show_context_menu)
 
+        # Floating quick-action bar shown near the current selection.
+        self._selection_toolbar = SelectionToolbar(self._view.viewport())
+        self._selection_toolbar.colorClicked.connect(
+            self._change_selection_color
+        )
+        self._selection_toolbar.strokeClicked.connect(
+            self._change_selection_stroke
+        )
+        self._selection_toolbar.duplicateClicked.connect(
+            self._duplicate_selected
+        )
+        self._selection_toolbar.deleteClicked.connect(self._delete_selected)
+
         # In-app clipboard: detached clones produced by Copy/Cut. Paste
         # re-clones from these so multiple pastes work and the clipboard
         # stays independent from any subsequent scene mutation.
         self._clipboard: list[AnnotationItem] = []
+
+        # Style captured by the Format Painter toggle, applied to every
+        # annotation clicked afterwards until it is toggled off.
+        self._format_paint_style: dict[str, object] | None = None
 
         self._tool_palette = ToolPalette(self._tool_controller, self)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._tool_palette)
@@ -298,6 +342,18 @@ class MainWindow(QMainWindow):
             self._change_selection_stroke
         )
 
+        # ---- format painter (copy style, PowerPoint-style) ----
+        self.act_format_painter = QAction("Format &Painter", self)
+        self.act_format_painter.setCheckable(True)
+        self.act_format_painter.setToolTip(
+            "Select one annotation, then click Format Painter and click "
+            "other annotations to copy its style onto them. Toggle off "
+            "or press Esc to stop."
+        )
+        self.act_format_painter.toggled.connect(
+            self._on_format_painter_toggled
+        )
+
         # ---- clipboard ----
         self.act_cut = QAction("Cu&t", self)
         self.act_cut.setShortcut(QKeySequence.Cut)
@@ -326,6 +382,49 @@ class MainWindow(QMainWindow):
         self.act_send_back.triggered.connect(
             lambda: self._reorder_selection(to_front=False)
         )
+
+        # ---- align & distribute (PowerPoint/Canva-style) ----
+        self.act_align_left = QAction("Align &Left", self)
+        self.act_align_left.triggered.connect(
+            lambda: self._align_selection(AlignMode.LEFT)
+        )
+        self.act_align_center_h = QAction("Align &Center", self)
+        self.act_align_center_h.triggered.connect(
+            lambda: self._align_selection(AlignMode.CENTER_H)
+        )
+        self.act_align_right = QAction("Align &Right", self)
+        self.act_align_right.triggered.connect(
+            lambda: self._align_selection(AlignMode.RIGHT)
+        )
+        self.act_align_top = QAction("Align &Top", self)
+        self.act_align_top.triggered.connect(
+            lambda: self._align_selection(AlignMode.TOP)
+        )
+        self.act_align_middle_v = QAction("Align &Middle", self)
+        self.act_align_middle_v.triggered.connect(
+            lambda: self._align_selection(AlignMode.MIDDLE_V)
+        )
+        self.act_align_bottom = QAction("Align &Bottom", self)
+        self.act_align_bottom.triggered.connect(
+            lambda: self._align_selection(AlignMode.BOTTOM)
+        )
+        self.act_distribute_h = QAction("Distribute &Horizontally", self)
+        self.act_distribute_h.triggered.connect(
+            lambda: self._align_selection(AlignMode.DISTRIBUTE_H)
+        )
+        self.act_distribute_v = QAction("Distribute &Vertically", self)
+        self.act_distribute_v.triggered.connect(
+            lambda: self._align_selection(AlignMode.DISTRIBUTE_V)
+        )
+
+        # ---- grouping (session-level; see PdfScene._groups) ----
+        self.act_group = QAction("&Group", self)
+        self.act_group.setShortcut(QKeySequence("Ctrl+G"))
+        self.act_group.triggered.connect(self._group_selected)
+
+        self.act_ungroup = QAction("&Ungroup", self)
+        self.act_ungroup.setShortcut(QKeySequence("Ctrl+Shift+G"))
+        self.act_ungroup.triggered.connect(self._ungroup_selected)
 
         self.act_focus_properties = QAction("&Properties", self)
         self.act_focus_properties.triggered.connect(self._focus_properties)
@@ -379,8 +478,24 @@ class MainWindow(QMainWindow):
         m_edit.addAction(self.act_bring_front)
         m_edit.addAction(self.act_send_back)
         m_edit.addSeparator()
+        m_edit.addAction(self.act_group)
+        m_edit.addAction(self.act_ungroup)
+        m_edit.addSeparator()
+        m_align = m_edit.addMenu("&Align")
+        m_align.addAction(self.act_align_left)
+        m_align.addAction(self.act_align_center_h)
+        m_align.addAction(self.act_align_right)
+        m_align.addSeparator()
+        m_align.addAction(self.act_align_top)
+        m_align.addAction(self.act_align_middle_v)
+        m_align.addAction(self.act_align_bottom)
+        m_align.addSeparator()
+        m_align.addAction(self.act_distribute_h)
+        m_align.addAction(self.act_distribute_v)
+        m_edit.addSeparator()
         m_edit.addAction(self.act_change_color)
         m_edit.addAction(self.act_change_stroke)
+        m_edit.addAction(self.act_format_painter)
 
         m_view = mb.addMenu("&View")
         m_view.addAction(self.act_zoom_in)
@@ -437,6 +552,9 @@ class MainWindow(QMainWindow):
         self._tool_actions[Tool.SELECT].setChecked(True)
 
         tb.addSeparator()
+        tb.addAction(self.act_format_painter)
+
+        tb.addSeparator()
         tb.addAction(self.act_zoom_out)
         tb.addAction(self.act_zoom_in)
         tb.addAction(self.act_zoom_fit)
@@ -462,6 +580,7 @@ class MainWindow(QMainWindow):
         self.act_zoom_out.setIcon(action_icon("zoom-out", color=c))
         self.act_zoom_fit.setIcon(action_icon("zoom-fit", color=c))
         self.act_zoom_actual.setIcon(action_icon("zoom-actual", color=c))
+        self.act_format_painter.setIcon(action_icon("format-painter", color=c))
         for tool, act in self._tool_actions.items():
             act.setIcon(tool_icon(tool, color=c))
 
@@ -513,6 +632,17 @@ class MainWindow(QMainWindow):
             self.act_select_all,
             self.act_change_color,
             self.act_change_stroke,
+            self.act_format_painter,
+            self.act_align_left,
+            self.act_align_center_h,
+            self.act_align_right,
+            self.act_align_top,
+            self.act_align_middle_v,
+            self.act_align_bottom,
+            self.act_distribute_h,
+            self.act_distribute_v,
+            self.act_group,
+            self.act_ungroup,
             self.act_cut,
             self.act_copy,
             self.act_paste,
@@ -686,6 +816,7 @@ class MainWindow(QMainWindow):
         # Drop any in-progress in-place edits with the document.
         self._cancel_gdt_editor()
         self._cancel_note_editor()
+        self._selection_toolbar.hide()
         if self._doc is not None:
             self._doc.close()
         self._doc = None
@@ -795,12 +926,14 @@ class MainWindow(QMainWindow):
             self._hires_timer.start()
         self._position_gdt_editor()
         self._position_note_editor()
+        self._position_selection_toolbar()
 
     def _on_view_scrolled(self, _value: int) -> None:
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
         self._position_gdt_editor()
         self._position_note_editor()
+        self._position_selection_toolbar()
 
     def _maybe_rerender_for_zoom(self, factor: float) -> None:
         """Hysteretic high-DPI re-render.
@@ -933,12 +1066,105 @@ class MainWindow(QMainWindow):
         else:
             cmd.redo()
 
+    def _on_format_painter_toggled(self, checked: bool) -> None:
+        if not checked:
+            self._format_paint_style = None
+            if self._tool_controller.tool() is Tool.FORMAT_PAINTER:
+                self._tool_controller.set_tool(Tool.SELECT)
+            return
+        items = self._selected_annotations()
+        if len(items) != 1:
+            # Nothing (or too much) selected to copy a style from --
+            # bounce the toggle back off instead of entering a mode with
+            # no captured style.
+            self.act_format_painter.setChecked(False)
+            self.statusBar().showMessage(
+                "Select exactly one annotation to copy its style, "
+                "then turn on Format Painter.",
+                4000,
+            )
+            return
+        source = items[0]
+        self._format_paint_style = {
+            name: getattr(source, name)()
+            for name in _PAINTABLE_PROPS
+            if hasattr(source, name)
+        }
+        self._tool_controller.set_tool(Tool.FORMAT_PAINTER)
+        self.statusBar().showMessage(
+            "Format Painter: click annotations to apply the copied "
+            "style. Esc or toggle off to stop.",
+            4000,
+        )
+
+    def _on_format_paint_requested(self, item: AnnotationItem) -> None:
+        style = self._format_paint_style
+        if not style:
+            return
+        changes = []
+        for name, value in style.items():
+            if not hasattr(item, f"set_{name}"):
+                continue
+            old = getattr(item, name)()
+            if old != value:
+                changes.append((item, name, old, value))
+        if not changes:
+            return
+        stack = self._undo_group.activeStack()
+        cmd = ChangePropsCommand(changes, label="Copy style")
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+        self._on_annotations_changed()
+
     def _on_annotations_changed(self) -> None:
         self._annotation_list.refresh()
 
     def _on_scene_selection_changed(self) -> None:
         self._annotation_list.sync_selection_from_scene()
-        self._properties_dock.set_items(self._selected_annotations())
+        items = self._selected_annotations()
+        self._properties_dock.set_items(items)
+        self._update_selection_toolbar(items)
+
+    def _update_selection_toolbar(
+        self, items: list[AnnotationItem] | None = None
+    ) -> None:
+        if items is None:
+            items = self._selected_annotations()
+        if not items:
+            self._selection_toolbar.hide()
+            return
+        self._selection_toolbar.set_swatch_color(items[0].color())
+        self._selection_toolbar.set_stroke_label(items[0].stroke())
+        self._position_selection_toolbar(items)
+
+    def _position_selection_toolbar(
+        self, items: list[AnnotationItem] | None = None
+    ) -> None:
+        if items is None:
+            items = self._selected_annotations()
+        if not items:
+            self._selection_toolbar.hide()
+            return
+        union = None
+        for it in items:
+            r = item_scene_rect(it)
+            union = r if union is None else union.united(r)
+        toolbar = self._selection_toolbar
+        toolbar.adjustSize()
+        vp = self._view.viewport()
+        above = self._view.mapFromScene(union.topLeft())
+        below = self._view.mapFromScene(union.bottomLeft())
+        x = above.x()
+        y = above.y() - toolbar.height() - 8
+        if y < 4:
+            y = below.y() + 8
+        x = max(4, min(x, vp.width() - toolbar.width() - 4))
+        y = max(4, min(y, vp.height() - toolbar.height() - 4))
+        toolbar.move(int(x), int(y))
+        toolbar.show()
+        toolbar.raise_()
 
     # ------------------------------------------------------------------
     # clipboard / duplicate / z-order / context menu
@@ -1031,6 +1257,27 @@ class MainWindow(QMainWindow):
             for i, it in enumerate(items):
                 it.setZValue(bottom - 1.0 - i)
 
+    def _align_selection(self, mode: AlignMode) -> None:
+        items = self._selected_annotations()
+        moves = compute_align_moves(items, mode)
+        if not moves:
+            return
+        stack = self._undo_group.activeStack()
+        cmd = MoveAnnotationsCommand(moves, label="Align annotation(s)")
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+        self._on_annotations_changed()
+
+    def _group_selected(self) -> None:
+        """Session-level grouping: not an undoable command (it only
+        affects future selection/drag behavior, not annotation data)."""
+        self._scene.group_selection()
+
+    def _ungroup_selected(self) -> None:
+        self._scene.ungroup_selection()
+
     def _begin_text_edit_selected(self) -> None:
         items = self._selected_annotations()
         if not items:
@@ -1076,6 +1323,25 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             menu.addAction(self.act_bring_front)
             menu.addAction(self.act_send_back)
+            if len(self._selected_annotations()) >= 2:
+                menu.addSeparator()
+                menu.addAction(self.act_group)
+            if self._scene.has_group_in_selection():
+                menu.addAction(self.act_ungroup)
+            if len(self._selected_annotations()) >= 2:
+                menu.addSeparator()
+                m_align = menu.addMenu("Align")
+                m_align.addAction(self.act_align_left)
+                m_align.addAction(self.act_align_center_h)
+                m_align.addAction(self.act_align_right)
+                m_align.addSeparator()
+                m_align.addAction(self.act_align_top)
+                m_align.addAction(self.act_align_middle_v)
+                m_align.addAction(self.act_align_bottom)
+                if len(self._selected_annotations()) >= 3:
+                    m_align.addSeparator()
+                    m_align.addAction(self.act_distribute_h)
+                    m_align.addAction(self.act_distribute_v)
             menu.addSeparator()
             if can_edit_text:
                 menu.addAction(self.act_edit_text)
@@ -1102,6 +1368,11 @@ class MainWindow(QMainWindow):
         act = getattr(self, "_tool_actions", {}).get(tool)
         if act is not None and not act.isChecked():
             act.setChecked(True)
+        # Leaving Format Painter through any other path (Escape, picking
+        # a drawing tool) must also un-toggle its button and drop the
+        # captured style.
+        if tool is not Tool.FORMAT_PAINTER and self.act_format_painter.isChecked():
+            self.act_format_painter.setChecked(False)
 
     def _on_gdt_placement(self, scene_pos) -> None:
         page = self._scene.page_item()

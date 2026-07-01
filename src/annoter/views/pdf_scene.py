@@ -11,10 +11,12 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QGraphicsLineItem,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSceneMouseEvent,
 )
@@ -25,6 +27,7 @@ from annoter.controllers.commands import (
     MoveAnnotationsCommand,
     ResizeCommand,
 )
+from annoter.controllers.geometry import item_local_rect, item_scene_rect
 from annoter.model.styles import HandleRole
 from annoter.controllers.tools import Tool, ToolController
 from annoter.views.items import (
@@ -49,6 +52,7 @@ class PdfScene(QGraphicsScene):
     annotationsChanged = Signal()  # emitted after add / delete
     gdtPlacementRequested = Signal(QPointF)  # GD&T tool clicked on the page
     notePlacementRequested = Signal(QPointF)  # sticky-note tool clicked
+    formatPaintRequested = Signal(object)  # AnnotationItem clicked while painting
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -89,6 +93,37 @@ class PdfScene(QGraphicsScene):
         self._dup_pending_item: AnnotationItem | None = None
         self._dup_pending_scene: QPointF | None = None
         self._dup_pending_screen: QPoint | None = None
+
+        # Smart alignment guides (PowerPoint/Canva-style): only armed
+        # during a real, single-item mouse drag (see mousePressEvent) so
+        # programmatic moves (undo/redo, Align commands, duplicate-drag)
+        # are never perturbed by itemChange's snap hook.
+        self._interactive_drag_active: bool = False
+        self._guide_v: QGraphicsLineItem | None = None
+        self._guide_h: QGraphicsLineItem | None = None
+
+        # Session-level grouping (Ctrl+G): each group is a set of items
+        # that select and move together. Not a QGraphicsItemGroup --
+        # annotations stay direct children of the page item, which is
+        # what persistence, alignment and snapping all assume -- so this
+        # is intentionally not persisted across save/reopen (documented
+        # limitation, see PLAN.md).
+        self._groups: list[set[AnnotationItem]] = []
+        # Unified dashed outline drawn around a fully-selected group
+        # (PowerPoint-style "this is one object"), kept in sync via
+        # Qt's native selectionChanged signal and refreshed after every
+        # drag tick (see mouseMoveEvent).
+        self._group_box: QGraphicsRectItem | None = None
+        self.selectionChanged.connect(self._update_group_box)
+
+        # Manual group-drag: clicking empty space *inside* a group's
+        # bounding box (not on any specific member) still grabs and
+        # moves the whole group, like PowerPoint. Mirrors the Ctrl-drag
+        # duplicate machinery but without cloning.
+        self._group_drag_active: bool = False
+        self._group_drag_origin: QPointF | None = None
+        self._group_drag_items: list[AnnotationItem] = []
+        self._group_drag_start_positions: list[QPointF] = []
 
     # ------------------------------------------------------------------
     # wiring
@@ -159,6 +194,139 @@ class PdfScene(QGraphicsScene):
         self._dup_items = []
         self._dup_start_positions = []
         self._clear_dup_pending()
+        self._interactive_drag_active = False
+        self._guide_v = None
+        self._guide_h = None
+        self._groups = []
+        self._group_box = None
+        self._group_drag_active = False
+        self._group_drag_origin = None
+        self._group_drag_items = []
+        self._group_drag_start_positions = []
+
+    # ------------------------------------------------------------------
+    # session-level grouping
+    # ------------------------------------------------------------------
+    def group_of(self, item: AnnotationItem) -> set[AnnotationItem] | None:
+        for g in self._groups:
+            if item in g:
+                return g
+        return None
+
+    def group_selection(self) -> bool:
+        """Group the selected annotations (need >= 2). Items already in
+        another group are moved into the new one."""
+        items = [
+            it for it in self.selectedItems() if isinstance(it, AnnotationItem)
+        ]
+        if len(items) < 2:
+            return False
+        items_set = set(items)
+        self._groups = [g - items_set for g in self._groups]
+        self._groups = [g for g in self._groups if len(g) >= 2]
+        self._groups.append(items_set)
+        return True
+
+    def ungroup_selection(self) -> bool:
+        """Dissolve every group touched by the current selection."""
+        items = {
+            it for it in self.selectedItems() if isinstance(it, AnnotationItem)
+        }
+        before = len(self._groups)
+        self._groups = [g for g in self._groups if g.isdisjoint(items)]
+        return len(self._groups) != before
+
+    def has_group_in_selection(self) -> bool:
+        items = {
+            it for it in self.selectedItems() if isinstance(it, AnnotationItem)
+        }
+        return any(not g.isdisjoint(items) for g in self._groups)
+
+    def _select_group(self, group: set[AnnotationItem]) -> None:
+        for it in list(self.selectedItems()):
+            if it not in group:
+                it.setSelected(False)
+        for it in group:
+            it.setSelected(True)
+
+    def _group_union_rect(self, group: set[AnnotationItem]) -> QRectF | None:
+        union = None
+        for it in group:
+            r = item_scene_rect(it)
+            union = r if union is None else union.united(r)
+        return union
+
+    def _group_at_point(self, scene_pos: QPointF) -> set[AnnotationItem] | None:
+        """The group (if any) whose combined bounding box contains
+        `scene_pos`, so a click on empty space *inside* a group's
+        silhouette still grabs it, like PowerPoint."""
+        for g in self._groups:
+            union = self._group_union_rect(g)
+            if union is not None and union.contains(scene_pos):
+                return g
+        return None
+
+    def _begin_group_drag(self, origin: QPointF) -> None:
+        items = [
+            it for it in self.selectedItems() if isinstance(it, AnnotationItem)
+        ]
+        self._group_drag_active = True
+        self._group_drag_origin = QPointF(origin)
+        self._group_drag_items = items
+        self._group_drag_start_positions = [QPointF(it.pos()) for it in items]
+        self._capture_move_origins()
+        self._interactive_drag_active = True
+
+    def _finish_group_drag(self) -> None:
+        items = list(self._group_drag_items)
+        starts = list(self._group_drag_start_positions)
+        self._group_drag_active = False
+        self._group_drag_origin = None
+        self._group_drag_items = []
+        self._group_drag_start_positions = []
+        self._interactive_drag_active = False
+        self._hide_guides()
+
+        moves: list[tuple[AnnotationItem, QPointF, QPointF]] = []
+        for it, start in zip(items, starts):
+            end = QPointF(it.pos())
+            if (end - start).manhattanLength() > 0.0:
+                moves.append((it, start, end))
+        if moves:
+            cmd = MoveAnnotationsCommand(moves)
+            if self._undo_stack is not None:
+                self._undo_stack.push(cmd)
+            else:
+                cmd.redo()
+
+    def _update_group_box(self) -> None:
+        """Draw a single dashed outline around a fully-selected group,
+        replacing the usual per-item selection chrome with a clear "this
+        moves as one object" cue. Hidden for any other selection."""
+        selected = {
+            it for it in self.selectedItems() if isinstance(it, AnnotationItem)
+        }
+        matching = next((g for g in self._groups if g == selected), None)
+        if matching is None or self._page_item is None:
+            if self._group_box is not None:
+                self._group_box.hide()
+            return
+        union = self._group_union_rect(matching)
+        if union is None:
+            return
+        if self._group_box is None:
+            box = QGraphicsRectItem(self._page_item)
+            pen = QPen(QColor("#1E88E5"), 0)
+            pen.setStyle(Qt.DashLine)
+            pen.setCosmetic(True)
+            box.setPen(pen)
+            box.setBrush(Qt.NoBrush)
+            box.setZValue(999_999.0)
+            box.setAcceptedMouseButtons(Qt.NoButton)
+            self._group_box = box
+        margin = 4.0
+        self._group_box.setRect(union.adjusted(-margin, -margin, margin, margin))
+        self._group_box.show()
 
     def detach_children(self) -> list[AnnotationItem]:
         """Remove annotation children from the page item and return them.
@@ -186,6 +354,38 @@ class PdfScene(QGraphicsScene):
             if it.scene() is None:
                 self.addItem(it)
             it.setParentItem(self._page_item)
+
+    # ------------------------------------------------------------------
+    # live measurement (used by the view's measurement HUD)
+    # ------------------------------------------------------------------
+    def current_measurement(self) -> tuple[str, float, float] | None:
+        """Geometry of the in-progress draft or handle-resize, if any.
+
+        Returns `("rect", width_px, height_px)` for rect-like shapes or
+        `("line", length_px, angle_deg)` for a line/arrow; `None` when
+        nothing is being drafted/resized or the item's shape doesn't fit
+        either description (GD&T frames, text, freehand, polylines...).
+        """
+        item = (
+            self._draft_item
+            if self._draft_item is not None
+            else self._resize_item
+        )
+        if item is None:
+            return None
+        if isinstance(
+            item, (RectangleItem, EllipseItem, CloudItem, PolygonItem)
+        ):
+            r = item.rect()
+            return ("rect", r.width(), r.height())
+        if isinstance(item, LineItem):
+            p1, p2 = item.line_points()
+            dx = p2.x() - p1.x()
+            dy = p2.y() - p1.y()
+            length = math.hypot(dx, dy)
+            angle = math.degrees(math.atan2(dy, dx))
+            return ("line", length, angle)
+        return None
 
     # ------------------------------------------------------------------
     # cancel / nudge helpers used by the view
@@ -286,8 +486,32 @@ class PdfScene(QGraphicsScene):
                     self._dup_pending_screen = QPoint(event.screenPos())
                     event.accept()
                     return
+            # A plain click on a grouped item selects every member, so
+            # the drag Qt is about to start moves the whole group.
+            clicked = self._topmost_annotation_at(event.scenePos())
+            if clicked is not None:
+                group = self.group_of(clicked)
+                if group is not None:
+                    self._select_group(group)
+                super().mousePressEvent(event)
+                self._capture_move_origins()
+                self._interactive_drag_active = True
+                return
+            # PowerPoint lets you grab a group anywhere inside its
+            # silhouette, not just on a member shape: a click on empty
+            # space that still falls within a group's combined bounding
+            # box selects and drags the whole group. Handled manually
+            # (mirroring Ctrl-drag duplicate) since no item is under the
+            # cursor for Qt's native drag to grab.
+            hit_group = self._group_at_point(event.scenePos())
+            if hit_group is not None:
+                self._select_group(hit_group)
+                self._begin_group_drag(event.scenePos())
+                event.accept()
+                return
             super().mousePressEvent(event)
             self._capture_move_origins()
+            self._interactive_drag_active = True
             return
 
         pos = event.scenePos()
@@ -323,6 +547,15 @@ class PdfScene(QGraphicsScene):
             event.accept()
             return
 
+        if tool is Tool.FORMAT_PAINTER:
+            # Defer to MainWindow: it holds the captured source style and
+            # pushes a ChangePropsCommand for the clicked target.
+            clicked = self._topmost_annotation_at(pos)
+            if clicked is not None:
+                self.formatPaintRequested.emit(clicked)
+            event.accept()
+            return
+
         if tool in (Tool.POLYLINE, Tool.POLYGON):
             self._poly_click(tool, pos)
             event.accept()
@@ -348,7 +581,18 @@ class PdfScene(QGraphicsScene):
             return
         if self._resize_item is not None and self._resize_role is not None:
             local = self._resize_item.mapFromScene(event.scenePos())
-            if event.modifiers() & Qt.ShiftModifier:
+            snapped_scene = None
+            if (
+                not (event.modifiers() & Qt.AltModifier)
+                and isinstance(self._resize_item, LineItem)
+                and self._resize_role in (HandleRole.P1, HandleRole.P2)
+            ):
+                snapped_scene = self._nearest_shape_snap_point(
+                    event.scenePos(), exclude=self._resize_item
+                )
+            if snapped_scene is not None:
+                local = self._resize_item.mapFromScene(snapped_scene)
+            elif event.modifiers() & Qt.ShiftModifier:
                 local = self._constrain_resize(
                     self._resize_item, self._resize_role, local
                 )
@@ -380,16 +624,30 @@ class PdfScene(QGraphicsScene):
                 it.setPos(start + delta)
             event.accept()
             return
+        if self._group_drag_active and self._group_drag_origin is not None:
+            delta = event.scenePos() - self._group_drag_origin
+            for it, start in zip(
+                self._group_drag_items, self._group_drag_start_positions
+            ):
+                # setPos still runs through itemChange, so axis-lock and
+                # (single-item-only) guide-snapping apply consistently
+                # whether the drag is native or this manual fallback.
+                it.setPos(start + delta)
+            self._update_group_box()
+            event.accept()
+            return
         if (
             self._draft_item is not None
             and self._draft_origin is not None
             and self._page_item is not None
         ):
             constrained = bool(event.modifiers() & Qt.ShiftModifier)
-            self._update_draft(event.scenePos(), constrained)
+            snap_disabled = bool(event.modifiers() & Qt.AltModifier)
+            self._update_draft(event.scenePos(), constrained, snap_disabled)
             event.accept()
             return
         super().mouseMoveEvent(event)
+        self._update_group_box()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if self._poly_draft is not None:
@@ -419,6 +677,11 @@ class PdfScene(QGraphicsScene):
             event.accept()
             return
 
+        if self._group_drag_active:
+            self._finish_group_drag()
+            event.accept()
+            return
+
         if self._draft_item is not None:
             self._finish_draft()
             event.accept()
@@ -426,6 +689,8 @@ class PdfScene(QGraphicsScene):
 
         super().mouseReleaseEvent(event)
         self._flush_pending_moves()
+        self._interactive_drag_active = False
+        self._hide_guides()
 
     def mouseDoubleClickEvent(
         self, event: QGraphicsSceneMouseEvent
@@ -528,7 +793,12 @@ class PdfScene(QGraphicsScene):
         item.set_color(self._tool_controller.color())
         item.set_stroke(self._tool_controller.stroke())
 
-    def _update_draft(self, pos: QPointF, constrained: bool = False) -> None:
+    def _update_draft(
+        self,
+        pos: QPointF,
+        constrained: bool = False,
+        snap_disabled: bool = False,
+    ) -> None:
         assert self._draft_item is not None
         assert self._draft_origin is not None
         item = self._draft_item
@@ -538,7 +808,14 @@ class PdfScene(QGraphicsScene):
                 pos = self._square_from(origin, pos)
             item.set_rect(QRectF(origin, pos).normalized())
         elif isinstance(item, (LineItem, ArrowItem)):
-            if constrained:
+            snapped = (
+                None
+                if snap_disabled
+                else self._nearest_shape_snap_point(pos, exclude=item)
+            )
+            if snapped is not None:
+                pos = snapped
+            elif constrained:
                 pos = self._snap_angle(origin, pos, step_deg=45.0)
             item.set_line_points(origin, pos)
         elif isinstance(item, CalloutItem):
@@ -732,6 +1009,191 @@ class PdfScene(QGraphicsScene):
             }[role]
             return self._square_from(anchor, local_pos)
         return local_pos
+
+    # ------------------------------------------------------------------
+    # smart alignment guides (PowerPoint/Canva-style snap-while-dragging)
+    # ------------------------------------------------------------------
+    _SNAP_THRESHOLD_PX = 6.0
+
+    def maybe_snap_move(
+        self, item: AnnotationItem, proposed_pos: QPointF
+    ) -> QPointF:
+        """Called from `AnnotationItem.itemChange` on every proposed
+        position during a drag. Snaps to the nearest aligned edge/center
+        of another annotation or the page, within `_SNAP_THRESHOLD_PX`,
+        and shows a dashed guide line at the snapped coordinate.
+
+        Only active for a real mouse drag (see `_interactive_drag_active`);
+        a no-op otherwise so programmatic moves (undo/redo, Align
+        commands, duplicate-drag) are never second-guessed. Two
+        modifiers change the behavior, mutually exclusively:
+          - Alt: disable snapping entirely for this drag (temporary
+            override, like PowerPoint/Figma).
+          - Shift: axis-lock to whichever of X/Y has moved further from
+            the drag's start (PowerPoint's constrained-drag). Applies to
+            every selected item (including a group), unlike plain
+            guide-snapping, which is scoped to a single selected item --
+            snapping each item of a multi-selection independently could
+            pull the group's relative layout apart, but locking them all
+            to the same axis cannot.
+        """
+        if not self._interactive_drag_active or self._page_item is None:
+            return proposed_pos
+
+        mods = QApplication.keyboardModifiers()
+        if mods & Qt.AltModifier:
+            self._hide_guides()
+            return proposed_pos
+        if mods & Qt.ShiftModifier:
+            self._hide_guides()
+            return self._apply_axis_lock(item, proposed_pos)
+        if len(self.selectedItems()) != 1:
+            return proposed_pos
+
+        local = item_local_rect(item)
+        rect = local.translated(proposed_pos)
+        page_rect = self._page_item.boundingRect()
+
+        x_targets = [page_rect.left(), page_rect.center().x(), page_rect.right()]
+        y_targets = [page_rect.top(), page_rect.center().y(), page_rect.bottom()]
+        for sibling in self._page_item.childItems():
+            if sibling is item or not isinstance(sibling, AnnotationItem):
+                continue
+            sr = item_scene_rect(sibling)
+            x_targets.extend([sr.left(), sr.center().x(), sr.right()])
+            y_targets.extend([sr.top(), sr.center().y(), sr.bottom()])
+
+        snap_x, guide_x = self._best_snap(
+            [rect.left(), rect.center().x(), rect.right()], x_targets
+        )
+        snap_y, guide_y = self._best_snap(
+            [rect.top(), rect.center().y(), rect.bottom()], y_targets
+        )
+
+        result = QPointF(proposed_pos)
+        if snap_x is not None:
+            result.setX(proposed_pos.x() + snap_x)
+            self._show_guide_v(guide_x, page_rect)
+        else:
+            self._hide_guide_v()
+        if snap_y is not None:
+            result.setY(proposed_pos.y() + snap_y)
+            self._show_guide_h(guide_y, page_rect)
+        else:
+            self._hide_guide_h()
+        return result
+
+    def _apply_axis_lock(
+        self, item: AnnotationItem, proposed_pos: QPointF
+    ) -> QPointF:
+        """Constrain `item` to move only horizontally or only vertically
+        from its drag-start position (`_move_origins`), whichever axis
+        has the larger cumulative displacement so far -- re-evaluated on
+        every move, so the software follows the direction the user is
+        actually dragging in, PowerPoint-style. A no-op if the item's
+        drag-start position wasn't captured (e.g. not part of the
+        current drag)."""
+        origin = self._move_origins.get(item)
+        if origin is None:
+            return proposed_pos
+        dx = proposed_pos.x() - origin.x()
+        dy = proposed_pos.y() - origin.y()
+        if abs(dx) >= abs(dy):
+            return QPointF(proposed_pos.x(), origin.y())
+        return QPointF(origin.x(), proposed_pos.y())
+
+    def _best_snap(
+        self, moving_candidates: list[float], targets: list[float]
+    ) -> tuple[float | None, float]:
+        """Smallest-delta (moving -> target) within threshold, or
+        (None, 0.0). Returns (delta, target) so the caller can both
+        adjust the position and place the guide line."""
+        best_delta: float | None = None
+        best_target = 0.0
+        best_abs = self._SNAP_THRESHOLD_PX
+        for m in moving_candidates:
+            for t in targets:
+                d = t - m
+                if abs(d) <= best_abs:
+                    best_abs = abs(d)
+                    best_delta = d
+                    best_target = t
+        return best_delta, best_target
+
+    def _show_guide_v(self, x: float, page_rect: QRectF) -> None:
+        if self._guide_v is None:
+            self._guide_v = self._make_guide_item()
+        self._guide_v.setLine(x, page_rect.top(), x, page_rect.bottom())
+        self._guide_v.show()
+
+    def _show_guide_h(self, y: float, page_rect: QRectF) -> None:
+        if self._guide_h is None:
+            self._guide_h = self._make_guide_item()
+        self._guide_h.setLine(page_rect.left(), y, page_rect.right(), y)
+        self._guide_h.show()
+
+    def _hide_guide_v(self) -> None:
+        if self._guide_v is not None:
+            self._guide_v.hide()
+
+    def _hide_guide_h(self) -> None:
+        if self._guide_h is not None:
+            self._guide_h.hide()
+
+    def _hide_guides(self) -> None:
+        self._hide_guide_v()
+        self._hide_guide_h()
+
+    def _make_guide_item(self) -> QGraphicsLineItem:
+        line = QGraphicsLineItem(self._page_item)
+        pen = QPen(QColor("#E91E63"), 0)  # cosmetic (device-pixel width)
+        pen.setStyle(Qt.DashLine)
+        pen.setCosmetic(True)
+        line.setPen(pen)
+        line.setZValue(1_000_000.0)  # always above annotations
+        line.setAcceptedMouseButtons(Qt.NoButton)
+        return line
+
+    # ------------------------------------------------------------------
+    # line/arrow endpoint snapping (PowerPoint connector-style)
+    # ------------------------------------------------------------------
+    _ENDPOINT_SNAP_THRESHOLD_PX = 8.0
+
+    def _nearest_shape_snap_point(
+        self, scene_pos: QPointF, exclude: AnnotationItem
+    ) -> QPointF | None:
+        """Nearest "connection point" (corner / edge-midpoint / center of
+        another annotation's bounding rect) within the snap threshold, or
+        None. Used while drafting or resizing a line/arrow so its
+        endpoint can attach precisely to a nearby shape, the way
+        PowerPoint's connectors snap to a shape's connection points.
+        """
+        if self._page_item is None:
+            return None
+        best_point: QPointF | None = None
+        best_dist = self._ENDPOINT_SNAP_THRESHOLD_PX
+        for sibling in self._page_item.childItems():
+            if sibling is exclude or not isinstance(sibling, AnnotationItem):
+                continue
+            r = item_scene_rect(sibling)
+            cx, cy = r.center().x(), r.center().y()
+            candidates = (
+                QPointF(r.left(), r.top()),
+                QPointF(cx, r.top()),
+                QPointF(r.right(), r.top()),
+                QPointF(r.left(), cy),
+                QPointF(cx, cy),
+                QPointF(r.right(), cy),
+                QPointF(r.left(), r.bottom()),
+                QPointF(cx, r.bottom()),
+                QPointF(r.right(), r.bottom()),
+            )
+            for c in candidates:
+                d = math.hypot(c.x() - scene_pos.x(), c.y() - scene_pos.y())
+                if d <= best_dist:
+                    best_dist = d
+                    best_point = c
+        return best_point
 
     def _hit_resize_handle(
         self, scene_pos: QPointF

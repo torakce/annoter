@@ -129,6 +129,7 @@ class PolygonItem(_PolyItem):
         super().__init__(points, parent)
         self._fill_enabled: bool = False
         self._fill_color: QColor = QColor("#FFEB3B")
+        self._fill_opacity: float = 1.0
 
     def fill_enabled(self) -> bool:
         return self._fill_enabled
@@ -149,9 +150,21 @@ class PolygonItem(_PolyItem):
         self._fill_color = c
         self.update()
 
+    def fill_opacity(self) -> float:
+        return self._fill_opacity
+
+    def set_fill_opacity(self, opacity: float) -> None:
+        v = max(0.0, min(1.0, float(opacity)))
+        if v == self._fill_opacity:
+            return
+        self._fill_opacity = v
+        self.update()
+
     def _brush(self) -> QBrush:
         if self._fill_enabled:
-            return QBrush(self._fill_color)
+            c = QColor(self._fill_color)
+            c.setAlphaF(self._fill_opacity)
+            return QBrush(c)
         return QBrush(Qt.NoBrush)
 
     def clone(self) -> "PolygonItem":
@@ -159,4 +172,5 @@ class PolygonItem(_PolyItem):
         self._copy_base_style_into(c)
         c.set_fill_enabled(self._fill_enabled)
         c.set_fill_color(self._fill_color)
+        c.set_fill_opacity(self._fill_opacity)
         return c

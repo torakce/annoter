@@ -348,6 +348,10 @@ class PdfScene(QGraphicsScene):
             return
         if self._resize_item is not None and self._resize_role is not None:
             local = self._resize_item.mapFromScene(event.scenePos())
+            if event.modifiers() & Qt.ShiftModifier:
+                local = self._constrain_resize(
+                    self._resize_item, self._resize_role, local
+                )
             self._resize_item.apply_resize(self._resize_role, local)
             event.accept()
             return
@@ -689,6 +693,45 @@ class PdfScene(QGraphicsScene):
                 if it is not select_item:
                     it.setSelected(False)
             select_item.setSelected(True)
+
+    _CORNER_HANDLE_ROLES = (
+        HandleRole.TOP_LEFT,
+        HandleRole.TOP_RIGHT,
+        HandleRole.BOTTOM_LEFT,
+        HandleRole.BOTTOM_RIGHT,
+    )
+
+    def _constrain_resize(
+        self, item: AnnotationItem, role: HandleRole, local_pos: QPointF
+    ) -> QPointF:
+        """Shift-constrain an in-progress resize on an existing item.
+
+        Mirrors the Shift behavior already used while drafting new shapes:
+        a line/arrow endpoint snaps to a 45-degree step from the other
+        endpoint (keeps the segment's alignment constant while
+        lengthening/rotating it); a rectangle/ellipse/cloud dragged from a
+        corner keeps a square footprint.
+        """
+        if isinstance(item, LineItem) and role in (
+            HandleRole.P1,
+            HandleRole.P2,
+        ):
+            p1, p2 = item.line_points()
+            anchor = p2 if role is HandleRole.P1 else p1
+            return self._snap_angle(anchor, local_pos, step_deg=45.0)
+        if (
+            isinstance(item, (RectangleItem, EllipseItem, CloudItem))
+            and role in self._CORNER_HANDLE_ROLES
+        ):
+            r = item.rect()
+            anchor = {
+                HandleRole.TOP_LEFT: QPointF(r.right(), r.bottom()),
+                HandleRole.TOP_RIGHT: QPointF(r.left(), r.bottom()),
+                HandleRole.BOTTOM_LEFT: QPointF(r.right(), r.top()),
+                HandleRole.BOTTOM_RIGHT: QPointF(r.left(), r.top()),
+            }[role]
+            return self._square_from(anchor, local_pos)
+        return local_pos
 
     def _hit_resize_handle(
         self, scene_pos: QPointF

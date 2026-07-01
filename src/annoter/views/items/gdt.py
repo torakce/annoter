@@ -324,7 +324,11 @@ class GdtAnnotationItem(AnnotationItem):
         pen = QPen(self._color, self._stroke)
         pen.setJoinStyle(Qt.MiterJoin)
         painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
+        # Opaque white cells (not transparent) so the frame stays legible
+        # over drawing content, like CATIA's feature control frames. This
+        # also feeds the rasterized PDF appearance stream, which reuses
+        # this same paint() call.
+        painter.setBrush(QColor("#FFFFFF"))
 
         for rect in self._border_rects:
             painter.drawRect(rect)

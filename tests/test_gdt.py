@@ -127,6 +127,29 @@ def test_composite_item_layout_grows(qapp) -> None:
     assert len(composite._symbol_draws) == 2
 
 
+def test_frame_cells_paint_opaque_white(qapp) -> None:
+    """Cells must have an opaque white background, not a transparent
+    one, so the frame stays legible over drawing content."""
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtWidgets import QStyleOptionGraphicsItem
+
+    item = GdtAnnotationItem(
+        GdtState(characteristic=Characteristic.POSITION, tolerance_value="2"),
+        QPointF(0, 0),
+    )
+    cr = item.content_rect()
+    img = QImage(int(cr.width()) + 4, int(cr.height()) + 4, QImage.Format_ARGB32)
+    img.fill(0)  # fully transparent canvas
+    painter = QPainter(img)
+    item.paint(painter, QStyleOptionGraphicsItem(), None)
+    painter.end()
+    # Sample a corner of the tolerance-value cell, away from any glyph
+    # or text stroke.
+    px = img.pixelColor(int(cr.height()) + 3, 3)
+    assert px.alpha() == 255
+    assert (px.red(), px.green(), px.blue()) == (255, 255, 255)
+
+
 # ----------------------------------------------------------------------
 # Model
 # ----------------------------------------------------------------------

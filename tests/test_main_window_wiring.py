@@ -186,6 +186,37 @@ def test_tool_palette_and_annotation_list_present(qapp) -> None:
         win.close()
 
 
+def test_tools_live_only_in_the_dock_palette(qapp) -> None:
+    """Discussion #1, items 1-2: the toolbar no longer duplicates the
+    drawing tools; the left dock is the single place to pick one (and
+    now includes GD&T, which used to be toolbar-only)."""
+    win = MainWindow()
+    try:
+        assert not hasattr(win, "_tool_actions")
+        texts = [a.text() for a in win._toolbar.actions()]
+        for label in ("Rectangle", "Arrow", "Freehand", "GD&T frame"):
+            assert label not in texts
+        assert Tool.GDT in win._tool_palette._tool_buttons
+    finally:
+        win.close()
+
+
+def test_toolbar_quick_style_controls_follow_controller(qapp) -> None:
+    win = MainWindow()
+    try:
+        # Controller -> toolbar.
+        win._tool_controller.set_stroke(3.5)
+        combo = win._toolbar_stroke_combo
+        assert float(combo.itemData(combo.currentIndex())) == pytest.approx(3.5)
+        win._tool_controller.set_color(QColor("#00AA00"))
+        assert not win._toolbar_color_act.icon().isNull()
+        # Toolbar -> controller.
+        combo.activated.emit(0)
+        assert win._tool_controller.stroke() == pytest.approx(1.0)
+    finally:
+        win.close()
+
+
 def _page_notes(win: MainWindow) -> list[StickyNoteItem]:
     page = win._scene.page_item()
     return [

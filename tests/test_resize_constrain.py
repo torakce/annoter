@@ -48,27 +48,33 @@ def _ev(etype, pos: QPointF, modifiers=Qt.NoModifier) -> QGraphicsSceneMouseEven
     return ev
 
 
-def test_line_endpoint_snaps_to_angle_when_shift_held(scene) -> None:
+def test_line_endpoint_preserves_original_angle_when_shift_held(scene) -> None:
     item = LineItem(QPointF(50, 50), QPointF(150, 53))  # near-horizontal
     item.setParentItem(scene.page_item())
     item.setSelected(True)
 
-    p2 = QPointF(150, 53)
+    p1, p2 = item.line_points()
+    original_angle = math.degrees(
+        math.atan2(p2.y() - p1.y(), p2.x() - p1.x())
+    )
+
     scene.mousePressEvent(_ev(QEvent.GraphicsSceneMousePress, p2))
-    # A tiny vertical nudge would normally tilt the line off-axis...
+    # A drag that would normally tilt the line to a very different angle...
     drag_to = QPointF(200, 40)
     scene.mouseMoveEvent(
         _ev(QEvent.GraphicsSceneMouseMove, drag_to, Qt.ShiftModifier)
     )
     scene.mouseReleaseEvent(_ev(QEvent.GraphicsSceneMouseRelease, drag_to))
 
-    p1, p2_final = item.line_points()
+    p1_final, p2_final = item.line_points()
     angle = math.degrees(
-        math.atan2(p2_final.y() - p1.y(), p2_final.x() - p1.x())
+        math.atan2(p2_final.y() - p1_final.y(), p2_final.x() - p1_final.x())
     )
-    # ...but Shift must have snapped it to the nearest 45-degree step.
-    nearest_step = round(angle / 45.0) * 45.0
-    assert angle == pytest.approx(nearest_step, abs=0.5)
+    # ...but Shift must keep the ORIGINAL angle exactly, not re-snap it
+    # to a 45-degree step.
+    assert angle == pytest.approx(original_angle, abs=0.5)
+    # The endpoint still actually moved (length changed along that ray).
+    assert (p2_final - p2).manhattanLength() > 1.0
 
 
 def test_line_resize_without_shift_is_unconstrained(scene) -> None:
@@ -127,10 +133,16 @@ def test_rectangle_corner_resize_stays_square_when_shift_held(scene) -> None:
 
 def test_constrain_resize_helper_direct(scene) -> None:
     """Unit-level check of the constraint math in isolation."""
-    line = LineItem(QPointF(0, 0), QPointF(100, 4))
+    line = LineItem(QPointF(0, 0), QPointF(100, 0))
+    # Simulate a resize already in progress: the pre-drag endpoints come
+    # from the press-time snapshot, not the (possibly already dragged)
+    # live geometry.
+    scene._resize_snapshot = (QPointF(0, 0), QPointF(100, 0))
     snapped = scene._constrain_resize(
         line, HandleRole.P2, QPointF(100, 4)
     )
+    # The original (horizontal) angle is preserved even though the
+    # cursor drifted off-axis -- it is not re-snapped elsewhere.
     assert snapped.y() == pytest.approx(0.0, abs=0.5)
 
     rect = RectangleItem(QRectF(0, 0, 50, 50))

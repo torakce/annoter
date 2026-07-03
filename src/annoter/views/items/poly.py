@@ -70,6 +70,11 @@ class _PolyItem(AnnotationItem):
         pen = QPen(self._color, self._stroke)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
+        if self._stroke <= 0.0:
+            # QPen(width=0) is a cosmetic hairline in Qt, not "no pen" --
+            # an explicit style is needed to show only the fill.
+            pen.setStyle(Qt.NoPen)
+            return pen
         return self._apply_dash(pen)
 
     def _brush(self) -> QBrush:

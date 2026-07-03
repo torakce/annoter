@@ -40,7 +40,14 @@ from PySide6.QtWidgets import (
 from annoter.controllers.commands import (
     ChangePropsCommand,
     MoveAnnotationsCommand,
+    ReplaceAnnotationCommand,
     ResizeCommand,
+)
+from annoter.controllers.convert import (
+    callout_to_arrow,
+    convert_poly_closed,
+    convert_shape_outline,
+    line_to_callout,
 )
 from annoter.controllers.geometry import (
     item_local_rect,
@@ -52,6 +59,7 @@ from annoter.controllers.geometry import (
 from annoter.model.styles import DashStyle, EndStyle, TextAlign
 from annoter.views.icons import align_icon, dash_icon, end_icon
 from annoter.views.items.base import AnnotationItem
+from annoter.views.items.callout import CalloutItem
 from annoter.views.items.freehand import FreehandItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
@@ -157,18 +165,25 @@ class PropertiesDock(QDockWidget):
             cls = next(iter(types))
             if issubclass(cls, RectangleItem):
                 self._add_shape_rows(form, with_corner=True)
+                self._add_outline_row(form)
             elif issubclass(cls, EllipseItem):
                 self._add_shape_rows(form, with_corner=False)
             elif issubclass(cls, CloudItem):
                 self._add_fill_rows(form)
+                self._add_outline_row(form)
             elif issubclass(cls, PolygonItem):
                 self._add_fill_rows(form)
+                self._add_closed_row(form)
             elif issubclass(cls, PolylineItem):
-                pass  # base + dash already covered
+                self._add_closed_row(form)
             elif issubclass(cls, ArrowItem):
                 self._add_arrow_rows(form)
+                self._add_line_label_row(form)
             elif issubclass(cls, LineItem):
-                pass  # base + dash already covered
+                self._add_line_label_row(form)
+            elif issubclass(cls, CalloutItem):
+                self._add_text_rows(form)
+                self._add_callout_to_arrow_row(form)
             elif issubclass(cls, TextAnnotationItem):
                 self._add_text_rows(form)
             elif issubclass(cls, GdtAnnotationItem):
@@ -197,7 +212,8 @@ class PropertiesDock(QDockWidget):
 
         # Stroke width
         spin = QSpinBox()
-        spin.setRange(1, 20)
+        spin.setRange(0, 20)
+        spin.setSpecialValueText("None")
         spin.setValue(int(round(first.stroke())))
         self._wire_live_prop(spin, "stroke", transform=float)
         form.addRow("Stroke", spin)
@@ -564,6 +580,94 @@ class PropertiesDock(QDockWidget):
             lambda _i, c=c2: self._push_prop("end_end", c.currentData())
         )
         form.addRow("End", c2)
+
+    # ------------------------------------------------------------------
+    # kind-variant rows (Discussion #1, item 3: merged tools)
+    # ------------------------------------------------------------------
+    def _push_replace(self, old: AnnotationItem, new: AnnotationItem) -> None:
+        """Swap `old` for its converted variant, as one undo step."""
+        scene = old.scene()
+        parent_item = old.parentItem()
+        if scene is None or parent_item is None:
+            return
+        cmd = ReplaceAnnotationCommand(scene, parent_item, old, new)
+        if self._undo_stack is not None:
+            self._undo_stack.push(cmd)
+        else:
+            cmd.redo()
+
+    def _add_outline_row(self, form: QFormLayout) -> None:
+        """Rect-footprint shapes: straight border <-> revision cloud."""
+        if len(self._items) != 1:
+            return
+        first = self._items[0]
+        combo = QComboBox()
+        combo.addItem("Straight", False)
+        combo.addItem("Cloud", True)
+        combo.setCurrentIndex(1 if isinstance(first, CloudItem) else 0)
+        combo.currentIndexChanged.connect(
+            lambda _i, c=combo, it=first: self._on_outline_changed(
+                it, bool(c.currentData())
+            )
+        )
+        form.addRow("Outline", combo)
+
+    def _on_outline_changed(self, item, cloudy: bool) -> None:  # noqa: ANN001
+        converted = convert_shape_outline(item, cloudy)
+        if converted is not None:
+            self._push_replace(item, converted)
+
+    def _add_closed_row(self, form: QFormLayout) -> None:
+        """Multi-vertex paths: open polyline <-> closed polygon."""
+        if len(self._items) != 1:
+            return
+        first = self._items[0]
+        check = QCheckBox("Closed shape")
+        check.setChecked(isinstance(first, PolygonItem))
+        check.toggled.connect(
+            lambda checked, it=first: self._on_closed_changed(
+                it, bool(checked)
+            )
+        )
+        form.addRow("Path", check)
+
+    def _on_closed_changed(self, item, closed: bool) -> None:  # noqa: ANN001
+        converted = convert_poly_closed(item, closed)
+        if converted is not None:
+            self._push_replace(item, converted)
+
+    def _add_line_label_row(self, form: QFormLayout) -> None:
+        """Lines/arrows: typing a label turns the item into a callout
+        (a callout is just an arrow with text at the tail end)."""
+        if len(self._items) != 1:
+            return
+        first = self._items[0]
+        edit = QLineEdit()
+        edit.setPlaceholderText("Add text -> callout")
+        edit.editingFinished.connect(
+            lambda e=edit, it=first: self._on_line_label_committed(it, e)
+        )
+        form.addRow("Label", edit)
+
+    def _on_line_label_committed(self, item, edit: QLineEdit) -> None:  # noqa: ANN001
+        text = edit.text().strip()
+        if not text or not isinstance(item, LineItem):
+            return
+        if item.scene() is None:
+            return  # already converted (editingFinished can fire twice)
+        self._push_replace(item, line_to_callout(item, text))
+
+    def _add_callout_to_arrow_row(self, form: QFormLayout) -> None:
+        if len(self._items) != 1:
+            return
+        first = self._items[0]
+        btn = QPushButton("Convert to arrow (drop text)")
+        btn.clicked.connect(
+            lambda _checked=False, it=first: self._push_replace(
+                it, callout_to_arrow(it)
+            )
+        )
+        form.addRow("Kind", btn)
 
     def _add_text_rows(self, form: QFormLayout) -> None:
         first = self._items[0]

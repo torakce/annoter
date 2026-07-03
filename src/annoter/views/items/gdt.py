@@ -126,11 +126,11 @@ class GdtAnnotationItem(AnnotationItem):
 
         content_widths = [sum(w for w, _ in cells) for cells in row_cells]
         max_content = max(content_widths) if content_widths else h
-        # Extend each row's last cell so the frame stays rectangular.
-        for cells, cw in zip(row_cells, content_widths):
-            if cells and cw < max_content:
-                w, text = cells[-1]
-                cells[-1] = (w + (max_content - cw), text)
+        # Each row keeps its own natural width (no stretching to match the
+        # widest row) -- only the shared symbol column below is a fixed
+        # width, which is what keeps every row's content flush-left.
+        # `max_content` is still used to size the overall frame/bounding
+        # box and to position the optional Aux frame.
 
         symbol_w = h
         frame_w = symbol_w + max_content

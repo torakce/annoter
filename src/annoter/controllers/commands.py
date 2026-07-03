@@ -55,6 +55,43 @@ class AddAnnotationCommand(QUndoCommand):
             self._scene.removeItem(self._item)
 
 
+class ReplaceAnnotationCommand(QUndoCommand):
+    """Swaps an item for another one (kind conversion, Discussion #1
+    item 3): redo removes `old` and inserts `new` under the same parent,
+    undo reverses. Selection follows the visible item so the Properties
+    dock rebuilds onto the swapped-in instance."""
+
+    def __init__(
+        self,
+        scene: QGraphicsScene,
+        parent_item: QGraphicsItem,
+        old: AnnotationItem,
+        new: AnnotationItem,
+        label: str = "Change annotation kind",
+        parent: QUndoCommand | None = None,
+    ) -> None:
+        super().__init__(label, parent)
+        self._scene = scene
+        self._parent_item = parent_item
+        self._old = old
+        self._new = new
+
+    def _swap(self, out: AnnotationItem, into: AnnotationItem) -> None:
+        out.setSelected(False)
+        if out.scene() is not None:
+            self._scene.removeItem(out)
+        if into.scene() is None:
+            self._scene.addItem(into)
+        into.setParentItem(self._parent_item)
+        into.setSelected(True)
+
+    def redo(self) -> None:
+        self._swap(self._old, self._new)
+
+    def undo(self) -> None:
+        self._swap(self._new, self._old)
+
+
 class DeleteAnnotationsCommand(QUndoCommand):
     """Removes one or more AnnotationItems from their page parent."""
 

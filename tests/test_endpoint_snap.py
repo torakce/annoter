@@ -163,7 +163,11 @@ def test_resize_falls_back_to_shift_constrain_without_nearby_shape(scene) -> Non
     arrow.setParentItem(scene.page_item())
     arrow.setSelected(True)
 
-    p2 = QPointF(100, 5)
+    p1, p2 = arrow.line_points()
+    original_angle = math.degrees(
+        math.atan2(p2.y() - p1.y(), p2.x() - p1.x())
+    )
+
     scene.mousePressEvent(_ev(QEvent.GraphicsSceneMousePress, p2))
     scene.mouseMoveEvent(
         _ev(
@@ -172,10 +176,14 @@ def test_resize_falls_back_to_shift_constrain_without_nearby_shape(scene) -> Non
             modifiers=Qt.ShiftModifier,
         )
     )
-    p1, new_p2 = arrow.line_points()
-    angle = math.degrees(math.atan2(new_p2.y() - p1.y(), new_p2.x() - p1.x()))
-    nearest_step = round(angle / 45.0) * 45.0
-    assert angle == pytest.approx(nearest_step, abs=0.5)
+    new_p1, new_p2 = arrow.line_points()
+    angle = math.degrees(
+        math.atan2(new_p2.y() - new_p1.y(), new_p2.x() - new_p1.x())
+    )
+    # No nearby shape to snap to -> falls back to preserving the
+    # original angle exactly (not re-snapping to the nearest 45-degree
+    # step, which would silently rotate the segment).
+    assert angle == pytest.approx(original_angle, abs=0.5)
     scene.mouseReleaseEvent(
         _ev(QEvent.GraphicsSceneMouseRelease, QPointF(140, 30))
     )

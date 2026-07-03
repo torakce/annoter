@@ -63,6 +63,9 @@ class FreehandItem(AnnotationItem):
         pen = QPen(self._color, self._stroke)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
+        if self._stroke <= 0.0:
+            # QPen(width=0) is a cosmetic hairline in Qt, not "no pen".
+            pen.setStyle(Qt.NoPen)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(self._path())

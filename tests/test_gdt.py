@@ -93,6 +93,45 @@ def test_symbol_cell_merges_only_when_same(qapp) -> None:
     assert len(diff._symbol_draws) == 2
 
 
+def test_rows_keep_natural_width_but_stay_left_aligned(qapp) -> None:
+    """Discussion #1, item 4: a shorter row must not be stretched to match
+    a wider row's right edge; both stay flush against the shared symbol
+    column on the left."""
+    item = GdtAnnotationItem(
+        GdtState(
+            characteristic=Characteristic.POSITION,
+            tolerance_prefix="Ø",
+            tolerance_value="0.123456",
+            tolerance_modifier="M",
+            datum_primary=DatumRef(["A"]),
+            additional_rows=[
+                GdtRow(
+                    characteristic=Characteristic.PARALLELISM,
+                    tolerance_value="0.1",
+                )
+            ],
+        ),
+        QPointF(0, 0),
+    )
+
+    n_sym = len(item._symbol_draws)
+    assert n_sym == 2  # two distinct characteristics -> two symbol cells
+
+    symbol_w = item._symbol_draws[0][0].width()
+    row0_cells = item._border_rects[n_sym : n_sym + 2]  # tolerance + datum A
+    row1_cells = item._border_rects[n_sym + 2 : n_sym + 3]  # tolerance only
+
+    # Both rows start flush against the shared symbol column.
+    assert row0_cells[0].left() == pytest.approx(symbol_w)
+    assert row1_cells[0].left() == pytest.approx(symbol_w)
+
+    row0_right = max(r.right() for r in row0_cells)
+    row1_right = row1_cells[0].right()
+    # The shorter row (no datum, short tolerance) is NOT stretched to
+    # match the wider row's right edge.
+    assert row1_right < row0_right - 1.0
+
+
 def test_backward_compat_single_row_dict() -> None:
     """An FCF persisted before the composite rework (no rows/texts/aux)
     must reload as a one-row frame with empty extras."""

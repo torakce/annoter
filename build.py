@@ -46,6 +46,14 @@ def _resource_args() -> list[str]:
     return args
 
 
+def _icon_args() -> list[str]:
+    """--icon for the .exe itself (Explorer/taskbar), separate from the
+    app.setWindowIcon() call at runtime which uses the bundled copy under
+    resources/icons/ (see _resource_args)."""
+    icon = RESOURCES / "icons" / "app.ico"
+    return ["--icon", str(icon)] if icon.is_file() else []
+
+
 def _common_args(name: str) -> list[str]:
     return [
         "--name",
@@ -64,6 +72,7 @@ def _common_args(name: str) -> list[str]:
         "shiboken6",
         "--collect-all",
         "pymupdf",
+        *_icon_args(),
         *_resource_args(),
     ]
 

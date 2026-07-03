@@ -7,7 +7,7 @@ it. All visible strings are English.
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup,
     QColorDialog,
@@ -25,36 +25,26 @@ from PySide6.QtWidgets import (
 
 from annoter.config import DEFAULT_PALETTE, STROKE_WIDTHS
 from annoter.controllers.tools import Tool, ToolController
-from annoter.views.icons import tool_icon
+from annoter.views.icons import color_swatch_icon, tool_icon
 
 
+# Related tools are merged (Discussion #1, item 3): one button per
+# family, the variant is switched afterwards in the Properties dock
+# (rectangle <-> cloud via "Outline", polyline <-> polygon via "Closed
+# shape", arrow <-> callout via "Label"; plain lines are an arrow with
+# both end styles set to None).
 _TOOL_LABELS: list[tuple[Tool, str]] = [
     (Tool.SELECT, "Select"),
     (Tool.RECTANGLE, "Rectangle"),
     (Tool.ELLIPSE, "Ellipse"),
-    (Tool.CLOUD, "Cloud"),
-    (Tool.LINE, "Line"),
-    (Tool.ARROW, "Arrow"),
+    (Tool.ARROW, "Line / Arrow"),
     (Tool.POLYLINE, "Polyline"),
-    (Tool.POLYGON, "Polygon"),
     (Tool.TEXT, "Text"),
-    (Tool.CALLOUT, "Callout"),
     (Tool.STICKY_NOTE, "Sticky note"),
     (Tool.STAMP, "Stamp"),
     (Tool.FREEHAND, "Freehand"),
+    (Tool.GDT, "GD&T frame"),
 ]
-
-
-def _color_swatch(color: QColor, size: int = 20) -> QIcon:
-    pm = QPixmap(size, size)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(color)
-    p.setPen(QColor(0, 0, 0, 80))
-    p.drawRoundedRect(1, 1, size - 2, size - 2, 3, 3)
-    p.end()
-    return QIcon(pm)
 
 
 class ToolPalette(QDockWidget):
@@ -148,7 +138,7 @@ class ToolPalette(QDockWidget):
             color = QColor(hex_)
             btn = QToolButton()
             btn.setCheckable(True)
-            btn.setIcon(_color_swatch(color))
+            btn.setIcon(color_swatch_icon(color))
             btn.setIconSize(QSize(20, 20))
             btn.setToolTip(color.name())
             btn.clicked.connect(
@@ -205,7 +195,7 @@ class ToolPalette(QDockWidget):
         color = QColorDialog.getColor(initial, self, "Pick a custom color")
         if color.isValid():
             self._custom_color = color
-            self._custom_btn.setIcon(_color_swatch(color))
+            self._custom_btn.setIcon(color_swatch_icon(color))
             self._custom_btn.setIconSize(QSize(20, 20))
             self._controller.set_color(color)
         else:

@@ -185,7 +185,7 @@ Changes landed after the M5 milestone, in git history from the initial commit on
 
 - **Composite (multi-row) GD&T, CATIA-inspired** (2026-06-18): the feature control frame now supports stacked composite tolerance rows under a shared characteristic symbol, upper/lower texts, and an optional auxiliary frame appended to the right -- matching CATIA's Geometrical Tolerance dialog and the multi-row frames on real drawings.
   - **Model** (`model/gdt.py`): new `GdtRow` dataclass (per-row tolerance prefix/value/modifier + three datums). `GdtState` keeps its flat `tolerance_*` / `datum_*` fields as **row 0** (so single-row FCFs persisted before this change still load unchanged) and adds `additional_rows: list[GdtRow]`, `upper_text`, `lower_text`, `aux_symbol: Characteristic | None`, `aux_text`. `all_rows()` returns row 0 + the extras; `to_dict` only writes the new keys when non-default and `from_dict` defaults them, so the JSON is backward compatible both ways.
-  - **Item** (`views/items/gdt.py`): `_compute_layout` was rewritten to build flat draw lists (`_border_rects`, `_symbol_draws`, `_text_draws`). The symbol cell spans every row; each row lays out its tolerance + datum cells and its **last cell is extended** so the frame stays rectangular when rows differ in width. The symbol is drawn into a centered square (not the cell) so it isn't stretched by a tall spanning cell. Upper/lower texts are left-aligned above/below; the auxiliary `[symbol][text]` frame is centered vertically to the right. `content_rect` covers everything, so the existing rect_pt geometry and the rasterized appearance stream (now generalized as `_set_rasterized_appearance`) pick it all up with no persistence changes.
+  - **Item** (`views/items/gdt.py`): `_compute_layout` was rewritten to build flat draw lists (`_border_rects`, `_symbol_draws`, `_text_draws`). The symbol cell spans every row; each row lays out its own tolerance + datum cells (row widths were briefly equalized by stretching the last cell -- reverted 2026-07-02, see below). The symbol is drawn into a centered square (not the cell) so it isn't stretched by a tall spanning cell. Upper/lower texts are left-aligned above/below; the auxiliary `[symbol][text]` frame is centered vertically to the right. `content_rect` covers everything, so the existing rect_pt geometry and the rasterized appearance stream (now generalized as `_set_rasterized_appearance`) pick it all up with no persistence changes.
   - **Editor** (`views/gdt_editor.py`): the single-row strip became a vertical panel -- one `_RowEditor` per tolerance line with its **own symbol picker** + prefix / value / modifier / three datum cells, a "+ line" button, plus "Top" and "Bottom" text fields. Still a floating in-place panel with live preview (`stateEdited` on every change). Public API (`GdtInlineEditor(initial, parent, icon_color=...)`, `current_state()`, `open()`, signals) is unchanged, so MainWindow needs no edits. Per-row fields live in `_RowEditor`.
   - **Editor refinements** (2026-06-18, after user feedback): (1) the editor now closes **only on explicit commit/cancel** (Enter / OK, Escape / Cancel) -- the commit-on-focus-loss watcher was removed, since clicking a neutral area was closing it; MainWindow still commits it on save / page switch / opening another frame. (2) The outer layout uses `QLayout.SetFixedSize` so "+ line" actually grows the panel instead of crushing the new row. (3) Per-row symbol picker (composite frames can mix characteristics; the item merges the symbol cell only across consecutive same-characteristic rows). (4) Readability: every field has a visible border, menu buttons show an explicit "▾" drop-down arrow (native indicator hidden), and each datum is wrapped with its modifier in a bordered `#GdtDatumGroup` with extra spacing between groups. (5) The **"Aux" frame was pulled from the editor UI** (not ready); `GdtState.aux_*` and the item rendering stay, and the editor preserves any existing aux values across an edit so they are not silently dropped.
 
@@ -208,6 +208,221 @@ Changes landed after the M5 milestone, in git history from the initial commit on
   - Smart-guide snapping is now also alt/shift-aware within the same `maybe_snap_move` gate rather than three independent checks scattered across callers.
 - **Live property updates in the Properties dock** (2026-07-02): every QSpinBox/QDoubleSpinBox/QLineEdit field previously only committed on `editingFinished` (focus-out or Enter) -- clicking a spin box's arrow buttons repeatedly never fires that signal, so nothing visibly changed until the user clicked elsewhere. Every such field now previews live on `valueChanged`/`textChanged` (applied directly to the item, no undo command yet) and still commits exactly one undo step on `editingFinished`, via two new generic helpers: `_wire_live_prop` (for the existing `ChangePropsCommand`-based fields: stroke, corner radius, shape/stamp text, label/font sizes, fill opacity) and `_wire_live_geom` (for the geometry panel's `MoveAnnotationsCommand`/`ResizeCommand`-based X/Y/Width/Height/Length/Angle fields). The pre-edit baseline is captured *lazily*, on the first change of each editing session (not when the dock/field was built), so a second, later edit of the same field -- or editing a sibling field first -- never diffs against a stale snapshot. Checkboxes, combo boxes and the color-picker button were already "live" by nature (their signals only fire on a discrete, completed choice) and are unchanged. The old single-shot `_push_move` / `_push_resize_rect` / `_push_line_geom` methods still exist as thin apply+commit-in-one-call wrappers around the new split halves, so direct callers/tests are unaffected.
 - **PowerPoint-like group interaction** (2026-07-02): two additions on top of the original session-level grouping. (1) Clicking *empty space inside a group's combined bounding box* (not just directly on a member shape) now also selects and drags the whole group -- PowerPoint lets you grab a group anywhere inside its silhouette. Implemented as a manual drag (`_begin_group_drag` / `_finish_group_drag`), mirroring the existing Ctrl-drag-duplicate machinery (own press/move/release branches, `PdfScene._group_at_point` hit-tests the union of `item_scene_rect` over each group), since no item is under the cursor for Qt's native per-item drag to grab. It still moves items via plain `setPos()`, so it goes through the same `itemChange` hook as any drag -- axis-lock and Alt-disable apply to a group drag exactly as they do to a single item. (2) A unified dashed outline (`PdfScene._group_box`, a persistent `QGraphicsRectItem` overlay) is drawn around the union of a group's members whenever the *current selection exactly matches* that group, wired to Qt's native `selectionChanged` signal and refreshed after every `mouseMoveEvent` tick (both the manual group-drag branch and the native-drag fallback) so it tracks the shapes during a drag, not just at selection time.
+
+## Discussion #1 backlog (GitHub Discussions)
+
+The user filed 13 UX/feature suggestions in GitHub Discussion #1 after using
+the app; being worked through in ordered lots (quickest/safest first),
+each ending with a summary like the M1-M5 milestones. Two latent bugs found
+during investigation are fixed alongside.
+
+### Lot 1 -- quick fixes (2026-07-02)
+
+- **`Ctrl+G` shortcut collision**: `act_goto` ("Go to Page...") and `act_group` ("Group") were both bound to `Ctrl+G`. `act_group` keeps it (closer to the Office/PowerPoint convention); `act_goto` moved to `Ctrl+Alt+G`.
+- **Shift-resize on lines/arrows now preserves the original angle instead of re-snapping it** (item 7): the 2026-06-29 Shift-constrained-resize feature (see above) reused `_snap_angle` (round to the nearest 45-degree step), which rotated the segment instead of keeping its existing alignment while it's lengthened. `PdfScene._constrain_resize` now reads the pre-drag endpoints from `self._resize_snapshot` (not the live, already-mutated `item.line_points()`) and projects the cursor onto the infinite line through them via a new `_project_onto_ray` helper -- the angle never changes, only the length. `tests/test_resize_constrain.py` and `tests/test_endpoint_snap.py` updated to assert angle-preservation instead of 45-degree snapping.
+- **GD&T composite rows keep their natural width** (item 4): the "extend the last cell so every row matches the widest one" behavior from the 2026-06-18 composite rework (see above) is removed from `_compute_layout` -- each row now keeps its own content width; the shared symbol column still keeps every row flush-left. Test in `tests/test_gdt.py::test_rows_keep_natural_width_but_stay_left_aligned`.
+- **Zero stroke width = no border** (item 9): the Properties dock's Stroke spinbox now allows 0 (was clamped to a 1 px minimum); `Qt.NoPen` is applied explicitly in `_pen()` on `_ShapeItem`, `LineItem`/`ArrowItem`, `_PolyItem` and inline in `FreehandItem.paint()`, since `QPen(width=0)` is a cosmetic hairline in Qt, not "no pen" -- without the explicit style switch a filled rectangle at stroke 0 would still show a thin 1px outline. Tests in `tests/test_zero_stroke.py`.
+- **Freehand tool stays armed across strokes** (item 13): `PdfScene._push_add` unconditionally returned to the Select tool after every insertion (a deliberate PowerPoint-style affordance for one-shot shapes) -- but a Freehand stroke isn't one-shot. It now skips that return when the tool that produced the item is `Tool.FREEHAND`; Escape or picking another tool still leaves it. Tests in `tests/test_freehand_tool.py`.
+- **Application icon**: `resources/icons/app.ico` / `app.png` (a simple rounded slate-blue tile, white "A", red accent bar) generated via a one-off Pillow script (not checked in). `app.py` sets it via `QApplication.setWindowIcon`, resolving the path the same `sys._MEIPASS`-aware way as `services/theme.py::_themes_dir`. `build.py` passes `--icon` (new `_icon_args()`) so the built `.exe` itself carries it (Explorer/taskbar); the existing `_resource_args()` already bundles the whole `resources/icons/` directory for the runtime `setWindowIcon` call.
+
+### Lot 2 -- single tool-selection surface + toolbar quick styles (2026-07-02)
+
+Items 1-2: tools were pickable in two places (top toolbar + left dock), and
+the toolbar had no Office-style quick controls.
+
+- **Toolbar tool buttons removed**: `_TOOLBAR_TOOLS`, the per-tool
+  `QAction`s (`_tool_actions` / `_tool_action_group`) and their three
+  consumer sites (icon theming, has-doc enabling, `_on_tool_changed`
+  check-sync) are gone from `main_window.py`. The left `ToolPalette` dock is
+  now the **only** place to pick a drawing tool -- and it gained the
+  **GD&T frame** entry, which until now existed only in the toolbar (the
+  dock/toolbar lists had silently diverged).
+- **Toolbar quick style controls**, Office-style, in the freed space:
+  a color action showing the current drawing color as a swatch (click opens
+  `QColorDialog` and pushes into `ToolController.set_color`) and a stroke
+  width combo over `STROKE_WIDTHS`. Both are two-way synced with
+  `ToolController` signals, so the dock and the toolbar always agree; a
+  non-preset width set elsewhere leaves the combo untouched (it only offers
+  presets). The swatch painter moved from `tool_palette.py::_color_swatch`
+  to a shared `views/icons.py::color_swatch_icon`.
+- Tests: `tests/test_main_window_wiring.py::test_tools_live_only_in_the_dock_palette`
+  and `::test_toolbar_quick_style_controls_follow_controller`.
+
+### Lot 3 -- unsaved-changes prompt (2026-07-02)
+
+Item 11: closing the PDF or the app silently dropped unsaved annotations.
+
+- **Dirty definition**: `MainWindow._has_unsaved_changes()` = any per-page
+  `QUndoStack` not `isClean()` (no hand-rolled `_dirty` flag). Each stack's
+  `cleanChanged` is connected to `_update_modified_flag` -- a **bound
+  method**, not a lambda, because PySide only auto-disconnects bound-method
+  connections when the receiver's C++ object dies (a lambda kept firing
+  into a deleted MainWindow during test teardown). `_save_to()` calls
+  `setClean()` on every page stack on success, which also keeps
+  `_reopen_after_save` -> `_open_path` from re-prompting.
+- **Native title marker**: `_refresh_window_title` puts Qt's `[*]`
+  placeholder in the title; `setWindowModified` drives the `*`.
+- **Prompt** (`_confirm_discard_changes`): Save / Discard / Cancel
+  `QMessageBox.warning`, returned as a may-proceed bool. Save writes
+  directly via `_save_to(self._doc.path)` with **no** second
+  overwrite-confirmation (the prompt already named the file). Guards three
+  paths: `closeEvent` (Cancel -> `event.ignore()`), File > Close
+  (`act_close` now targets `_on_close_requested`, a guarded wrapper --
+  `_on_close` itself stays prompt-free for internal callers like
+  `_open_path`), and the top of `_open_path` (opening another PDF over a
+  dirty document).
+- **Test infrastructure**: `tests/conftest.py` gained an autouse fixture
+  patching `QMessageBox.warning` to return Discard -- dozens of existing
+  tests push commands then `win.close()` in a `finally:`, which would
+  otherwise hang the offscreen suite on the new modal. Prompt-specific
+  tests re-patch with their own answer. Tests in
+  `tests/test_close_prompt.py` (8 cases: dirty tracking, title marker,
+  Cancel/Discard/Save on closeEvent, open-over guard, File > Close guard,
+  save-marks-clean).
+
+### Lot 4 -- page thumbnails + visible page navigation (2026-07-02)
+
+Item 10: nothing on screen said "this PDF has more pages", and switching
+pages required the Page menu or shortcuts.
+
+- **`PageRenderer.render_thumbnail(page_index, max_px)`**
+  (`services/pdf_render.py`): renders directly at the reduced zoom (never
+  through `render()`, whose full-DPI output would be huge for an A0 page)
+  into a plain devicePixelRatio-1 pixmap -- thumbnails are UI icons, not
+  scene content. Dedicated per-document `_thumb_cache` dict: sharing the
+  3-entry full-page LRU would evict an A0 render per thumbnail.
+- **`views/page_thumbnails.py::PageThumbnailDock`**: left-docked
+  `QListWidget` in icon mode, one item per page ("Page N" + thumbnail,
+  `THUMB_MAX_PX` = 140). Rendering is **lazy, one page per event-loop
+  tick** (a 0 ms single-shot `QTimer` chain over a `_pending` queue), so a
+  200-page open never blocks the UI; items show a drawn placeholder until
+  their render lands. `pageClicked(int)` -> `MainWindow._show_page`;
+  `set_current_page` keeps the highlighted row in sync on any page switch;
+  `set_document(None)` clears on close.
+- **View > Panels** submenu: `toggleViewAction()` for all four docks
+  (tools, pages, annotations, properties) -- previously dock visibility
+  was only restorable via saved window state.
+- **Status-bar page indicator is now a flat `QPushButton`** ("Page 2 / 7",
+  pointing-hand cursor, disabled without a document) that opens the Go to
+  Page dialog on click, instead of a passive QLabel.
+- Tests in `tests/test_page_thumbnails.py` (5 cases: fit+cache, one item
+  per page + lazy drain, click-to-navigate + row sync, cleared on close,
+  button indicator wiring).
+
+### Lot 5 -- welcome screen (2026-07-02)
+
+Item 12: launching without a PDF showed an empty gray viewport.
+
+- **`views/welcome_screen.py::WelcomeScreen`**: title + Open PDF / New
+  blank document buttons + a recent-documents grid (`QListWidget` icon
+  mode) with **real first-page thumbnails**. Signals only
+  (`openRequested`, `blankRequested`, `openPathRequested(str)`,
+  `removePathRequested(str)`); MainWindow owns all the behavior.
+  Thumbnails are rendered lazily one file per event-loop tick (same
+  QTimer-chain pattern as the page-thumbnail dock) since each one means
+  opening the PDF; an unopenable file keeps a red-crossed placeholder and
+  offers "Remove from list" in its context menu (`RecentFiles.remove`).
+- **Central `QStackedWidget`** (`MainWindow`): welcome page vs `PdfView`,
+  switched in `_open_path` (success) and `_on_close`. The welcome recent
+  grid refreshes on `RecentFiles.changed`, but only while it is the
+  visible page (thumbnail re-renders are not free).
+- **New blank document** (`_new_blank_document`): a real single-page A4
+  scratch PDF written to a fresh temp dir as `Untitled.pdf`, opened via
+  `_open_path(..., add_to_recent=False, untitled=True)`. While
+  `_is_untitled` is set, Save (Ctrl+S) and the unsaved-changes prompt's
+  Save button both redirect to Save As (`_on_save_as` now returns a
+  success bool for that); `_reopen_after_save` then reopens the chosen
+  real path with the flag cleared and adds it to recents. Temp dirs are
+  left to the OS temp cleanup.
+- **Test gotcha documented**: `QSettings` persists nothing until
+  org/app names are set (production sets them in `app.main`); MainWindow
+  tests that assert on `RecentFiles` need the same isolated-QSettings
+  fixture as `tests/test_recent_files.py`. Tests in
+  `tests/test_welcome_screen.py` (8 cases).
+
+### Lot 6 -- merged tools with post-draw variants (2026-07-02)
+
+Item 3: related tools (rectangle/cloud, line/arrow/callout,
+polyline/polygon) each had their own palette button; the user wanted one
+button per family plus an option to switch variants.
+
+- **Palette** (`tool_palette.py::_TOOL_LABELS`): 10 buttons instead of 14 --
+  Cloud, Line, Polygon and Callout buttons removed. "Line / Arrow" arms
+  `Tool.ARROW` (a plain line is an arrow with both end styles set to None,
+  already switchable in the dock); rectangle/cloud and polyline/polygon
+  variants are switched after drawing. The `Tool` enum members and the
+  scene's drafting branches for the removed tools are **kept** (persistence
+  still reconstructs those kinds from PDFs, and tests/clipboard use them).
+- **Conversions** (`controllers/convert.py`): pure functions building a
+  detached converted item (rect<->cloud, polyline<->polygon, line<->arrow,
+  line/arrow->callout, callout->arrow). Deliberately lossy where kinds
+  differ: rect->cloud drops the text label + corner radius,
+  polygon->polyline drops the fill, callout->arrow drops the text.
+  line<->callout converts endpoints through page coordinates (item pos
+  folded in) so a previously moved item lands exactly in place; the arrow
+  head end (p2) becomes the callout tip, the tail anchors the text box.
+- **`ReplaceAnnotationCommand`** (`controllers/commands.py`): generic
+  swap-old-for-new under the same parent, selection follows the visible
+  item (so the Properties dock rebuilds onto the swapped-in instance);
+  one undo step.
+- **Properties dock**: single-selection variant rows -- "Outline:
+  Straight/Cloud" combo on rect/cloud, "Closed shape" checkbox on
+  polyline/polygon, "Label" line edit on line/arrow (typing text converts
+  to a callout -- "a callout is just an arrow with text", per user), and a
+  "Convert to arrow (drop text)" button on callouts. A double
+  `editingFinished` on the label field is a no-op (the converted-away item
+  is detected by `scene() is None`).
+- Tests in `tests/test_change_kind.py` (10 cases: per-pair round-trips
+  incl. style/fill/pos, noop-when-already-target, command undo/redo,
+  dock-level outline + label conversions).
+
+### Lot 7 -- bend points on lines and arrows (2026-07-02)
+
+Item 5: elbows/kinks on leader lines. Deliberately implemented **inside
+`LineItem`** (per user decision) rather than unifying with `_PolyItem` --
+lines/arrows keep their 2-endpoint model plus an ordered `_bends` list.
+
+- **`LineItem`** (`views/items/lines.py`): `bends()/set_bends()`,
+  `path_points()` (p1, bends..., p2), `insert_bend_near(local_pos)`
+  (projects the click onto the nearest segment and inserts there),
+  `remove_bend(i)`, `bend_at(local_pos)`. The shaft paints as a
+  `drawPolyline` over `path_points()`; `boundingRect` spans them.
+  Handles: `HandleRole.P1`/`P2` plus **int-keyed** handles per bend (the
+  same opaque-role pattern `_PolyItem` uses). `geom_snapshot()` grew from
+  `(p1, p2)` to `(p1, p2, bends)`; `apply_geom` still accepts legacy
+  2-tuples. `ArrowItem` orients each head along its own **end segment**
+  (p1->first bend / last bend->p2), not the p1->p2 chord; `clone()` on
+  both copies bends.
+- **Context menu** (`MainWindow._show_context_menu`): right-clicking a
+  line/arrow offers "Add bend point" (at the click's projection), or
+  "Remove bend point" when the click lands on one (`bend_at`). Both go
+  through the existing `ResizeCommand` (snapshots carry the bends), so
+  add/remove/drag are all single undo steps.
+- **Shift constraints** (`PdfScene._constrain_resize`): dragging a bend
+  with Shift locks its segment from the previous path point to horizontal
+  or vertical (new `_axis_lock_point`, larger-displacement axis, as the
+  user asked -- "forcer la verticalité/horizontalité des portions"). An
+  endpoint of a *bent* line gets the same H/V lock relative to its
+  adjacent bend (the p1->p2 chord angle from item 7's fix is meaningless
+  once the shaft has kinks); straight lines keep the item-7
+  angle-preserving projection.
+- **Persistence** (`services/pdf_export.py`): a bent line/arrow saves as
+  a native **PolyLine** annot (a Line annot only holds 2 points) with
+  `/LE` line-ends (PolyLine supports them, so Acrobat still shows the
+  arrowhead) and a `"bent": "line"|"arrow"` tag in the `/Subject` JSON;
+  the PolyLine reader rebuilds the Line/Arrow item from first/last
+  vertices + middle bends when the tag is present. Straight lines are
+  byte-identical to before (still native Line). The Arrow and Line writer
+  branches were merged into one (`isinstance(item, LineItem)` covers
+  both).
+- Tests in `tests/test_line_bends.py` (11 cases: insert/project, path
+  order, handles, remove/hit-test, snapshot round-trip incl. legacy
+  2-tuple, clone, Shift bend + endpoint locks, PDF round-trip with ends,
+  straight-line regression). PyMuPDF gotcha: keep the `page` object
+  alive while iterating `page.annots()` or annots unbind.
+
+All 13 items of Discussion #1 are now implemented (lots 1-7), plus the
+Ctrl+G shortcut-collision fix found during investigation.
 
 ### Known remaining issues
 
@@ -242,8 +457,9 @@ all touch the same set of files. Use this as the recipe for the next one:
    multi-click tools follow the polyline pattern (`_poly_*`); tools that
    need MainWindow-level UI (text edit, GD&T frame, sticky note) emit a
    `*PlacementRequested` signal and defer.
-4. **UI surfaces**: `views/tool_palette.py::_TOOL_LABELS`,
-   `views/main_window.py::_TOOLBAR_TOOLS`, a glyph in
+4. **UI surfaces**: `views/tool_palette.py::_TOOL_LABELS` (the dock is
+   the single tool-selection surface since Discussion #1 Lot 2 -- the
+   toolbar no longer lists tools), a glyph in
    `views/icons.py::tool_icon`, and the crosshair set in
    `views/pdf_view.py::set_tool_cursor_for`. Icons are repainted on
    theme change automatically (no extra wiring).

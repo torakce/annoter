@@ -28,6 +28,10 @@ class LineItem(AnnotationItem):
         super().__init__(parent)
         self._p1: QPointF = QPointF(p1)
         self._p2: QPointF = QPointF(p2)
+        # Optional intermediate bend points between p1 and p2, in path
+        # order (Discussion #1, item 5). Each bend is a draggable handle;
+        # right-click adds/removes them.
+        self._bends: list[QPointF] = []
 
     def line_points(self) -> tuple[QPointF, QPointF]:
         return QPointF(self._p1), QPointF(self._p2)
@@ -38,57 +42,140 @@ class LineItem(AnnotationItem):
         self._p2 = QPointF(p2)
         self.update()
 
+    # ------------------------------------------------------------------
+    # bend points
+    # ------------------------------------------------------------------
+    def bends(self) -> list[QPointF]:
+        return [QPointF(b) for b in self._bends]
+
+    def set_bends(self, bends: list[QPointF]) -> None:
+        self.prepareGeometryChange()
+        self._bends = [QPointF(b) for b in bends]
+        self.update()
+
+    def path_points(self) -> list[QPointF]:
+        """Full path in drawing order: p1, bends..., p2."""
+        return [QPointF(self._p1), *self.bends(), QPointF(self._p2)]
+
+    def insert_bend_near(self, local_pos: QPointF) -> int:
+        """Insert a bend on the segment closest to `local_pos`, at its
+        projection onto that segment. Returns the new bend's index."""
+        pts = self.path_points()
+        best_seg = 0
+        best_d2 = float("inf")
+        best_proj = QPointF(local_pos)
+        for i in range(len(pts) - 1):
+            a, b = pts[i], pts[i + 1]
+            abx, aby = b.x() - a.x(), b.y() - a.y()
+            ab2 = abx * abx + aby * aby
+            if ab2 < 1e-12:
+                t = 0.0
+            else:
+                t = (
+                    (local_pos.x() - a.x()) * abx
+                    + (local_pos.y() - a.y()) * aby
+                ) / ab2
+                t = max(0.0, min(1.0, t))
+            proj = QPointF(a.x() + t * abx, a.y() + t * aby)
+            dx, dy = local_pos.x() - proj.x(), local_pos.y() - proj.y()
+            d2 = dx * dx + dy * dy
+            if d2 < best_d2:
+                best_d2 = d2
+                best_seg = i
+                best_proj = proj
+        self.prepareGeometryChange()
+        self._bends.insert(best_seg, best_proj)
+        self.update()
+        return best_seg
+
+    def remove_bend(self, index: int) -> None:
+        if 0 <= index < len(self._bends):
+            self.prepareGeometryChange()
+            del self._bends[index]
+            self.update()
+
+    def bend_at(self, local_pos: QPointF, radius: float = 8.0) -> int | None:
+        """Index of the bend within `radius` of `local_pos`, or None."""
+        r2 = radius * radius
+        for i, b in enumerate(self._bends):
+            dx, dy = local_pos.x() - b.x(), local_pos.y() - b.y()
+            if dx * dx + dy * dy <= r2:
+                return i
+        return None
+
     def boundingRect(self) -> QRectF:
         m = self._stroke / 2.0 + 4.0 + self.handles_extent()
-        x1, y1 = self._p1.x(), self._p1.y()
-        x2, y2 = self._p2.x(), self._p2.y()
+        pts = self.path_points()
+        xs = [p.x() for p in pts]
+        ys = [p.y() for p in pts]
         return QRectF(
-            min(x1, x2) - m,
-            min(y1, y2) - m,
-            abs(x2 - x1) + 2 * m,
-            abs(y2 - y1) + 2 * m,
+            min(xs) - m,
+            min(ys) - m,
+            max(xs) - min(xs) + 2 * m,
+            max(ys) - min(ys) + 2 * m,
         )
 
     def _pen(self) -> QPen:
         pen = QPen(self._color, self._stroke)
         pen.setCapStyle(Qt.RoundCap)
+        if self._stroke <= 0.0:
+            # QPen(width=0) is a cosmetic hairline in Qt, not "no pen" --
+            # an explicit style is needed to actually hide the line.
+            pen.setStyle(Qt.NoPen)
+            return pen
         return self._apply_dash(pen)
+
+    def _draw_shaft(self, painter) -> None:  # noqa: ANN001
+        painter.drawPolyline(QPolygonF(self.path_points()))
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
         painter.setPen(self._pen())
         painter.setBrush(Qt.NoBrush)
-        painter.drawLine(self._p1, self._p2)
+        self._draw_shaft(painter)
         self._draw_selection_marker(painter, self.boundingRect())
 
     # ------------------------------------------------------------------
-    # resize handles (two endpoints)
+    # resize handles (two endpoints + one int-keyed handle per bend,
+    # mirroring _PolyItem's opaque-role pattern)
     # ------------------------------------------------------------------
-    def handle_positions(self) -> dict[HandleRole, QPointF]:
-        return {
+    def handle_positions(self) -> dict:
+        h: dict = {
             HandleRole.P1: QPointF(self._p1),
             HandleRole.P2: QPointF(self._p2),
         }
+        for i, b in enumerate(self._bends):
+            h[i] = QPointF(b)
+        return h
 
-    def apply_resize(self, role: HandleRole, local_pos: QPointF) -> None:
+    def apply_resize(self, role, local_pos: QPointF) -> None:  # noqa: ANN001
         if role is HandleRole.P1:
             self.set_line_points(local_pos, self._p2)
         elif role is HandleRole.P2:
             self.set_line_points(self._p1, local_pos)
+        elif isinstance(role, int) and 0 <= role < len(self._bends):
+            self.prepareGeometryChange()
+            self._bends[role] = QPointF(local_pos)
+            self.update()
 
     def geom_snapshot(self) -> object:
-        return (QPointF(self._p1), QPointF(self._p2))
+        return (QPointF(self._p1), QPointF(self._p2), self.bends())
 
     def apply_geom(self, snapshot: object) -> None:
         if (
             isinstance(snapshot, tuple)
-            and len(snapshot) == 2
+            and len(snapshot) >= 2
             and isinstance(snapshot[0], QPointF)
         ):
             self.set_line_points(snapshot[0], snapshot[1])
+            # Pre-bend snapshots were plain (p1, p2) tuples.
+            bends = snapshot[2] if len(snapshot) >= 3 else []
+            if isinstance(bends, list):
+                self.set_bends(bends)
 
     def clone(self) -> "LineItem":
         c = LineItem(QPointF(self._p1), QPointF(self._p2))
         self._copy_base_style_into(c)
+        c.set_bends(self.bends())
         return c
 
 
@@ -249,20 +336,23 @@ class ArrowItem(LineItem):
     def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
         painter.setPen(self._pen())
         painter.setBrush(Qt.NoBrush)
-        painter.drawLine(self._p1, self._p2)
+        self._draw_shaft(painter)
         # Heads use a solid pen (dash patterns shouldn't ghost the
-        # decoration) and the item color.
+        # decoration) and the item color. On a bent line each head is
+        # oriented along its own *end segment*, not the p1->p2 chord.
         head_pen = QPen(self._color, self._stroke)
         head_pen.setCapStyle(Qt.RoundCap)
         head_pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(head_pen)
-        self._draw_end(painter, self._p1, self._p2, self._start_end)
-        self._draw_end(painter, self._p2, self._p1, self._end_end)
+        pts = self.path_points()
+        self._draw_end(painter, pts[0], pts[1], self._start_end)
+        self._draw_end(painter, pts[-1], pts[-2], self._end_end)
         self._draw_selection_marker(painter, self.boundingRect())
 
     def clone(self) -> "ArrowItem":
         c = ArrowItem(QPointF(self._p1), QPointF(self._p2))
         self._copy_base_style_into(c)
+        c.set_bends(self.bends())
         c.set_start_end(self._start_end)
         c.set_end_end(self._end_end)
         return c

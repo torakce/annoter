@@ -243,6 +243,11 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
     elif isinstance(item, ArrowItem):
         p["start_end"] = item.start_end().value
         p["end_end"] = item.end_end().value
+        if item.bends():
+            p["bent"] = "arrow"
+    elif isinstance(item, LineItem):
+        if item.bends():
+            p["bent"] = "line"
     elif isinstance(item, TextAnnotationItem):
         p["font_family"] = item.font_family()
         p["font_size"] = int(item.font_size())
@@ -453,28 +458,26 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
             pass
         return
 
-    if isinstance(item, ArrowItem):
-        p1, p2 = item.line_points()
+    if isinstance(item, LineItem):  # ArrowItem included (subclass)
         pos = item.pos()
-        a = _point_pt(QPointF(p1.x() + pos.x(), p1.y() + pos.y()), dpi)
-        b = _point_pt(QPointF(p2.x() + pos.x(), p2.y() + pos.y()), dpi)
-        annot = page.add_line_annot(a, b)
-        annot.set_line_ends(
-            _END_TO_PDF.get(item.start_end(), fitz.PDF_ANNOT_LE_NONE),
-            _END_TO_PDF.get(item.end_end(), fitz.PDF_ANNOT_LE_OPEN_ARROW),
-        )
-        annot.set_colors(stroke=color)
-        _set_dash_border(annot, stroke, item.dash_style())
-        annot.set_info(title=_OWNER_TAG, subject=subject)
-        annot.update()
-        return
-
-    if isinstance(item, LineItem):
-        p1, p2 = item.line_points()
-        pos = item.pos()
-        a = _point_pt(QPointF(p1.x() + pos.x(), p1.y() + pos.y()), dpi)
-        b = _point_pt(QPointF(p2.x() + pos.x(), p2.y() + pos.y()), dpi)
-        annot = page.add_line_annot(a, b)
+        path = [
+            _point_pt(QPointF(p.x() + pos.x(), p.y() + pos.y()), dpi)
+            for p in item.path_points()
+        ]
+        if item.bends():
+            # Bent shaft: a native Line annot only holds two points, so
+            # bent lines/arrows persist as PolyLine (which also carries
+            # /LE line-ending styles). The "bent" tag in the /Subject
+            # JSON tells the reader to rebuild a Line/Arrow item rather
+            # than a PolylineItem.
+            annot = page.add_polyline_annot(path)
+        else:
+            annot = page.add_line_annot(path[0], path[-1])
+        if isinstance(item, ArrowItem):
+            annot.set_line_ends(
+                _END_TO_PDF.get(item.start_end(), fitz.PDF_ANNOT_LE_NONE),
+                _END_TO_PDF.get(item.end_end(), fitz.PDF_ANNOT_LE_OPEN_ARROW),
+            )
         annot.set_colors(stroke=color)
         _set_dash_border(annot, stroke, item.dash_style())
         annot.set_info(title=_OWNER_TAG, subject=subject)
@@ -854,7 +857,15 @@ def _annot_to_items(
         pts = [QPointF(_px(x, dpi), _px(y, dpi)) for x, y in verts]
         if len(pts) < 2:
             return []
-        item = PolylineItem(pts)
+        bent = props.get("bent")
+        if bent in ("line", "arrow"):
+            # A bent LineItem/ArrowItem persisted as PolyLine: first and
+            # last vertices are the endpoints, the middle ones the bends.
+            cls = ArrowItem if bent == "arrow" else LineItem
+            item = cls(pts[0], pts[-1])
+            item.set_bends(pts[1:-1])
+        else:
+            item = PolylineItem(pts)
         item.set_color(qcolor)
         item.set_stroke(width)
         _apply_props_to_item(item, props)

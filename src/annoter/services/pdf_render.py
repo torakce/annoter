@@ -27,6 +27,10 @@ class PageRenderer:
         self._dpi = dpi
         self._cache_size = cache_size
         self._cache: OrderedDict[tuple[int, int, int], QPixmap] = OrderedDict()
+        # Thumbnails get their own cache: they are tiny (a few dozen KB)
+        # but sharing the 3-entry page LRU would evict a full A0 render
+        # for every thumbnail and vice versa.
+        self._thumb_cache: dict[tuple[int, int], QPixmap] = {}
 
     @property
     def dpi(self) -> int:
@@ -70,6 +74,37 @@ class PageRenderer:
         self._cache[key] = pixmap
         while len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
+        return pixmap
+
+    def render_thumbnail(self, page_index: int, max_px: int) -> QPixmap:
+        """Rasterize a page small enough to fit in a `max_px` square.
+
+        Renders directly at the reduced zoom (never through `render()`,
+        whose full-DPI output would be huge for an A0 page) and returns a
+        plain pixmap with devicePixelRatio 1 -- thumbnails are UI icons,
+        not scene content, so the logical-size convention of `render`
+        does not apply. Kept in a dedicated per-document cache (thumbnails
+        are a few dozen KB each; the 3-entry page LRU would thrash).
+        """
+        key = (page_index, max_px)
+        cached = self._thumb_cache.get(key)
+        if cached is not None:
+            return cached
+
+        page = self._doc.page(page_index)
+        rect = page.rect
+        side = max(rect.width, rect.height, 1.0)
+        zoom = max_px / side
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        image = QImage(
+            pix.samples,
+            pix.width,
+            pix.height,
+            pix.stride,
+            QImage.Format_RGB888,
+        ).copy()
+        pixmap = QPixmap.fromImage(image)
+        self._thumb_cache[key] = pixmap
         return pixmap
 
     def render_clip(

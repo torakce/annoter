@@ -863,6 +863,37 @@ class PdfScene(QGraphicsScene):
             origin.y() + length * math.sin(snapped),
         )
 
+    @staticmethod
+    def _axis_lock_point(anchor: QPointF, pos: QPointF) -> QPointF:
+        """Constrain `pos` so the segment from `anchor` is horizontal or
+        vertical, picking the axis with the larger displacement."""
+        dx = pos.x() - anchor.x()
+        dy = pos.y() - anchor.y()
+        if abs(dx) >= abs(dy):
+            return QPointF(pos.x(), anchor.y())
+        return QPointF(anchor.x(), pos.y())
+
+    @staticmethod
+    def _project_onto_ray(
+        anchor: QPointF, through: QPointF, pos: QPointF
+    ) -> QPointF:
+        """Project `pos` onto the infinite line through `anchor`/`through`.
+
+        Keeps the exact original angle (no rounding to a 45-degree step);
+        only the distance from `anchor` changes as `pos` moves. Degenerates
+        to `pos` unchanged if `anchor` and `through` coincide.
+        """
+        dx = through.x() - anchor.x()
+        dy = through.y() - anchor.y()
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return QPointF(pos)
+        ux, uy = dx / length, dy / length
+        vx = pos.x() - anchor.x()
+        vy = pos.y() - anchor.y()
+        proj_len = vx * ux + vy * uy
+        return QPointF(anchor.x() + proj_len * ux, anchor.y() + proj_len * uy)
+
     def _finish_draft(self) -> None:
         item = self._draft_item
         self._draft_item = None
@@ -954,6 +985,11 @@ class PdfScene(QGraphicsScene):
         else:
             cmd.redo()
         self.annotationsChanged.emit()
+        if self._current_tool() is Tool.FREEHAND:
+            # Freehand stays armed for consecutive strokes until the user
+            # explicitly leaves it (Escape or picking another tool) --
+            # unlike other tools, one stroke is not a one-shot action.
+            return
         # PowerPoint-style affordance: after every successful insertion,
         # return to the Select tool so the user can immediately reposition
         # or restyle the new annotation. The new item is also selected so
@@ -983,19 +1019,49 @@ class PdfScene(QGraphicsScene):
     ) -> QPointF:
         """Shift-constrain an in-progress resize on an existing item.
 
-        Mirrors the Shift behavior already used while drafting new shapes:
-        a line/arrow endpoint snaps to a 45-degree step from the other
-        endpoint (keeps the segment's alignment constant while
-        lengthening/rotating it); a rectangle/ellipse/cloud dragged from a
-        corner keeps a square footprint.
+        For a line/arrow endpoint this *preserves* the segment's original
+        angle (as it was before the drag started) rather than snapping to
+        a 45-degree step -- the user is stretching an existing line, not
+        drafting a new one, so the alignment they already have must stay
+        constant. The original angle is read from `self._resize_snapshot`
+        (captured at press time) since `item.line_points()` would already
+        reflect the in-progress, partially-dragged geometry. A
+        rectangle/ellipse/cloud dragged from a corner keeps a square
+        footprint, mirroring the Shift behavior used while drafting.
         """
+        if isinstance(item, LineItem) and isinstance(role, int):
+            # Bend point on a bent line: Shift forces the segment from
+            # the previous path point to stay horizontal or vertical
+            # (whichever is closer), per Discussion #1 item 5.
+            pts = item.path_points()
+            if 0 <= role < len(pts) - 2:
+                prev = pts[role]  # bend i follows path point i
+                return self._axis_lock_point(prev, local_pos)
+            return local_pos
         if isinstance(item, LineItem) and role in (
             HandleRole.P1,
             HandleRole.P2,
         ):
-            p1, p2 = item.line_points()
-            anchor = p2 if role is HandleRole.P1 else p1
-            return self._snap_angle(anchor, local_pos, step_deg=45.0)
+            if item.bends():
+                # Bent line: constrain the end segment (endpoint to its
+                # adjacent bend) to horizontal/vertical instead of
+                # preserving the p1->p2 chord angle, which is
+                # meaningless once the shaft has kinks.
+                bends = item.bends()
+                anchor = bends[0] if role is HandleRole.P1 else bends[-1]
+                return self._axis_lock_point(anchor, local_pos)
+            snapshot = self._resize_snapshot
+            if (
+                isinstance(snapshot, tuple)
+                and len(snapshot) >= 2
+                and isinstance(snapshot[0], QPointF)
+            ):
+                orig_p1, orig_p2 = snapshot[0], snapshot[1]
+            else:
+                orig_p1, orig_p2 = item.line_points()
+            anchor = orig_p2 if role is HandleRole.P1 else orig_p1
+            moving_orig = orig_p1 if role is HandleRole.P1 else orig_p2
+            return self._project_onto_ray(anchor, moving_orig, local_pos)
         if (
             isinstance(item, (RectangleItem, EllipseItem, CloudItem))
             and role in self._CORNER_HANDLE_ROLES

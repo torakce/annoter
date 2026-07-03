@@ -21,12 +21,15 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QColorDialog,
+    QComboBox,
     QFileDialog,
     QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
+    QStackedWidget,
     QToolBar,
 )
 
@@ -53,6 +56,7 @@ from annoter.controllers.commands import (
     ChangeStrokeCommand,
     DeleteAnnotationsCommand,
     MoveAnnotationsCommand,
+    ResizeCommand,
 )
 from annoter.controllers.tools import Tool, ToolController
 from annoter.model.document import PdfDocument
@@ -66,34 +70,20 @@ from annoter.services.recent_files import RecentFiles
 from annoter.services.theme import Theme, apply as apply_theme
 from annoter.views.annotation_list import AnnotationListDock
 from annoter.views.gdt_editor import GdtInlineEditor
-from annoter.views.icons import action_icon, tool_icon
+from annoter.views.icons import action_icon, color_swatch_icon
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.gdt import GdtAnnotationItem
+from annoter.views.items.lines import LineItem
 from annoter.views.items.note import StickyNoteItem
 from annoter.views.note_editor import NoteEditor
+from annoter.views.page_thumbnails import PageThumbnailDock
 from annoter.views.pdf_scene import PdfScene
 from annoter.views.pdf_view import PdfView
 from annoter.views.properties_dock import PropertiesDock
 from annoter.views.selection_toolbar import SelectionToolbar
 from annoter.views.tool_palette import ToolPalette
+from annoter.views.welcome_screen import WelcomeScreen
 
-
-_TOOLBAR_TOOLS: list[tuple[Tool, str]] = [
-    (Tool.SELECT, "Select"),
-    (Tool.RECTANGLE, "Rectangle"),
-    (Tool.ELLIPSE, "Ellipse"),
-    (Tool.CLOUD, "Cloud"),
-    (Tool.LINE, "Line"),
-    (Tool.ARROW, "Arrow"),
-    (Tool.POLYLINE, "Polyline"),
-    (Tool.POLYGON, "Polygon"),
-    (Tool.TEXT, "Text"),
-    (Tool.CALLOUT, "Callout"),
-    (Tool.STICKY_NOTE, "Sticky note"),
-    (Tool.STAMP, "Stamp"),
-    (Tool.FREEHAND, "Freehand"),
-    (Tool.GDT, "GD&T frame"),
-]
 
 # Style properties the Format Painter may copy. Captured from the source
 # via `getattr(item, name)()`, applied to a target via `set_<name>` --
@@ -127,6 +117,9 @@ class MainWindow(QMainWindow):
 
         self._theme: Theme = Theme.LIGHT
         self._doc: PdfDocument | None = None
+        # True while the open document is an unsaved scratch PDF created
+        # by "New blank document" -- Save then redirects to Save As.
+        self._is_untitled: bool = False
         self._renderer: PageRenderer | None = None
         self._page_index: int = 0
         self._page_rotation: int = 0  # multiples of 90, in [0, 360)
@@ -166,9 +159,20 @@ class MainWindow(QMainWindow):
 
         self._view = PdfView(self)
         self._view.setScene(self._scene)
-        self.setCentralWidget(self._view)
-        self._view.setFocus()
         self._view.contextMenuRequested.connect(self._show_context_menu)
+
+        # Central area: welcome page while no document is open, the PDF
+        # view once one is (Discussion #1, item 12).
+        self._welcome = WelcomeScreen(self)
+        self._welcome.openRequested.connect(self._on_open)
+        self._welcome.blankRequested.connect(self._new_blank_document)
+        self._welcome.openPathRequested.connect(self._open_path)
+        self._welcome.removePathRequested.connect(self._recent_remove)
+        self._central = QStackedWidget(self)
+        self._central.addWidget(self._welcome)
+        self._central.addWidget(self._view)
+        self.setCentralWidget(self._central)
+        self._view.setFocus()
 
         # Floating quick-action bar shown near the current selection.
         self._selection_toolbar = SelectionToolbar(self._view.viewport())
@@ -195,6 +199,10 @@ class MainWindow(QMainWindow):
         self._tool_palette = ToolPalette(self._tool_controller, self)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._tool_palette)
 
+        self._thumbnail_dock = PageThumbnailDock(self)
+        self._thumbnail_dock.pageClicked.connect(self._show_page)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._thumbnail_dock)
+
         self._annotation_list = AnnotationListDock(self)
         self._annotation_list.deleteRequested.connect(self._delete_selected)
         self.addDockWidget(Qt.RightDockWidgetArea, self._annotation_list)
@@ -205,6 +213,8 @@ class MainWindow(QMainWindow):
 
         self._recent = RecentFiles(MAX_RECENT_FILES, self)
         self._recent.changed.connect(self._refresh_recent_menu)
+        self._recent.changed.connect(self._refresh_welcome_recent)
+        self._welcome.set_recent(self._recent.list())
 
         self._build_actions()
         self._build_menus()
@@ -251,7 +261,7 @@ class MainWindow(QMainWindow):
 
         self.act_close = QAction("&Close", self)
         self.act_close.setShortcut("Ctrl+W")
-        self.act_close.triggered.connect(self._on_close)
+        self.act_close.triggered.connect(self._on_close_requested)
 
         self.act_quit = QAction("&Quit", self)
         self.act_quit.setShortcut("Ctrl+Q")
@@ -299,7 +309,7 @@ class MainWindow(QMainWindow):
         self.act_last.triggered.connect(self._goto_last_page)
 
         self.act_goto = QAction("&Go to Page...", self)
-        self.act_goto.setShortcut(QKeySequence("Ctrl+G"))
+        self.act_goto.setShortcut(QKeySequence("Ctrl+Alt+G"))
         self.act_goto.triggered.connect(self._goto_page_dialog)
 
         self.act_rotate_cw = QAction("Rotate &Right 90°", self)
@@ -509,6 +519,15 @@ class MainWindow(QMainWindow):
         m_view.addAction(self.act_rotate_180)
         m_view.addAction(self.act_rotate_reset)
         m_view.addSeparator()
+        m_panels = m_view.addMenu("&Panels")
+        for dock in (
+            self._tool_palette,
+            self._thumbnail_dock,
+            self._annotation_list,
+            self._properties_dock,
+        ):
+            m_panels.addAction(dock.toggleViewAction())
+        m_view.addSeparator()
         m_theme = m_view.addMenu("&Theme")
         m_theme.addAction(self.act_theme_light)
         m_theme.addAction(self.act_theme_dark)
@@ -535,21 +554,36 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_redo)
         tb.addSeparator()
 
-        self._tool_actions: dict[Tool, QAction] = {}
-        self._tool_action_group = QActionGroup(self)
-        self._tool_action_group.setExclusive(True)
-        for tool, label in _TOOLBAR_TOOLS:
-            act = QAction(label, self)
-            act.setCheckable(True)
-            act.triggered.connect(
-                lambda _checked=False, t=tool: (
-                    self._tool_controller.set_tool(t)
-                )
+        # Office-style quick style controls, bound to the ToolController
+        # (the left Tools dock stays the single place to pick a tool).
+        self._toolbar_color_act = QAction("Color", self)
+        self._toolbar_color_act.setToolTip(
+            "Drawing color (applies to the next annotation)"
+        )
+        self._toolbar_color_act.triggered.connect(
+            self._pick_toolbar_color
+        )
+        tb.addAction(self._toolbar_color_act)
+
+        self._toolbar_stroke_combo = QComboBox()
+        self._toolbar_stroke_combo.setToolTip("Stroke width")
+        for w in STROKE_WIDTHS:
+            self._toolbar_stroke_combo.addItem(f"{w:g} px", float(w))
+        self._toolbar_stroke_combo.activated.connect(
+            lambda idx: self._tool_controller.set_stroke(
+                float(self._toolbar_stroke_combo.itemData(idx))
             )
-            self._tool_action_group.addAction(act)
-            tb.addAction(act)
-            self._tool_actions[tool] = act
-        self._tool_actions[Tool.SELECT].setChecked(True)
+        )
+        tb.addWidget(self._toolbar_stroke_combo)
+
+        self._tool_controller.colorChanged.connect(
+            self._sync_toolbar_color
+        )
+        self._tool_controller.strokeChanged.connect(
+            self._sync_toolbar_stroke
+        )
+        self._sync_toolbar_color(self._tool_controller.color())
+        self._sync_toolbar_stroke(self._tool_controller.stroke())
 
         tb.addSeparator()
         tb.addAction(self.act_format_painter)
@@ -581,12 +615,38 @@ class MainWindow(QMainWindow):
         self.act_zoom_fit.setIcon(action_icon("zoom-fit", color=c))
         self.act_zoom_actual.setIcon(action_icon("zoom-actual", color=c))
         self.act_format_painter.setIcon(action_icon("format-painter", color=c))
-        for tool, act in self._tool_actions.items():
-            act.setIcon(tool_icon(tool, color=c))
+
+    # ------------------------------------------------------------------
+    # toolbar quick style controls
+    # ------------------------------------------------------------------
+    def _pick_toolbar_color(self) -> None:
+        color = QColorDialog.getColor(
+            self._tool_controller.color(), self, "Pick a drawing color"
+        )
+        if color.isValid():
+            self._tool_controller.set_color(color)
+
+    def _sync_toolbar_color(self, color: QColor) -> None:
+        self._toolbar_color_act.setIcon(color_swatch_icon(color))
+
+    def _sync_toolbar_stroke(self, width: float) -> None:
+        combo = self._toolbar_stroke_combo
+        for i in range(combo.count()):
+            if abs(float(combo.itemData(i)) - width) < 1e-6:
+                combo.setCurrentIndex(i)
+                return
+        # A width outside the presets (e.g. set via the Properties dock)
+        # keeps the previous index; the combo only offers the presets.
 
     def _build_status_bar(self) -> None:
         self._lbl_path = QLabel("")
-        self._lbl_page = QLabel("-")
+        # Flat button, not a label: one click opens Go to Page, making
+        # the page indicator an obvious navigation affordance.
+        self._lbl_page = QPushButton("-")
+        self._lbl_page.setFlat(True)
+        self._lbl_page.setCursor(Qt.PointingHandCursor)
+        self._lbl_page.setToolTip("Go to page... (Ctrl+Alt+G)")
+        self._lbl_page.clicked.connect(self._goto_page_dialog)
         self._lbl_zoom = QLabel("100 %")
         sb = self.statusBar()
         sb.addWidget(self._lbl_path, 1)
@@ -651,8 +711,8 @@ class MainWindow(QMainWindow):
             self.act_send_back,
         ):
             a.setEnabled(has_doc)
-        for a in getattr(self, "_tool_actions", {}).values():
-            a.setEnabled(has_doc)
+        if hasattr(self, "_lbl_page"):
+            self._lbl_page.setEnabled(has_doc)
 
     # ------------------------------------------------------------------
     # file ops
@@ -668,7 +728,42 @@ class MainWindow(QMainWindow):
         """Public entry point used by app.py and tests."""
         self._open_path(str(path))
 
-    def _open_path(self, path: str) -> None:
+    def _refresh_welcome_recent(self) -> None:
+        # Only rebuild (and re-render thumbnails) while the welcome page
+        # is actually visible; it is refreshed on every _on_close anyway.
+        if self._central.currentWidget() is self._welcome:
+            self._welcome.set_recent(self._recent.list())
+
+    def _recent_remove(self, path: str) -> None:
+        self._recent.remove(path)
+
+    def _new_blank_document(self) -> None:
+        """Create and open an untitled single-page A4 scratch PDF.
+
+        The file lives in a temp directory until the user saves;
+        Save (Ctrl+S) redirects to Save As while `_is_untitled` is set,
+        and the temp path never enters the recent-files list.
+        """
+        import tempfile
+
+        import fitz
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="annoter_"))
+        target = tmp_dir / "Untitled.pdf"
+        doc = fitz.open()
+        doc.new_page(width=595, height=842)  # A4 portrait, points
+        doc.save(str(target))
+        doc.close()
+        self._open_path(str(target), add_to_recent=False, untitled=True)
+
+    def _open_path(
+        self,
+        path: str,
+        add_to_recent: bool = True,
+        untitled: bool = False,
+    ) -> None:
+        if not self._confirm_discard_changes():
+            return
         try:
             doc = PdfDocument(Path(path))
         except Exception as e:
@@ -703,8 +798,12 @@ class MainWindow(QMainWindow):
                     it.set_edit_callback(self._open_gdt_editor)
                 elif isinstance(it, StickyNoteItem):
                     it.set_edit_callback(self._open_note_editor)
-        self._recent.add(path)
+        self._is_untitled = untitled
+        if add_to_recent:
+            self._recent.add(path)
         self._refresh_window_title()
+        self._thumbnail_dock.set_document(self._renderer, doc.page_count)
+        self._central.setCurrentWidget(self._view)
         self._show_page(0, _is_initial=True)
         # Defer fit to let the layout settle when called during startup.
         QTimer.singleShot(0, self._view.zoom_to_fit)
@@ -729,6 +828,10 @@ class MainWindow(QMainWindow):
     def _on_save(self) -> None:
         if self._doc is None:
             return
+        if self._is_untitled:
+            # A scratch "Untitled" document has no real path to overwrite.
+            self._on_save_as()
+            return
         self._commit_gdt_editor_if_open()
         self._commit_note_editor_if_open()
         target = self._doc.path
@@ -744,9 +847,9 @@ class MainWindow(QMainWindow):
         if self._save_to(target):
             self._reopen_after_save(target)
 
-    def _on_save_as(self) -> None:
+    def _on_save_as(self) -> bool:
         if self._doc is None:
-            return
+            return False
         self._commit_gdt_editor_if_open()
         self._commit_note_editor_if_open()
         path, _ = QFileDialog.getSaveFileName(
@@ -756,10 +859,12 @@ class MainWindow(QMainWindow):
             "PDF files (*.pdf);;All files (*.*)",
         )
         if not path:
-            return
+            return False
         target = Path(path)
         if self._save_to(target):
             self._reopen_after_save(target)
+            return True
+        return False
 
     def _save_to(self, target: Path) -> bool:
         """Serialize items into a temp copy, then atomically replace `target`."""
@@ -804,6 +909,10 @@ class MainWindow(QMainWindow):
             )
             tmp_path.unlink(missing_ok=True)
             return False
+        # Everything undoable is now on disk: mark every page stack clean
+        # so the dirty flag (and the reopen below) see a saved document.
+        for stack in self._page_stacks.values():
+            stack.setClean()
         return True
 
     def _reopen_after_save(self, target: Path) -> None:
@@ -811,6 +920,54 @@ class MainWindow(QMainWindow):
         # file so the user can continue editing.
         self._doc = None
         self._open_path(str(target))
+
+    # ------------------------------------------------------------------
+    # unsaved-changes guard
+    # ------------------------------------------------------------------
+    def _has_unsaved_changes(self) -> bool:
+        return self._doc is not None and any(
+            not stack.isClean() for stack in self._page_stacks.values()
+        )
+
+    def _update_modified_flag(self, _clean: bool = False) -> None:
+        # Drives the native "*" marker in the window title (via the [*]
+        # placeholder set in _refresh_window_title). `_clean` absorbs the
+        # cleanChanged(bool) signal argument; the flag is recomputed over
+        # every page stack, not just the emitting one.
+        self.setWindowModified(self._has_unsaved_changes())
+
+    def _confirm_discard_changes(self) -> bool:
+        """Prompt to save when the document has unsaved changes.
+
+        Returns True when the caller may proceed (saved, discarded, or
+        nothing to save); False when the user cancelled.
+        """
+        if not self._has_unsaved_changes():
+            return True
+        self._commit_gdt_editor_if_open()
+        self._commit_note_editor_if_open()
+        choice = QMessageBox.warning(
+            self,
+            "Unsaved changes",
+            f"Save changes to\n{self._doc.path.name}\nbefore closing?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if choice == QMessageBox.Cancel:
+            return False
+        if choice == QMessageBox.Save:
+            if self._is_untitled:
+                # Scratch document: only Save As gives it a real path.
+                return self._on_save_as()
+            # Direct save to the current path -- the prompt already named
+            # the file, so no second overwrite confirmation.
+            return self._save_to(self._doc.path)
+        return True
+
+    def _on_close_requested(self) -> None:
+        """File > Close (Ctrl+W): guarded by the unsaved-changes prompt."""
+        if self._confirm_discard_changes():
+            self._on_close()
 
     def _on_close(self) -> None:
         # Drop any in-progress in-place edits with the document.
@@ -827,18 +984,26 @@ class MainWindow(QMainWindow):
         self._page_items = {}
         self._scene.clear_page()
         self._page_index = 0
+        self._is_untitled = False
         self._annotation_list.set_page_item(None)
+        self._thumbnail_dock.set_document(None)
         self._refresh_window_title()
         self._lbl_page.setText("-")
+        self._central.setCurrentWidget(self._welcome)
+        self._welcome.set_recent(self._recent.list())
         self._update_actions_enabled()
 
     def _refresh_window_title(self) -> None:
+        # [*] is Qt's windowModified placeholder: it renders as "*" while
+        # setWindowModified(True) and disappears otherwise.
         if self._doc is None:
             self.setWindowTitle("Annoter")
             self._lbl_path.setText("")
+            self.setWindowModified(False)
         else:
-            self.setWindowTitle(f"{self._doc.path.name} - Annoter")
+            self.setWindowTitle(f"{self._doc.path.name}[*] - Annoter")
             self._lbl_path.setText(str(self._doc.path))
+            self._update_modified_flag()
 
     # ------------------------------------------------------------------
     # pages
@@ -866,6 +1031,9 @@ class MainWindow(QMainWindow):
         if stack is None:
             stack = QUndoStack(self)
             stack.setUndoLimit(UNDO_STACK_LIMIT)
+            # Bound method (not a lambda) so PySide auto-disconnects it
+            # when the window's C++ object is destroyed.
+            stack.cleanChanged.connect(self._update_modified_flag)
             self._undo_group.addStack(stack)
             self._page_stacks[index] = stack
         self._undo_group.setActiveStack(stack)
@@ -879,6 +1047,7 @@ class MainWindow(QMainWindow):
         self._lbl_page.setText(
             f"Page {index + 1} / {self._doc.page_count}"
         )
+        self._thumbnail_dock.set_current_page(index)
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
 
@@ -1311,6 +1480,29 @@ class MainWindow(QMainWindow):
         )
 
         menu = QMenu(self)
+        # Bend-point actions on lines/arrows (Discussion #1, item 5):
+        # right-click on a bend offers removal, anywhere else on the
+        # item offers inserting one at the click position.
+        if isinstance(clicked, LineItem):
+            local = clicked.mapFromScene(scene_pos)
+            bend_idx = clicked.bend_at(local)
+            if bend_idx is not None:
+                act = menu.addAction("Remove bend point")
+                act.triggered.connect(
+                    lambda _c=False, it=clicked, i=bend_idx: (
+                        self._change_bends(
+                            it, [b for j, b in enumerate(it.bends()) if j != i]
+                        )
+                    )
+                )
+            else:
+                act = menu.addAction("Add bend point")
+                act.triggered.connect(
+                    lambda _c=False, it=clicked, lp=local: (
+                        self._add_bend_at(it, lp)
+                    )
+                )
+            menu.addSeparator()
         if has_sel:
             menu.addAction(self.act_cut)
             menu.addAction(self.act_copy)
@@ -1359,15 +1551,38 @@ class MainWindow(QMainWindow):
             menu.exec(global_pos)
 
     # ------------------------------------------------------------------
+    # line/arrow bend points
+    # ------------------------------------------------------------------
+    def _push_geom_change(
+        self, item, old: object, new: object, label: str
+    ) -> None:  # noqa: ANN001
+        stack = self._undo_group.activeStack()
+        cmd = ResizeCommand(item, old, new, label=label)
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+
+    def _add_bend_at(self, item: LineItem, local_pos) -> None:  # noqa: ANN001
+        old = item.geom_snapshot()
+        item.insert_bend_near(local_pos)
+        self._push_geom_change(
+            item, old, item.geom_snapshot(), "Add bend point"
+        )
+
+    def _change_bends(self, item: LineItem, bends: list) -> None:
+        old = item.geom_snapshot()
+        item.set_bends(bends)
+        self._push_geom_change(
+            item, old, item.geom_snapshot(), "Remove bend point"
+        )
+
+    # ------------------------------------------------------------------
     # GD&T (M3) -- in-place editing
     # ------------------------------------------------------------------
     def _on_tool_changed(self, tool: Tool) -> None:
         # Keep the viewport cursor in sync with the active tool.
         self._view.set_tool_cursor_for(tool)
-        # Mirror the change into the toolbar's checkable actions.
-        act = getattr(self, "_tool_actions", {}).get(tool)
-        if act is not None and not act.isChecked():
-            act.setChecked(True)
         # Leaving Format Painter through any other path (Escape, picking
         # a drawing tool) must also un-toggle its button and drop the
         # captured style.
@@ -1675,6 +1890,9 @@ class MainWindow(QMainWindow):
         self._settings.setValue("ui/theme", self._theme.value)
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
+        if not self._confirm_discard_changes():
+            event.ignore()
+            return
         self._save_settings()
         self._on_close()
         super().closeEvent(event)

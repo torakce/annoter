@@ -40,6 +40,21 @@ def _begin(pm: QPixmap) -> QPainter:
 
 
 # ----------------------------------------------------------------------
+# color swatch
+# ----------------------------------------------------------------------
+def color_swatch_icon(color: QColor, size: int = 20) -> QIcon:
+    """Rounded square filled with `color`, used by the tool palette's
+    color buttons and the toolbar's quick color control."""
+    pm = _pixmap(size)
+    p = _begin(pm)
+    p.setBrush(color)
+    p.setPen(QColor(0, 0, 0, 80))
+    p.drawRoundedRect(1, 1, size - 2, size - 2, 3, 3)
+    p.end()
+    return QIcon(pm)
+
+
+# ----------------------------------------------------------------------
 # dash style
 # ----------------------------------------------------------------------
 def dash_icon(

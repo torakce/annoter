@@ -204,15 +204,21 @@ def test_tools_live_only_in_the_dock_palette(qapp) -> None:
 def test_toolbar_quick_style_controls_follow_controller(qapp) -> None:
     win = MainWindow()
     try:
-        # Controller -> toolbar.
-        win._tool_controller.set_stroke(3.5)
-        combo = win._toolbar_stroke_combo
-        assert float(combo.itemData(combo.currentIndex())) == pytest.approx(3.5)
+        # Controller -> toolbar (rounded into the integer spin).
+        win._tool_controller.set_stroke(4.0)
+        spin = win._toolbar_stroke_spin
+        assert spin.value() == 4
         win._tool_controller.set_color(QColor("#00AA00"))
         assert not win._toolbar_color_act.icon().isNull()
-        # Toolbar -> controller.
-        combo.activated.emit(0)
-        assert win._tool_controller.stroke() == pytest.approx(1.0)
+        # Toolbar -> controller: typing/setting a value pushes through.
+        spin.setValue(7)
+        assert win._tool_controller.stroke() == pytest.approx(7.0)
+        # Arrows step along the ladder, not linearly: 7 -> 8 -> 10.
+        spin.stepBy(1)
+        assert spin.value() == 8
+        spin.stepBy(1)
+        assert spin.value() == 10
+        assert win._tool_controller.stroke() == pytest.approx(10.0)
     finally:
         win.close()
 
@@ -369,15 +375,61 @@ def test_selection_toolbar_duplicate_and_delete(qapp, sample_pdf: Path) -> None:
         win.close()
 
 
-def test_selection_toolbar_reflects_item_style(qapp, sample_pdf: Path) -> None:
+def test_selection_toolbar_is_contextual(qapp, sample_pdf: Path) -> None:
+    """The pill shows type-specific actions (color/stroke moved to the
+    top toolbar); rectangle -> Outline/Fill, line -> Ends/+Bend,
+    multi-selection -> Group/Align."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QToolButton
+
+    from annoter.views.items.lines import ArrowItem
+
+    def pill_texts(win) -> list[str]:
+        return [
+            b.text()
+            for b in win._selection_toolbar.findChildren(QToolButton)
+        ]
+
+    win = MainWindow()
+    try:
+        win.open_path(sample_pdf)
+
+        rect = _push_rect(win, QRectF(10, 10, 30, 30))
+        rect.setSelected(True)
+        texts = pill_texts(win)
+        assert "Outline" in texts and "Fill" in texts
+        assert "Duplicate" in texts and "Delete" in texts
+        rect.setSelected(False)
+
+        arrow = ArrowItem(QPointF(50, 50), QPointF(150, 50))
+        win._scene.push_add(arrow)
+        for it in win._scene.selectedItems():
+            it.setSelected(False)
+        arrow.setSelected(True)
+        texts = pill_texts(win)
+        assert "Ends" in texts and "+ Bend" in texts
+
+        rect.setSelected(True)  # arrow + rect = multi-selection
+        texts = pill_texts(win)
+        assert "Group" in texts and "Align" in texts
+        assert "Outline" not in texts
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_selection_toolbar_hides_during_drag(qapp, sample_pdf: Path) -> None:
     win = MainWindow()
     try:
         win.open_path(sample_pdf)
         item = _push_rect(win, QRectF(10, 10, 30, 30))
-        item.set_color(QColor("#00FF00"))
-        item.set_stroke(7.0)
         item.setSelected(True)
-        assert win._selection_toolbar._stroke_btn.text() == "7 px"
+        assert not win._selection_toolbar.isHidden()
+
+        win._scene.interactiveDragChanged.emit(True)
+        assert win._selection_toolbar.isHidden()
+        win._scene.interactiveDragChanged.emit(False)
+        assert not win._selection_toolbar.isHidden()
     finally:
         win._on_close()
         win.close()

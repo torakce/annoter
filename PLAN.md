@@ -424,6 +424,229 @@ lines/arrows keep their 2-endpoint model plus an ordered `_bends` list.
 All 13 items of Discussion #1 are now implemented (lots 1-7), plus the
 Ctrl+G shortcut-collision fix found during investigation.
 
+### Lot 8 -- Discussion #1 follow-up comment (2026-07-03)
+
+Four new items from the user's 2026-07-02 comment on Discussion #1, plus
+the original item 8 (property icons unreadable in dark theme), which the
+first seven lots had left uncovered.
+
+- **Toolbar quick styles restyle the selection too**: picking a color or
+  stroke width in the top toolbar now (a) sets the drawing default in
+  `ToolController` as before AND (b) applies to the currently selected
+  annotations as one undoable `ChangeColorCommand`/`ChangeStrokeCommand`
+  (`MainWindow._on_quick_color_picked` / `_on_quick_stroke_picked`),
+  matching Office. Deliberately wired at the toolbar-handler level, not
+  on the `ToolController` signals -- a dock palette click still only
+  changes the default, so programmatic controller changes never restyle
+  a selection as a side effect.
+- **Office-style color picker** (`views/color_picker.py`):
+  `ColorPickerMenu` -- a compact popup with a 16-swatch standard grid
+  (via `QWidgetAction`) and a "More colors..." entry that opens the full
+  `QColorDialog` only on demand. `popup_color_picker()` helper anchors it
+  under a button or at the cursor. Replaces the direct QColorDialog in
+  the toolbar color control, the selection color action (Edit menu /
+  context menu / floating selection toolbar) and the Properties dock
+  color buttons. The left dock palette keeps its inline swatches + "..."
+  full dialog (it already is a quick palette).
+- **Shift-resize keeps the shape's original aspect ratio**: the
+  2026-06-29 behavior forced a *square* on rect/ellipse/cloud corner
+  drags. `_constrain_resize` now reads the pre-drag rect from
+  `_resize_snapshot` (live rect is already mutated mid-drag) and scales
+  it homothetically via the new `_scale_keep_ratio` helper (dominant-axis
+  scale, sign-preserving). Drafting a *new* shape with Shift still makes
+  a square (`_square_from` unchanged) -- there is no original ratio yet.
+- **Format Painter icon redesigned** (`views/icons.py`): large diagonal
+  brush (handle / ferrule / bristle wedge) laying down a stroke,
+  readable at 20 px; the old design's tiny tuft was ambiguous.
+- **Dark-theme property icons** (original item 8): the dash / line-end /
+  align combo icons in the Properties dock were always painted
+  near-black (`_DEFAULT_FG`) and vanished on the dark theme. The dock
+  now carries an `_icon_color` pushed by MainWindow
+  (`PropertiesDock.set_icon_color`, same contract as
+  `ToolPalette.set_icon_color`, refreshed on every theme switch) --
+  QPalette could not be used because the QSS themes do not update it.
+- Tests in `tests/test_quick_styles.py` (9 cases: quick color/stroke
+  with and without selection + undo, aspect-ratio preservation (2:1 and
+  square), `_scale_keep_ratio` math, picker menu signal + entries,
+  dock icon-color plumbing).
+- **Stroke width: typed value + ladder stepping** (2026-07-04 follow-up):
+  the toolbar's 3-choice stroke dropdown became
+  `views/stroke_spin.py::StrokeSpinBox` -- a QSpinBox whose up/down
+  arrows walk a PowerPoint-font-size-style ladder (`STROKE_LADDER`: 1-6
+  by 1, then 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 70, 84,
+  100) via a `stepBy` override; any value can still be typed freely
+  (off-ladder values snap to the nearest rung on the next step).
+  `setKeyboardTracking(False)` so typing only commits on Enter/focus
+  loss. Deployed in three places: the top toolbar (replacing the combo,
+  still restyles the selection through `_on_quick_stroke_picked`), the
+  Tools dock (replacing the three fixed preset buttons; both sync from
+  `strokeChanged` under `blockSignals` to avoid feedback loops) and the
+  Properties dock Stroke field (`minimum=0` keeps the "None" zero-stroke
+  option; below the ladder floor the down-arrow decrements plainly to
+  reach 0). The Edit-menu "Change Stroke" dialog switched from a 3-item
+  list to a free integer `QInputDialog.getInt` (0-100).
+  `config.STROKE_WIDTHS` now only feeds the ToolController default.
+  Tests: 4 new cases in `tests/test_quick_styles.py` (ladder stepping,
+  off-ladder snapping, zero-minimum behavior, dock palette sync) and an
+  updated toolbar wiring test.
+- **Line/arrow rework: end labels + endpoint menu** (2026-07-04
+  follow-up): three user requests landed together.
+  - **Labels on BOTH ends, bend-proof**: `LineItem` now carries
+    `start_label`/`end_label` strings rendered just past each endpoint
+    (`_label_rects`: offset along the OUTWARD direction of that end's
+    segment, so bent lines push labels away from their last segment; an
+    ArrowItem widens the gap past its head). This **replaces the Lot 6
+    "type a Label -> becomes a callout" conversion**, which could only
+    label one side and dropped bends. `convert.line_to_callout` was
+    removed; the Properties dock shows two live-wired "Start label" /
+    "End label" fields instead. `CalloutItem` remains (reading old PDFs,
+    "Convert to arrow" button); `line_to_arrow`/`arrow_to_line` now copy
+    bends + labels via `LineItem._copy_line_extras_into`.
+  - **"Extremity shape" context submenu**: right-clicking within 9 px of
+    a line/arrow endpoint offers the eight `EndStyle`s (icons + checked
+    current) for THAT endpoint; bend actions keep covering clicks
+    elsewhere on the item. On an ArrowItem it pushes a
+    `ChangePropsCommand`; on a plain LineItem it promotes to an
+    ArrowItem (`ReplaceAnnotationCommand`, both ends None except the
+    chosen one -- bends/labels survive). Choosing None on a plain line
+    is a no-op. `END_STYLE_LABELS` moved to `model/styles.py`, shared
+    with the dock combos.
+  - **Persistence**: labels ride in the /Subject JSON
+    (`start_label`/`end_label`) for both straight (Line) and bent
+    (PolyLine) exports. Native Line/PolyLine annots cannot display text
+    and their /Rect is vertex-derived (a rasterized appearance would be
+    clipped), so each label also writes a **companion FreeText annot**
+    (`_write_line_label_companions`, tagged `"companion": "line_label"`
+    in its JSON) purely for external viewers; `read_annotations` drops
+    any companion-tagged annot and Annoter re-renders labels from the
+    line's own payload.
+  - Tests: `tests/test_line_labels.py` (8 cases: bounds/direction/empty,
+    endpoint hit-test, arrow restyle undo, line promotion incl.
+    bends+labels, None no-op, PDF round-trip counting companions) and
+    updated `tests/test_change_kind.py` (in-place label editing, no
+    conversion).
+- **Discussion #1 third comment (2026-07-04)**: three more items.
+  - **Pill "tiny square" bug fixed**: the selection pill sometimes
+    rendered as a small empty square (screenshot in the discussion).
+    Cause: `adjustSize()` on a hidden, just-rebuilt widget can act on a
+    stale sizeHint. `set_context` now forces a synchronous relayout
+    (`layout.invalidate()` + `activate()` + `resize(sizeHint())`).
+    Regression test asserts a rebuilt hidden pill already has real size.
+  - **Datum triangles as extremity shapes** (ISO 5459):
+    `EndStyle.TRIANGLE` (hollow) and `TRIANGLE_FILLED` -- flat base
+    sitting ON the endpoint, perpendicular to the shaft, apex toward
+    the line (equilateral proportions). The hollow variant fills opaque
+    white so the shaft doesn't show through (GD&T cell convention).
+    Rendered in `ArrowItem._draw_end` and the `end_icon` preview;
+    exported as `/LE ClosedArrow` (closest native style; `_PDF_TO_END`
+    is built BEFORE the triangle aliases so foreign ClosedArrow annots
+    still read back as CLOSED_ARROW; ours restore the exact style from
+    the JSON). With a boxed start label this composes a full datum
+    feature symbol.
+  - **Text outlines (box / ellipse)**: new `TextBorder` enum + shared
+    `TEXT_BORDER_LABELS`. `TextAnnotationItem` (and Callout) gained a
+    `border` property drawn around the padded `content_rect` -- the
+    ellipse is the circumscribed one (`circumscribed_ellipse_rect`,
+    semi-axes x sqrt(2)) so text corners are never clipped. Line/arrow
+    end labels gained the same via `label_border` (one setting for both
+    labels). Properties dock: "Border" combo on text rows, "Label
+    border" combo on line rows. Persistence: `border`/`label_border` in
+    the JSON payload; a BOX also maps to the native FreeText
+    border_color (text items and label companions) so Acrobat shows it;
+    ellipses are Annoter-only. Tests in `tests/test_line_labels.py`.
+  - **Labels sit flush against the line end** (follow-up report, two
+    passes): the original placement centered the label at a worst-case
+    diagonal clearance and used the ARROWHEAD gap for both ends even
+    when an end had no head, leaving the datum frame floating far from
+    the line. `_label_rects` now computes the exact ray-to-outline
+    boundary distance and `_label_gap(start)` is per-end AND
+    border-aware: a BORDERED label on a bare end touches the line (gap
+    0 -- the frame edge lands exactly on the endpoint), plain text
+    keeps stroke/2 + 3 px, and an end with a decoration still clears
+    its head.
+  - **"Tiny square" root-caused to the measurement HUD** (2026-07-05
+    report, square still appearing after the pill fix): the stuck small
+    DARK square matches `MeasurementHud`'s styling, not the pill.
+    `PdfView.mouseReleaseEvent`'s zoom-window and panning branches
+    returned early and skipped the HUD hide at the bottom, leaving it
+    on screen. The hide now runs first thing on every release; `_place`
+    also refuses to show an empty-text HUD. Belt and braces on the pill
+    too: its layout uses `SetFixedSize` (the proven GdtInlineEditor
+    fix), so it can never render at a stale size.
+  - **Per-label frames** (2026-07-05 report: framing one label framed
+    both): `label_border` split into `start_label_border` /
+    `end_label_border` (the old accessors remain as set-both / read-
+    start conveniences). `_label_rects` now yields (rect, text, border)
+    triples; gap, outline, companion border and bounds are computed per
+    label. Dock shows a "Start frame" / "End frame" combo under each
+    label field. Persistence writes per-end keys; the legacy single
+    `label_border` key still reads back onto both ends.
+  - **Round outline is a true circle** (follow-up report):
+    `circumscribed_ellipse_rect` became `circumscribed_circle_rect`
+    (diameter = the text rect's diagonal) for both standalone text
+    borders and line end labels; the flush-contact math uses the circle
+    radius directly. `TextBorder.ELLIPSE` keeps its enum value for
+    persistence compatibility but displays as "Circle".
+- **Selection pill rework: contextual actions + stability**
+  (2026-07-04 follow-up): the floating selection toolbar was unstable
+  (only repositioned on selection change and zoom/scroll -- never
+  during a drag -- and its color/stroke chips never refreshed) and
+  redundant (color/stroke already live in the top toolbar). Reworked:
+  - **Contextual content** (`views/selection_toolbar.py` rewritten):
+    the pill now shows type-specific actions -- Edit (text / sticky
+    note / GD&T, routed to the right editor by
+    `MainWindow._edit_selected`), Outline straight/cloud + Fill toggle
+    (rect/cloud), Ends menu (both endpoints, all 8 styles, reuses
+    `_set_endpoint_style`) + "+ Bend" (inserted at the midpoint of the
+    longest segment) for lines/arrows, Closed toggle
+    (polyline/polygon), and Group / Ungroup / Align menu (MainWindow's
+    own align QActions) for multi-selections. Duplicate/Delete close
+    every variant; color/stroke chips are gone. The widget stays dumb
+    (semantic signals; MainWindow owns behavior via the existing
+    convert/replace/ChangeProps machinery). `_clear()` must
+    `setParent(None)` before `deleteLater`, or the old buttons linger
+    until the event loop runs.
+  - **Stability**: new `PdfScene.interactiveDragChanged(bool)` signal
+    (emitted via `_notify_drag` at every gesture start -- item drag,
+    resize, group drag, Ctrl-duplicate drag -- and once on left-button
+    release); MainWindow hides the pill during the gesture and
+    re-shows it repositioned on release, Figma-style. The pill is also
+    rebuilt on every `QUndoGroup.indexChanged`, so its
+    Fill/Closed/Ends states track dock edits, toolbar quick styles and
+    undo/redo.
+  - Tests: `test_selection_toolbar_is_contextual`,
+    `test_selection_toolbar_hides_during_drag` (replacing the old
+    style-chip test) in `tests/test_main_window_wiring.py`.
+- **Tools dock is tools-only** (2026-07-04 follow-up): the dock's Color
+  and Stroke sections were removed -- both functions live exclusively in
+  the top toolbar quick controls now (one place per function, per user
+  feedback). `ToolPalette` shrank to the tool grid + `set_icon_color`;
+  its custom-color dialog, swatch row, stroke spin and the associated
+  `colorChanged`/`strokeChanged` subscriptions are gone.
+  `config.DEFAULT_PALETTE` still seeds the ToolController default color.
+  Test: `tests/test_quick_styles.py::test_dock_palette_is_tools_only`.
+- **Soft angle magnetism on line/arrow endpoints** (2026-07-04
+  follow-up): dragging an endpoint WITHOUT Shift now magnets the
+  segment onto 0/45/90-degree multiples when it comes within
+  `_ANGLE_MAGNET_DEG` (4 degrees) of one, and stays completely free
+  otherwise -- `PdfScene._soft_snap_angle`, a magnet, unlike
+  `_snap_angle` which is Shift's hard lock. Applied both while
+  resizing an existing endpoint (`_soft_snap_endpoint`, anchored on
+  the endpoint's ADJACENT path point so a bent line straightens the
+  segment actually being dragged) and while drafting a new line/arrow
+  (`_update_draft`). Priority order per move: shape-endpoint snap >
+  Shift hard constraint > angle magnet; Alt disables the magnet like
+  every other snapping. Tests in `tests/test_resize_constrain.py`
+  (magnet in range, free beyond range, Alt off, bent-line anchor).
+- **Open arrow head is a true chevron** (2026-07-04 follow-up): the
+  OPEN_ARROW head was drawn with `drawPolygon`, which closes the
+  triangle and adds a visible bar across the back of the head. It is
+  now `drawPolyline` (two barbs only) in all three renderers:
+  `ArrowItem._draw_end`, `CalloutItem._draw_arrow_head` and the
+  `end_icon` preview in `views/icons.py`. CLOSED_ARROW keeps the filled
+  polygon. The PDF side needed no change -- the native `/LE /OpenArrow`
+  is already rendered as a chevron by Acrobat/MuPDF.
+
 ### Known remaining issues
 
 - Page rotation is still view-only (see M4 notes).

@@ -22,7 +22,6 @@ from annoter.controllers.convert import (  # noqa: E402
     convert_poly_closed,
     convert_shape_outline,
     line_to_arrow,
-    line_to_callout,
     polygon_to_polyline,
     polyline_to_polygon,
     rect_to_cloud,
@@ -92,29 +91,30 @@ def test_polyline_polygon_roundtrip(qapp) -> None:
 
 def test_line_arrow_roundtrip(qapp) -> None:
     line = LineItem(QPointF(0, 0), QPointF(80, 20))
+    line.set_bends([QPointF(40, 30)])
+    line.set_start_label("A")
+    line.set_end_label("B")
     arrow = line_to_arrow(line)
     assert isinstance(arrow, ArrowItem)
     assert arrow.line_points() == line.line_points()
+    # Bends and end labels survive the promotion (needed by the
+    # endpoint context menu, which converts plain lines to arrows).
+    assert arrow.bends() == [QPointF(40, 30)]
+    assert arrow.start_label() == "A" and arrow.end_label() == "B"
     back = arrow_to_line(arrow)
     assert type(back) is LineItem
     assert back.line_points() == line.line_points()
+    assert back.bends() == [QPointF(40, 30)]
 
 
-def test_arrow_callout_roundtrip_geometry(qapp) -> None:
-    arrow = ArrowItem(QPointF(10, 10), QPointF(110, 60))
-    arrow.setPos(QPointF(3, 4))  # moved after drawing
-
-    callout = line_to_callout(arrow, "check this")
-    assert isinstance(callout, CalloutItem)
-    assert callout.text() == "check this"
-    # Box anchored at the tail (p1), tip at the head (p2), both in page
-    # coordinates (item pos folded in).
-    assert callout.pos() == QPointF(13, 14)
-    assert callout.tip() == QPointF(100, 50)
+def test_callout_to_arrow_geometry(qapp) -> None:
+    callout = CalloutItem(QPointF(13, 14), "check this")
+    callout.set_tip(QPointF(100, 50))
 
     back = callout_to_arrow(callout)
     assert isinstance(back, ArrowItem)
-    # The tip end must land exactly where the callout pointed.
+    # The tip end must land exactly where the callout pointed (page
+    # coordinates: item pos folded in).
     _p1, p2 = back.line_points()
     assert p2 == QPointF(113, 64)
     # Text is dropped by design.
@@ -147,28 +147,46 @@ def test_dock_outline_combo_converts_rect_to_cloud(scene) -> None:
     assert rect in scene.page_item().childItems()
 
 
-def test_dock_label_field_converts_arrow_to_callout(scene) -> None:
-    from PySide6.QtWidgets import QLineEdit
+def test_dock_label_fields_edit_line_labels_in_place(scene) -> None:
+    from PySide6.QtWidgets import QFormLayout
 
     from annoter.views.properties_dock import PropertiesDock
 
     arrow = ArrowItem(QPointF(0, 0), QPointF(100, 0))
+    arrow.set_bends([QPointF(50, 40)])
     arrow.setParentItem(scene.page_item())
 
     dock = PropertiesDock()
     dock.set_undo_stack(scene._undo_stack)
     dock.set_items([arrow])
-    edit = QLineEdit()
-    edit.setText("note here")
-    dock._on_line_label_committed(arrow, edit)
 
-    children = scene.page_item().childItems()
-    callouts = [c for c in children if isinstance(c, CalloutItem)]
-    assert len(callouts) == 1 and arrow not in children
-    assert callouts[0].text() == "note here"
-    # A second editingFinished (Qt often fires it twice) is a no-op.
-    dock._on_line_label_committed(arrow, edit)
+    host = dock._body_layout.itemAt(0).widget()
+    form = host.layout()
+    edits = {}
+    for i in range(form.rowCount()):
+        lbl = form.itemAt(i, QFormLayout.ItemRole.LabelRole)
+        if lbl is not None and lbl.widget().text() in (
+            "Start label",
+            "End label",
+        ):
+            edits[lbl.widget().text()] = form.itemAt(
+                i, QFormLayout.ItemRole.FieldRole
+            ).widget()
+    assert set(edits) == {"Start label", "End label"}
+
+    edits["Start label"].setText("datum A")
+    edits["End label"].setText("hole 4x")
+    # Live preview applied directly; the item stays the SAME object
+    # (no callout conversion) and keeps its bends.
+    assert arrow.start_label() == "datum A"
+    assert arrow.end_label() == "hole 4x"
+    assert arrow in scene.page_item().childItems()
+    assert arrow.bends() == [QPointF(50, 40)]
+
+    edits["End label"].editingFinished.emit()
     assert scene._undo_stack.count() == 1
+    scene._undo_stack.undo()
+    assert arrow.end_label() == ""
 
 
 def test_replace_command_swaps_and_undoes(scene) -> None:

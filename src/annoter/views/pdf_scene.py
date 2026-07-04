@@ -53,6 +53,10 @@ class PdfScene(QGraphicsScene):
     gdtPlacementRequested = Signal(QPointF)  # GD&T tool clicked on the page
     notePlacementRequested = Signal(QPointF)  # sticky-note tool clicked
     formatPaintRequested = Signal(object)  # AnnotationItem clicked while painting
+    # True while the user is dragging/resizing items with the mouse;
+    # lets chrome like the floating selection pill hide during the
+    # gesture and re-show (repositioned) on release.
+    interactiveDragChanged = Signal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -276,6 +280,7 @@ class PdfScene(QGraphicsScene):
         self._group_drag_start_positions = [QPointF(it.pos()) for it in items]
         self._capture_move_origins()
         self._interactive_drag_active = True
+        self._notify_drag(True)
 
     def _finish_group_drag(self) -> None:
         items = list(self._group_drag_items)
@@ -463,6 +468,7 @@ class PdfScene(QGraphicsScene):
                 self._resize_item = item
                 self._resize_role = role
                 self._resize_snapshot = item.geom_snapshot()
+                self._notify_drag(True)
                 event.accept()
                 return
             # Shift+click toggles the clicked annotation in and out of
@@ -496,6 +502,7 @@ class PdfScene(QGraphicsScene):
                 super().mousePressEvent(event)
                 self._capture_move_origins()
                 self._interactive_drag_active = True
+                self._notify_drag(True)
                 return
             # PowerPoint lets you grab a group anywhere inside its
             # silhouette, not just on a member shape: a click on empty
@@ -512,6 +519,7 @@ class PdfScene(QGraphicsScene):
             super().mousePressEvent(event)
             self._capture_move_origins()
             self._interactive_drag_active = True
+            self._notify_drag(True)
             return
 
         pos = event.scenePos()
@@ -596,6 +604,18 @@ class PdfScene(QGraphicsScene):
                 local = self._constrain_resize(
                     self._resize_item, self._resize_role, local
                 )
+            elif (
+                not (event.modifiers() & Qt.AltModifier)
+                and isinstance(self._resize_item, LineItem)
+                and self._resize_role in (HandleRole.P1, HandleRole.P2)
+            ):
+                # No modifier: soft angle magnetism -- the end segment
+                # snaps onto 0/45/90-degree multiples when the drag
+                # comes close, and stays free otherwise (Alt disables,
+                # like every other snapping).
+                local = self._soft_snap_endpoint(
+                    self._resize_item, self._resize_role, local
+                )
             self._resize_item.apply_resize(self._resize_role, local)
             event.accept()
             return
@@ -649,6 +669,12 @@ class PdfScene(QGraphicsScene):
         super().mouseMoveEvent(event)
         self._update_group_box()
 
+    def _notify_drag(self, active: bool) -> None:
+        """Emit interactiveDragChanged on real transitions only."""
+        if active != getattr(self, "_drag_notified", False):
+            self._drag_notified = active
+            self.interactiveDragChanged.emit(active)
+
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if self._poly_draft is not None:
             # Vertices are placed on press; swallow the release so the
@@ -658,6 +684,9 @@ class PdfScene(QGraphicsScene):
         if event.button() != Qt.LeftButton:
             super().mouseReleaseEvent(event)
             return
+        # Whatever gesture was in flight, the left-button release ends
+        # it; listeners (selection pill) re-show their chrome now.
+        self._notify_drag(False)
 
         if self._resize_item is not None:
             self._flush_resize()
@@ -817,6 +846,10 @@ class PdfScene(QGraphicsScene):
                 pos = snapped
             elif constrained:
                 pos = self._snap_angle(origin, pos, step_deg=45.0)
+            elif not snap_disabled:
+                # Soft magnet onto 0/45/90-degree multiples while
+                # drawing, mirroring the endpoint-resize behavior.
+                pos = self._soft_snap_angle(origin, pos)
             item.set_line_points(origin, pos)
         elif isinstance(item, CalloutItem):
             # Drag defines the leader: press = arrow tip (the feature),
@@ -862,6 +895,44 @@ class PdfScene(QGraphicsScene):
             origin.x() + length * math.cos(snapped),
             origin.y() + length * math.sin(snapped),
         )
+
+    # Soft angle magnetism: how close (in degrees) the segment must come
+    # to a 45-degree multiple before it snaps onto it.
+    _ANGLE_MAGNET_DEG = 4.0
+
+    @classmethod
+    def _soft_snap_angle(
+        cls, origin: QPointF, pos: QPointF, step_deg: float = 45.0
+    ) -> QPointF:
+        """Snap `pos` onto the nearest `step_deg` multiple from `origin`
+        only when it is already within `_ANGLE_MAGNET_DEG` of it;
+        otherwise return `pos` untouched. Unlike `_snap_angle` (Shift's
+        hard constraint), this is a magnet, not a lock."""
+        dx = pos.x() - origin.x()
+        dy = pos.y() - origin.y()
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return QPointF(pos)
+        angle = math.degrees(math.atan2(dy, dx))
+        nearest = round(angle / step_deg) * step_deg
+        if abs(angle - nearest) > cls._ANGLE_MAGNET_DEG:
+            return QPointF(pos)
+        rad = math.radians(nearest)
+        return QPointF(
+            origin.x() + length * math.cos(rad),
+            origin.y() + length * math.sin(rad),
+        )
+
+    def _soft_snap_endpoint(
+        self, item, role, local_pos: QPointF
+    ) -> QPointF:  # noqa: ANN001
+        """Angle magnet for an endpoint drag: anchor on the endpoint's
+        ADJACENT path point (the other endpoint, or the neighboring bend
+        on a bent line), so the magnet straightens the segment actually
+        being dragged."""
+        pts = item.path_points()
+        anchor = pts[1] if role is HandleRole.P1 else pts[-2]
+        return self._soft_snap_angle(anchor, local_pos)
 
     @staticmethod
     def _axis_lock_point(anchor: QPointF, pos: QPointF) -> QPointF:
@@ -1066,15 +1137,41 @@ class PdfScene(QGraphicsScene):
             isinstance(item, (RectangleItem, EllipseItem, CloudItem))
             and role in self._CORNER_HANDLE_ROLES
         ):
-            r = item.rect()
+            # Anchor on the opposite corner of the *original* rect (the
+            # live rect is already mutated mid-drag) and preserve the
+            # original aspect ratio -- Shift-resizing an existing shape
+            # keeps its proportions, it does not force a square (that
+            # rule only applies while drafting a brand-new shape).
+            snapshot = self._resize_snapshot
+            r = snapshot if isinstance(snapshot, QRectF) else item.rect()
             anchor = {
                 HandleRole.TOP_LEFT: QPointF(r.right(), r.bottom()),
                 HandleRole.TOP_RIGHT: QPointF(r.left(), r.bottom()),
                 HandleRole.BOTTOM_LEFT: QPointF(r.right(), r.top()),
                 HandleRole.BOTTOM_RIGHT: QPointF(r.left(), r.top()),
             }[role]
-            return self._square_from(anchor, local_pos)
+            return self._scale_keep_ratio(
+                anchor, local_pos, r.width(), r.height()
+            )
         return local_pos
+
+    @staticmethod
+    def _scale_keep_ratio(
+        anchor: QPointF, pos: QPointF, w0: float, h0: float
+    ) -> QPointF:
+        """Project `pos` so the rect from `anchor` keeps the w0:h0 aspect
+        ratio, scaled to whichever axis the cursor pulled further."""
+        if w0 < 1e-9 or h0 < 1e-9:
+            return QPointF(pos)
+        dx = pos.x() - anchor.x()
+        dy = pos.y() - anchor.y()
+        scale = max(abs(dx) / w0, abs(dy) / h0)
+        sx = 1.0 if dx >= 0 else -1.0
+        sy = 1.0 if dy >= 0 else -1.0
+        return QPointF(
+            anchor.x() + sx * w0 * scale,
+            anchor.y() + sy * h0 * scale,
+        )
 
     # ------------------------------------------------------------------
     # smart alignment guides (PowerPoint/Canva-style snap-while-dragging)
@@ -1349,6 +1446,7 @@ class PdfScene(QGraphicsScene):
             sources = selected
         else:
             sources = [clicked]
+        self._notify_drag(True)
 
         clones: list[AnnotationItem] = []
         for src in sources:

@@ -44,7 +44,13 @@ from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QStyleOptionGraphicsItem
 
 from annoter.model.gdt import GdtState
-from annoter.model.styles import DASH_PATTERNS, DashStyle, EndStyle, TextAlign
+from annoter.model.styles import (
+    DASH_PATTERNS,
+    DashStyle,
+    EndStyle,
+    TextAlign,
+    TextBorder,
+)
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.callout import CalloutItem
 from annoter.views.items.freehand import FreehandItem
@@ -75,7 +81,14 @@ _END_TO_PDF: dict[EndStyle, int] = {
     EndStyle.SQUARE: fitz.PDF_ANNOT_LE_SQUARE,
     EndStyle.SLASH: fitz.PDF_ANNOT_LE_SLASH,
 }
+# Reverse map for FOREIGN annots only (ours restore the exact style from
+# the /Subject JSON). Built before the triangle aliases below so
+# ClosedArrow still reads back as CLOSED_ARROW.
 _PDF_TO_END: dict[int, EndStyle] = {v: k for k, v in _END_TO_PDF.items()}
+# Datum triangles have no PDF /LE equivalent; ClosedArrow is the closest
+# for external viewers.
+_END_TO_PDF[EndStyle.TRIANGLE] = fitz.PDF_ANNOT_LE_CLOSED_ARROW
+_END_TO_PDF[EndStyle.TRIANGLE_FILLED] = fitz.PDF_ANNOT_LE_CLOSED_ARROW
 
 
 def _dash_pattern_pt(style: DashStyle, stroke: float) -> list[float]:
@@ -254,6 +267,8 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
         p["bold"] = bool(item.bold())
         p["italic"] = bool(item.italic())
         p["align"] = item.align().value
+        if item.border() is not TextBorder.NONE:
+            p["border"] = item.border().value
     elif isinstance(item, GdtAnnotationItem):
         p["font_size"] = int(item.font_size())
     elif isinstance(item, StampItem):
@@ -268,6 +283,16 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
             _pt(pos.x() + tip.x(), dpi),
             _pt(pos.y() + tip.y(), dpi),
         ]
+    if isinstance(item, LineItem):
+        # End labels (either end may carry one; independent of bends).
+        if item.start_label():
+            p["start_label"] = item.start_label()
+        if item.end_label():
+            p["end_label"] = item.end_label()
+        if item.start_label_border() is not TextBorder.NONE:
+            p["start_label_border"] = item.start_label_border().value
+        if item.end_label_border() is not TextBorder.NONE:
+            p["end_label_border"] = item.end_label_border().value
     return p
 
 
@@ -318,7 +343,27 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
                 item.set_end_end(EndStyle(props["end_end"]))
         except ValueError:
             pass
-    elif isinstance(item, TextAnnotationItem):
+    if isinstance(item, LineItem):
+        if "start_label" in props:
+            item.set_start_label(str(props["start_label"]))
+        if "end_label" in props:
+            item.set_end_label(str(props["end_label"]))
+        if "label_border" in props:
+            # Legacy single-key form: applied to both labels.
+            try:
+                item.set_label_border(TextBorder(props["label_border"]))
+            except ValueError:
+                pass
+        for key, setter in (
+            ("start_label_border", item.set_start_label_border),
+            ("end_label_border", item.set_end_label_border),
+        ):
+            if key in props:
+                try:
+                    setter(TextBorder(props[key]))
+                except ValueError:
+                    pass
+    if isinstance(item, TextAnnotationItem):
         if "font_family" in props:
             item.set_font_family(str(props["font_family"]))
         if "font_size" in props:
@@ -330,6 +375,11 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
         if "align" in props:
             try:
                 item.set_align(TextAlign(props["align"]))
+            except ValueError:
+                pass
+        if "border" in props:
+            try:
+                item.set_border(TextBorder(props["border"]))
             except ValueError:
                 pass
     elif isinstance(item, GdtAnnotationItem):
@@ -482,6 +532,15 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         _set_dash_border(annot, stroke, item.dash_style())
         annot.set_info(title=_OWNER_TAG, subject=subject)
         annot.update()
+        # End labels: native Line/PolyLine annots cannot display text,
+        # and their /Rect is recomputed from the vertices so a
+        # rasterized appearance would be clipped. Write each label as a
+        # companion FreeText annot for external viewers; the reader
+        # skips companions (Annoter re-renders labels from the JSON).
+        try:
+            _write_line_label_companions(page, item, dpi, color)
+        except Exception:
+            pass
         return
 
     if isinstance(item, FreehandItem):
@@ -561,12 +620,48 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
             fontsize=int(item.font_size()),
             fontname=fontname,
             text_color=color,
-            border_color=None,
+            # A box outline maps to the native FreeText border so
+            # external viewers show it; an ellipse has no native
+            # equivalent (Annoter re-renders it from the JSON).
+            border_color=(
+                color if item.border() is TextBorder.BOX else None
+            ),
             fill_color=None,
         )
         annot.set_info(title=_OWNER_TAG, subject=subject)
         annot.update()
         return
+
+
+def _write_line_label_companions(
+    page: fitz.Page, item, dpi: int, color
+) -> None:  # noqa: ANN001
+    """FreeText twins of a line/arrow's end labels, for external viewers.
+
+    Tagged `"companion": "line_label"` in the /Subject JSON so
+    `read_annotations` drops them -- the labels' source of truth is the
+    line's own payload, and Annoter paints them itself.
+    """
+    from PySide6.QtCore import QRectF as _QRectF
+
+    pos = item.pos()
+    for local_rect, text, border in item._label_rects():
+        rect = _QRectF(local_rect).translated(pos.x(), pos.y())
+        rect.adjust(0, 0, 4.0, 4.0)
+        annot = page.add_freetext_annot(
+            _rect_pt(rect, dpi),
+            text,
+            fontsize=11,
+            fontname="Helv",
+            text_color=color,
+            border_color=(color if border is TextBorder.BOX else None),
+            fill_color=None,
+        )
+        annot.set_info(
+            title=_OWNER_TAG,
+            subject=json.dumps({"companion": "line_label"}),
+        )
+        annot.update()
 
 
 # ----------------------------------------------------------------------
@@ -770,6 +865,11 @@ def _annot_to_items(
                 props = {}
         except ValueError:
             props = {}
+
+    # Companion annots (e.g. a line label's FreeText twin) exist only
+    # for external viewers; the owning item re-renders their content.
+    if props.get("companion"):
+        return []
 
     qcolor = _rgb01_to_qcolor(stroke_rgb)
     qrect = QRectF(

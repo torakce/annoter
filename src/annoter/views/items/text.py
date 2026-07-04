@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetricsF,
+    QPen,
     QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -20,8 +21,24 @@ from PySide6.QtWidgets import (
     QGraphicsTextItem,
 )
 
-from annoter.model.styles import HandleRole, TextAlign
+from annoter.model.styles import HandleRole, TextAlign, TextBorder
 from annoter.views.items.base import AnnotationItem
+
+
+_BORDER_PAD = 3.0  # gap between the text frame and its optional outline
+
+
+def circumscribed_circle_rect(rect: QRectF) -> QRectF:
+    """Square rect of the CIRCLE passing through `rect`'s corners.
+
+    Per user feedback the round outline is a true circle (like circled
+    revision marks on drawings), not an ellipse; its diameter is the
+    rect's diagonal so the text is never clipped. Shared with the line
+    end-label outlines.
+    """
+    d = (rect.width() ** 2 + rect.height() ** 2) ** 0.5
+    c = rect.center()
+    return QRectF(c.x() - d / 2.0, c.y() - d / 2.0, d, d)
 
 
 _MIN_TEXT_WIDTH = 24.0
@@ -84,6 +101,9 @@ class TextAnnotationItem(AnnotationItem):
         self._bold: bool = False
         self._italic: bool = False
         self._align: TextAlign = TextAlign.LEFT
+        # Optional outline around the text (none / box / ellipse) --
+        # e.g. circling a revision mark on a drawing.
+        self._border: TextBorder = TextBorder.NONE
         # 0 means "auto" -- inner uses its natural width. Set by manual
         # resize to force word-wrap.
         self._text_width: float = 0.0
@@ -206,6 +226,30 @@ class TextAnnotationItem(AnnotationItem):
     # ------------------------------------------------------------------
     # geometry
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # optional outline (box / ellipse)
+    # ------------------------------------------------------------------
+    def border(self) -> TextBorder:
+        return self._border
+
+    def set_border(self, border: TextBorder) -> None:
+        if border is self._border:
+            return
+        self.prepareGeometryChange()
+        self._border = border
+        self.update()
+
+    def _border_draw_rect(self) -> QRectF | None:
+        """Rect the outline is drawn in (None when no outline)."""
+        if self._border is TextBorder.NONE:
+            return None
+        padded = self.content_rect().adjusted(
+            -_BORDER_PAD, -_BORDER_PAD, _BORDER_PAD, _BORDER_PAD
+        )
+        if self._border is TextBorder.ELLIPSE:
+            return circumscribed_circle_rect(padded)
+        return padded
+
     def boundingRect(self) -> QRectF:
         inner = self._inner.boundingRect()
         if inner.isEmpty():
@@ -215,6 +259,10 @@ class TextAnnotationItem(AnnotationItem):
             )
         else:
             base = inner
+        outline = self._border_draw_rect()
+        if outline is not None:
+            pad = self._stroke / 2.0 + 1.0
+            base = base.united(outline.adjusted(-pad, -pad, pad, pad))
         m = self.handles_extent()
         if m > 0:
             return base.adjusted(-m, -m, m, m)
@@ -351,8 +399,17 @@ class TextAnnotationItem(AnnotationItem):
         self.update()
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
-        # The inner QGraphicsTextItem paints itself. We only draw the
-        # selection marker on top.
+        # The inner QGraphicsTextItem paints itself; we add the optional
+        # outline and the selection marker.
+        outline = self._border_draw_rect()
+        if outline is not None:
+            pen = QPen(self._color, max(self._stroke, 1.0))
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            if self._border is TextBorder.ELLIPSE:
+                painter.drawEllipse(outline)
+            else:
+                painter.drawRect(outline)
         self._draw_selection_marker(painter, self.boundingRect())
 
     def mouseDoubleClickEvent(
@@ -373,6 +430,7 @@ class TextAnnotationItem(AnnotationItem):
         c.set_bold(self._bold)
         c.set_italic(self._italic)
         c.set_align(self._align)
+        c.set_border(self._border)
         if self._text_width > 0:
             c._text_width = self._text_width
             c._inner.setTextWidth(self._text_width)

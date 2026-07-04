@@ -343,6 +343,10 @@ class PdfView(QGraphicsView):
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        # Whatever branch handles this release, the measurement HUD must
+        # not survive it (the zoom-window/panning early returns used to
+        # skip the hide at the bottom, leaving a stuck HUD).
+        self._measurement_hud.hide()
         if (
             self._zoom_window_armed
             and self._rb_origin is not None
@@ -383,4 +387,3 @@ class PdfView(QGraphicsView):
             return
 
         super().mouseReleaseEvent(event)
-        self._measurement_hud.hide()

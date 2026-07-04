@@ -108,12 +108,24 @@ def end_icon(
                      anchor.y() + head * math.sin(math.pi - a))
         h2 = QPointF(anchor.x() + head * math.cos(math.pi + a),
                      anchor.y() + head * math.sin(math.pi + a))
-        poly = QPolygonF([anchor, h1, h2])
         if style is EndStyle.CLOSED_ARROW:
+            p.setBrush(c)
+            p.drawPolygon(QPolygonF([anchor, h1, h2]))
+        else:
+            # Open chevron, matching ArrowItem's rendering (no back bar).
+            p.setBrush(Qt.NoBrush)
+            p.drawPolyline(QPolygonF([h1, anchor, h2]))
+    elif style in (EndStyle.TRIANGLE, EndStyle.TRIANGLE_FILLED):
+        # Datum triangle: flat base at the endpoint, apex toward the line.
+        half_base = head / math.sqrt(3.0)
+        apex = QPointF(anchor.x() - head, anchor.y())
+        b1 = QPointF(anchor.x(), anchor.y() - half_base)
+        b2 = QPointF(anchor.x(), anchor.y() + half_base)
+        if style is EndStyle.TRIANGLE_FILLED:
             p.setBrush(c)
         else:
             p.setBrush(Qt.NoBrush)
-        p.drawPolygon(poly)
+        p.drawPolygon(QPolygonF([b1, apex, b2]))
     elif style is EndStyle.BUTT:
         half = head * 0.55
         p.drawLine(
@@ -329,24 +341,37 @@ def action_icon(
         p.drawLine(QPointF(s * 0.28, s * 0.28), QPointF(s * 0.72, s * 0.72))
         p.drawLine(QPointF(s * 0.72, s * 0.28), QPointF(s * 0.28, s * 0.72))
     elif name == "format-painter":
-        # Paintbrush: diagonal handle + ferrule + a small bristle tuft.
-        p.drawLine(QPointF(s * 0.30, s * 0.82), QPointF(s * 0.62, s * 0.50))
+        # Big diagonal paintbrush laying down a stroke: readable at
+        # toolbar size, unlike the earlier tiny-tuft design.
+        pen.setWidthF(size * 0.10)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        # Handle, upper right.
+        p.drawLine(QPointF(s * 0.82, s * 0.14), QPointF(s * 0.58, s * 0.38))
+        p.setPen(QPen(c, 1))
         p.setBrush(c)
+        # Ferrule: short filled band across the shaft.
         ferrule = QPainterPath()
-        ferrule.moveTo(s * 0.55, s * 0.57)
-        ferrule.lineTo(s * 0.72, s * 0.40)
-        ferrule.lineTo(s * 0.82, s * 0.50)
-        ferrule.lineTo(s * 0.65, s * 0.67)
+        ferrule.moveTo(s * 0.50, s * 0.34)
+        ferrule.lineTo(s * 0.62, s * 0.46)
+        ferrule.lineTo(s * 0.54, s * 0.54)
+        ferrule.lineTo(s * 0.42, s * 0.42)
         ferrule.closeSubpath()
         p.drawPath(ferrule)
-        tuft = QPainterPath()
-        tuft.moveTo(s * 0.70, s * 0.32)
-        tuft.lineTo(s * 0.92, s * 0.18)
-        tuft.lineTo(s * 0.82, s * 0.44)
-        tuft.closeSubpath()
-        p.drawPath(tuft)
+        # Bristles: wide wedge tapering to the painting tip.
+        bristles = QPainterPath()
+        bristles.moveTo(s * 0.42, s * 0.44)
+        bristles.lineTo(s * 0.54, s * 0.56)
+        bristles.lineTo(s * 0.34, s * 0.72)
+        bristles.lineTo(s * 0.24, s * 0.62)
+        bristles.closeSubpath()
+        p.drawPath(bristles)
+        # The stroke being painted, under the tip.
+        stroke_pen = QPen(c, size * 0.11)
+        stroke_pen.setCapStyle(Qt.RoundCap)
+        p.setPen(stroke_pen)
         p.setBrush(Qt.NoBrush)
-        p.drawEllipse(QPointF(s * 0.26, s * 0.86), s * 0.06, s * 0.06)
+        p.drawLine(QPointF(s * 0.14, s * 0.88), QPointF(s * 0.62, s * 0.88))
     p.end()
     return QIcon(pm)
 

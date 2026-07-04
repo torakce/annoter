@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QSettings, QTimer
+from PySide6.QtCore import QPointF, QSize, Qt, QSettings, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -20,8 +20,6 @@ from PySide6.QtGui import (
     QUndoStack,
 )
 from PySide6.QtWidgets import (
-    QColorDialog,
-    QComboBox,
     QFileDialog,
     QInputDialog,
     QLabel,
@@ -43,10 +41,14 @@ from annoter.config import (
     HIRES_OVERLAY_MARGIN,
     MAX_RECENT_FILES,
     PIXMAP_CACHE_PAGES,
-    STROKE_WIDTHS,
     UNDO_STACK_LIMIT,
 )
 from annoter.controllers.align import AlignMode, compute_align_moves
+from annoter.controllers.convert import (
+    convert_poly_closed,
+    convert_shape_outline,
+    line_to_arrow,
+)
 from annoter.controllers.geometry import item_scene_rect
 from annoter.controllers.commands import (
     AddAnnotationCommand,
@@ -56,11 +58,13 @@ from annoter.controllers.commands import (
     ChangeStrokeCommand,
     DeleteAnnotationsCommand,
     MoveAnnotationsCommand,
+    ReplaceAnnotationCommand,
     ResizeCommand,
 )
 from annoter.controllers.tools import Tool, ToolController
 from annoter.model.document import PdfDocument
 from annoter.model.gdt import GdtState
+from annoter.model.styles import END_STYLE_LABELS, EndStyle, HandleRole
 from annoter.services.pdf_export import (
     read_annotations,
     write_annotations,
@@ -69,11 +73,12 @@ from annoter.services.pdf_render import PageRenderer
 from annoter.services.recent_files import RecentFiles
 from annoter.services.theme import Theme, apply as apply_theme
 from annoter.views.annotation_list import AnnotationListDock
+from annoter.views.color_picker import popup_color_picker
 from annoter.views.gdt_editor import GdtInlineEditor
-from annoter.views.icons import action_icon, color_swatch_icon
+from annoter.views.icons import action_icon, color_swatch_icon, end_icon
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.gdt import GdtAnnotationItem
-from annoter.views.items.lines import LineItem
+from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.note import StickyNoteItem
 from annoter.views.note_editor import NoteEditor
 from annoter.views.page_thumbnails import PageThumbnailDock
@@ -81,6 +86,7 @@ from annoter.views.pdf_scene import PdfScene
 from annoter.views.pdf_view import PdfView
 from annoter.views.properties_dock import PropertiesDock
 from annoter.views.selection_toolbar import SelectionToolbar
+from annoter.views.stroke_spin import STROKE_LADDER, StrokeSpinBox
 from annoter.views.tool_palette import ToolPalette
 from annoter.views.welcome_screen import WelcomeScreen
 
@@ -174,18 +180,26 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._central)
         self._view.setFocus()
 
-        # Floating quick-action bar shown near the current selection.
-        self._selection_toolbar = SelectionToolbar(self._view.viewport())
-        self._selection_toolbar.colorClicked.connect(
-            self._change_selection_color
+        # Floating contextual action bar shown near the current selection.
+        st = SelectionToolbar(self._view.viewport())
+        self._selection_toolbar = st
+        st.editClicked.connect(self._edit_selected)
+        st.outlinePicked.connect(self._set_selected_outline)
+        st.fillToggled.connect(self._set_selected_fill)
+        st.endStylePicked.connect(self._on_pill_end_style)
+        st.addBendClicked.connect(self._add_bend_to_selected)
+        st.closedToggled.connect(self._set_selected_closed)
+        st.groupClicked.connect(self._group_selected)
+        st.ungroupClicked.connect(self._ungroup_selected)
+        st.duplicateClicked.connect(self._duplicate_selected)
+        st.deleteClicked.connect(self._delete_selected)
+        # Stability: hide the pill during interactive drags/resizes and
+        # re-show it (repositioned) on release; refresh it after every
+        # undo-stack change so its buttons track the item's real state.
+        self._scene.interactiveDragChanged.connect(self._on_drag_state)
+        self._undo_group.indexChanged.connect(
+            lambda _i: self._update_selection_toolbar()
         )
-        self._selection_toolbar.strokeClicked.connect(
-            self._change_selection_stroke
-        )
-        self._selection_toolbar.duplicateClicked.connect(
-            self._duplicate_selected
-        )
-        self._selection_toolbar.deleteClicked.connect(self._delete_selected)
 
         # In-app clipboard: detached clones produced by Copy/Cut. Paste
         # re-clones from these so multiple pastes work and the clipboard
@@ -565,16 +579,14 @@ class MainWindow(QMainWindow):
         )
         tb.addAction(self._toolbar_color_act)
 
-        self._toolbar_stroke_combo = QComboBox()
-        self._toolbar_stroke_combo.setToolTip("Stroke width")
-        for w in STROKE_WIDTHS:
-            self._toolbar_stroke_combo.addItem(f"{w:g} px", float(w))
-        self._toolbar_stroke_combo.activated.connect(
-            lambda idx: self._tool_controller.set_stroke(
-                float(self._toolbar_stroke_combo.itemData(idx))
-            )
+        self._toolbar_stroke_spin = StrokeSpinBox()
+        self._toolbar_stroke_spin.setToolTip(
+            "Stroke width (type a value, arrows step through presets)"
         )
-        tb.addWidget(self._toolbar_stroke_combo)
+        self._toolbar_stroke_spin.valueChanged.connect(
+            lambda v: self._on_quick_stroke_picked(float(v))
+        )
+        tb.addWidget(self._toolbar_stroke_spin)
 
         self._tool_controller.colorChanged.connect(
             self._sync_toolbar_color
@@ -620,23 +632,58 @@ class MainWindow(QMainWindow):
     # toolbar quick style controls
     # ------------------------------------------------------------------
     def _pick_toolbar_color(self) -> None:
-        color = QColorDialog.getColor(
-            self._tool_controller.color(), self, "Pick a drawing color"
+        # Anchor the popup under the toolbar button, like Office.
+        widget = self._toolbar.widgetForAction(self._toolbar_color_act)
+        pos = (
+            widget.mapToGlobal(widget.rect().bottomLeft())
+            if widget is not None
+            else None
         )
-        if color.isValid():
-            self._tool_controller.set_color(color)
+        popup_color_picker(
+            self,
+            self._tool_controller.color(),
+            self._on_quick_color_picked,
+            global_pos=pos,
+        )
+
+    def _on_quick_color_picked(self, color: QColor) -> None:
+        """Toolbar color choice: sets the drawing color for future
+        annotations AND recolors the current selection (undoably), like
+        Office's color controls."""
+        self._tool_controller.set_color(color)
+        items = self._selected_annotations()
+        if not items:
+            return
+        stack = self._undo_group.activeStack()
+        cmd = ChangeColorCommand(items, QColor(color))
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+
+    def _on_quick_stroke_picked(self, width: float) -> None:
+        """Toolbar stroke choice: same dual behavior as the color."""
+        self._tool_controller.set_stroke(width)
+        items = self._selected_annotations()
+        if not items:
+            return
+        stack = self._undo_group.activeStack()
+        cmd = ChangeStrokeCommand(items, width)
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
 
     def _sync_toolbar_color(self, color: QColor) -> None:
         self._toolbar_color_act.setIcon(color_swatch_icon(color))
 
     def _sync_toolbar_stroke(self, width: float) -> None:
-        combo = self._toolbar_stroke_combo
-        for i in range(combo.count()):
-            if abs(float(combo.itemData(i)) - width) < 1e-6:
-                combo.setCurrentIndex(i)
-                return
-        # A width outside the presets (e.g. set via the Properties dock)
-        # keeps the previous index; the combo only offers the presets.
+        spin = self._toolbar_stroke_spin
+        # Programmatic sync must not loop back into the quick-stroke
+        # handler (which would restyle the selection as a side effect).
+        spin.blockSignals(True)
+        spin.setValue(max(spin.minimum(), int(round(width))))
+        spin.blockSignals(False)
 
     def _build_status_bar(self) -> None:
         self._lbl_path = QLabel("")
@@ -1202,11 +1249,13 @@ class MainWindow(QMainWindow):
         items = self._selected_annotations()
         if not items:
             return
-        initial = items[0].color()
-        color = QColorDialog.getColor(
-            initial, self, "Change annotation color"
+        popup_color_picker(
+            self, items[0].color(), self._apply_selection_color
         )
-        if not color.isValid():
+
+    def _apply_selection_color(self, color: QColor) -> None:
+        items = self._selected_annotations()
+        if not items or not color.isValid():
             return
         stack = self._undo_group.activeStack()
         cmd = ChangeColorCommand(items, QColor(color))
@@ -1219,17 +1268,18 @@ class MainWindow(QMainWindow):
         items = self._selected_annotations()
         if not items:
             return
-        choices = [f"{w:g} px" for w in STROKE_WIDTHS]
-        current = f"{items[0].stroke():g} px"
-        idx = choices.index(current) if current in choices else 1
-        choice, ok = QInputDialog.getItem(
-            self, "Change Stroke", "Width:", choices, idx, False
+        value, ok = QInputDialog.getInt(
+            self,
+            "Change Stroke",
+            "Width (px, 0 = none):",
+            int(round(items[0].stroke())),
+            0,
+            STROKE_LADDER[-1],
         )
         if not ok:
             return
-        width = STROKE_WIDTHS[choices.index(choice)]
         stack = self._undo_group.activeStack()
-        cmd = ChangeStrokeCommand(items, width)
+        cmd = ChangeStrokeCommand(items, float(value))
         if stack is not None:
             stack.push(cmd)
         else:
@@ -1304,9 +1354,113 @@ class MainWindow(QMainWindow):
         if not items:
             self._selection_toolbar.hide()
             return
-        self._selection_toolbar.set_swatch_color(items[0].color())
-        self._selection_toolbar.set_stroke_label(items[0].stroke())
+        align_actions = [
+            self.act_align_left,
+            self.act_align_center_h,
+            self.act_align_right,
+            self.act_align_top,
+            self.act_align_middle_v,
+            self.act_align_bottom,
+        ]
+        if len(items) >= 3:
+            align_actions += [self.act_distribute_h, self.act_distribute_v]
+        self._selection_toolbar.set_context(
+            items,
+            align_actions=align_actions,
+            has_group=self._scene.has_group_in_selection(),
+            icon_color=self._gdt_icon_color(),
+        )
         self._position_selection_toolbar(items)
+
+    def _on_drag_state(self, active: bool) -> None:
+        if active:
+            self._selection_toolbar.hide()
+        else:
+            self._update_selection_toolbar()
+
+    # ------------------------------------------------------------------
+    # selection pill handlers
+    # ------------------------------------------------------------------
+    def _single_selected(self) -> AnnotationItem | None:
+        items = self._selected_annotations()
+        return items[0] if len(items) == 1 else None
+
+    def _edit_selected(self) -> None:
+        item = self._single_selected()
+        if item is None:
+            return
+        if isinstance(item, GdtAnnotationItem):
+            self._open_gdt_editor(item)
+        elif isinstance(item, StickyNoteItem):
+            self._open_note_editor(item)
+        else:
+            self._begin_text_edit_selected()
+
+    def _replace_selected_item(
+        self, old: AnnotationItem, new: AnnotationItem, label: str
+    ) -> None:
+        stack = self._undo_group.activeStack()
+        cmd = ReplaceAnnotationCommand(
+            self._scene, old.parentItem(), old, new, label=label
+        )
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+
+    def _set_selected_outline(self, cloudy: bool) -> None:
+        item = self._single_selected()
+        if item is None:
+            return
+        converted = convert_shape_outline(item, cloudy)
+        if converted is not None:
+            self._replace_selected_item(item, converted, "Change outline")
+
+    def _set_selected_closed(self, closed: bool) -> None:
+        item = self._single_selected()
+        if item is None:
+            return
+        converted = convert_poly_closed(item, closed)
+        if converted is not None:
+            self._replace_selected_item(item, converted, "Change path kind")
+
+    def _set_selected_fill(self, enabled: bool) -> None:
+        changes = [
+            (it, "fill_enabled", it.fill_enabled(), bool(enabled))
+            for it in self._selected_annotations()
+            if hasattr(it, "set_fill_enabled")
+            and it.fill_enabled() != bool(enabled)
+        ]
+        if not changes:
+            return
+        stack = self._undo_group.activeStack()
+        cmd = ChangePropsCommand(changes, label="Toggle fill")
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+
+    def _on_pill_end_style(self, role, style) -> None:  # noqa: ANN001
+        item = self._single_selected()
+        if isinstance(item, LineItem):
+            self._set_endpoint_style(item, role, style)
+
+    def _add_bend_to_selected(self) -> None:
+        """Insert a bend at the midpoint of the item's longest segment."""
+        item = self._single_selected()
+        if not isinstance(item, LineItem):
+            return
+        pts = item.path_points()
+        best = max(
+            range(len(pts) - 1),
+            key=lambda i: (pts[i + 1].x() - pts[i].x()) ** 2
+            + (pts[i + 1].y() - pts[i].y()) ** 2,
+        )
+        mid = QPointF(
+            (pts[best].x() + pts[best + 1].x()) / 2.0,
+            (pts[best].y() + pts[best + 1].y()) / 2.0,
+        )
+        self._add_bend_at(item, mid)
 
     def _position_selection_toolbar(
         self, items: list[AnnotationItem] | None = None
@@ -1480,13 +1634,28 @@ class MainWindow(QMainWindow):
         )
 
         menu = QMenu(self)
-        # Bend-point actions on lines/arrows (Discussion #1, item 5):
-        # right-click on a bend offers removal, anywhere else on the
-        # item offers inserting one at the click position.
+        # Line/arrow point actions (Discussion #1, item 5 + follow-up):
+        # right-click on an ENDPOINT offers its extremity shape, on a
+        # BEND offers removal, anywhere else on the item offers
+        # inserting a bend at the click position.
         if isinstance(clicked, LineItem):
             local = clicked.mapFromScene(scene_pos)
+            endpoint = self._endpoint_at(clicked, local)
             bend_idx = clicked.bend_at(local)
-            if bend_idx is not None:
+            if endpoint is not None:
+                sub = menu.addMenu("Extremity shape")
+                current = self._endpoint_style(clicked, endpoint)
+                icon_color = self._gdt_icon_color()
+                for style, label in END_STYLE_LABELS:
+                    act = sub.addAction(end_icon(style, color=icon_color), label)
+                    act.setCheckable(True)
+                    act.setChecked(style is current)
+                    act.triggered.connect(
+                        lambda _c=False, it=clicked, ep=endpoint, st=style: (
+                            self._set_endpoint_style(it, ep, st)
+                        )
+                    )
+            elif bend_idx is not None:
                 act = menu.addAction("Remove bend point")
                 act.triggered.connect(
                     lambda _c=False, it=clicked, i=bend_idx: (
@@ -1576,6 +1745,62 @@ class MainWindow(QMainWindow):
         self._push_geom_change(
             item, old, item.geom_snapshot(), "Remove bend point"
         )
+
+    # ------------------------------------------------------------------
+    # line/arrow endpoint styles (context menu)
+    # ------------------------------------------------------------------
+    _ENDPOINT_HIT_RADIUS = 9.0
+
+    def _endpoint_at(self, item: LineItem, local: QPointF):  # noqa: ANN201
+        """HandleRole.P1/P2 when `local` lands on an endpoint, else None."""
+        p1, p2 = item.line_points()
+        r2 = self._ENDPOINT_HIT_RADIUS**2
+        for role, pt in ((HandleRole.P1, p1), (HandleRole.P2, p2)):
+            dx, dy = local.x() - pt.x(), local.y() - pt.y()
+            if dx * dx + dy * dy <= r2:
+                return role
+        return None
+
+    @staticmethod
+    def _endpoint_style(item: LineItem, role) -> EndStyle:  # noqa: ANN001
+        if isinstance(item, ArrowItem):
+            return (
+                item.start_end() if role is HandleRole.P1 else item.end_end()
+            )
+        return EndStyle.NONE  # plain line: both ends bare
+
+    def _set_endpoint_style(
+        self, item: LineItem, role, style: EndStyle
+    ) -> None:  # noqa: ANN001
+        prop = "start_end" if role is HandleRole.P1 else "end_end"
+        stack = self._undo_group.activeStack()
+        if isinstance(item, ArrowItem):
+            old = getattr(item, prop)()
+            if old is style:
+                return
+            cmd = ChangePropsCommand(
+                [(item, prop, old, style)], label="Change extremity shape"
+            )
+        else:
+            # Plain LineItem has no end-style storage: promote it to an
+            # ArrowItem (keeps bends/labels) with only the chosen end.
+            if style is EndStyle.NONE:
+                return
+            arrow = line_to_arrow(item)
+            arrow.set_start_end(EndStyle.NONE)
+            arrow.set_end_end(EndStyle.NONE)
+            getattr(arrow, f"set_{prop}")(style)
+            cmd = ReplaceAnnotationCommand(
+                self._scene,
+                item.parentItem(),
+                item,
+                arrow,
+                label="Change extremity shape",
+            )
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
 
     # ------------------------------------------------------------------
     # GD&T (M3) -- in-place editing
@@ -1862,6 +2087,7 @@ class MainWindow(QMainWindow):
         # repaint when the theme changes (light glyph on dark, vice versa).
         self._tool_palette.set_icon_color(self._gdt_icon_color())
         self._apply_icon_theme()
+        self._properties_dock.set_icon_color(self._gdt_icon_color())
 
     def _gdt_icon_color(self) -> QColor:
         return (

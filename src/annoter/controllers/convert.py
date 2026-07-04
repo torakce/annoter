@@ -66,6 +66,7 @@ def line_to_arrow(item: LineItem) -> ArrowItem:
     p1, p2 = item.line_points()
     a = ArrowItem(p1, p2)
     item._copy_base_style_into(a)
+    item._copy_line_extras_into(a)  # bends + end labels
     return a
 
 
@@ -73,23 +74,8 @@ def arrow_to_line(item: ArrowItem) -> LineItem:
     p1, p2 = item.line_points()
     line = LineItem(p1, p2)
     item._copy_base_style_into(line)
+    item._copy_line_extras_into(line)
     return line
-
-
-def line_to_callout(item: LineItem, text: str) -> CalloutItem:
-    """Arrow/line -> callout: the head end (p2) becomes the leader tip,
-    the tail end (p1) anchors the text box. Both endpoints are converted
-    through page coordinates so a previously moved item (non-zero pos)
-    lands exactly where it was drawn."""
-    p1, p2 = item.line_points()
-    sp1 = QPointF(p1.x() + item.pos().x(), p1.y() + item.pos().y())
-    sp2 = QPointF(p2.x() + item.pos().x(), p2.y() + item.pos().y())
-    c = CalloutItem(sp1, text)
-    c.set_tip(QPointF(sp2.x() - sp1.x(), sp2.y() - sp1.y()))
-    c.set_color(item.color())
-    c.set_stroke(item.stroke())
-    c.set_dash_style(item.dash_style())
-    return c
 
 
 def callout_to_arrow(item: CalloutItem) -> ArrowItem:

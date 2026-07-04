@@ -9,11 +9,16 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPen, QPolygonF
 from PySide6.QtWidgets import QGraphicsItem
 
-from annoter.model.styles import EndStyle, HandleRole
+from annoter.model.styles import EndStyle, HandleRole, TextBorder
 from annoter.views.items.base import AnnotationItem
+from annoter.views.items.text import circumscribed_circle_rect
+
+_LABEL_FONT_FAMILY = "Helvetica"
+_LABEL_POINT_SIZE = 11
+_LABEL_PADDING = 4.0
 
 
 class LineItem(AnnotationItem):
@@ -32,6 +37,16 @@ class LineItem(AnnotationItem):
         # order (Discussion #1, item 5). Each bend is a draggable handle;
         # right-click adds/removes them.
         self._bends: list[QPointF] = []
+        # Optional text labels floating just past each endpoint. Carried
+        # by the line itself (not a converted callout) so labels and
+        # bends coexist and BOTH ends can be labeled.
+        self._start_label: str = ""
+        self._end_label: str = ""
+        # Optional outline around each label, independently (box for a
+        # GD&T datum letter at one end, nothing or a circle at the
+        # other).
+        self._start_label_border: TextBorder = TextBorder.NONE
+        self._end_label_border: TextBorder = TextBorder.NONE
 
     def line_points(self) -> tuple[QPointF, QPointF]:
         return QPointF(self._p1), QPointF(self._p2)
@@ -41,6 +56,155 @@ class LineItem(AnnotationItem):
         self._p1 = QPointF(p1)
         self._p2 = QPointF(p2)
         self.update()
+
+    # ------------------------------------------------------------------
+    # end labels
+    # ------------------------------------------------------------------
+    def start_label(self) -> str:
+        return self._start_label
+
+    def set_start_label(self, text: str) -> None:
+        s = str(text)
+        if s == self._start_label:
+            return
+        self.prepareGeometryChange()
+        self._start_label = s
+        self.update()
+
+    def end_label(self) -> str:
+        return self._end_label
+
+    def set_end_label(self, text: str) -> None:
+        s = str(text)
+        if s == self._end_label:
+            return
+        self.prepareGeometryChange()
+        self._end_label = s
+        self.update()
+
+    def start_label_border(self) -> TextBorder:
+        return self._start_label_border
+
+    def set_start_label_border(self, border: TextBorder) -> None:
+        if border is self._start_label_border:
+            return
+        self.prepareGeometryChange()
+        self._start_label_border = border
+        self.update()
+
+    def end_label_border(self) -> TextBorder:
+        return self._end_label_border
+
+    def set_end_label_border(self, border: TextBorder) -> None:
+        if border is self._end_label_border:
+            return
+        self.prepareGeometryChange()
+        self._end_label_border = border
+        self.update()
+
+    def label_border(self) -> TextBorder:
+        """Convenience view (start end); kept for callers that treat
+        both labels alike."""
+        return self._start_label_border
+
+    def set_label_border(self, border: TextBorder) -> None:
+        """Convenience: apply the same outline to both labels."""
+        self.set_start_label_border(border)
+        self.set_end_label_border(border)
+
+    @staticmethod
+    def _label_outline_rect(
+        rect: QRectF, border: TextBorder
+    ) -> QRectF | None:
+        """Rect the label's outline is drawn in (None when borderless)."""
+        if border is TextBorder.NONE:
+            return None
+        if border is TextBorder.ELLIPSE:
+            return circumscribed_circle_rect(rect)
+        return QRectF(rect)
+
+    def _label_font(self) -> QFont:
+        font = QFont(_LABEL_FONT_FAMILY, _LABEL_POINT_SIZE)
+        font.setStyleHint(QFont.Helvetica)
+        return font
+
+    def _label_gap(self, start: bool) -> float:
+        """Distance from that endpoint to the near edge of its label.
+
+        Per-end so a datum frame hugs a bare tail while the other end
+        still clears its arrowhead; overridden by ArrowItem. A BORDERED
+        label touches the line (gap 0 -- the user wants the datum frame
+        glued to the leader); only bare text keeps a small breathing
+        gap."""
+        border = (
+            self._start_label_border if start else self._end_label_border
+        )
+        if border is not TextBorder.NONE:
+            return 0.0
+        return self._stroke / 2.0 + 3.0
+
+    def _label_rects(self) -> list[tuple[QRectF, str, TextBorder]]:
+        """(rect, text, border) for each non-empty end label, positioned
+        just past its endpoint along the OUTWARD direction of the end
+        segment -- so a bent line pushes the label away from its last
+        segment, not along the p1->p2 chord. The label (or its outline,
+        when bordered) sits flush against the endpoint: the reach is the
+        exact ray/rect boundary distance, not a worst-case diagonal."""
+        out: list[tuple[QRectF, str, TextBorder]] = []
+        pts = self.path_points()
+        fm = QFontMetricsF(self._label_font())
+        for text, endpoint, inward, is_start, border in (
+            (self._start_label, pts[0], pts[1], True,
+             self._start_label_border),
+            (self._end_label, pts[-1], pts[-2], False,
+             self._end_label_border),
+        ):
+            if not text:
+                continue
+            dx = endpoint.x() - inward.x()
+            dy = endpoint.y() - inward.y()
+            length = math.hypot(dx, dy)
+            ux, uy = (dx / length, dy / length) if length > 1e-9 else (1.0, 0.0)
+            w = fm.horizontalAdvance(text) + 2 * _LABEL_PADDING
+            h = fm.height() + 2 * _LABEL_PADDING
+            # Contact is measured against the drawn outline. A circle's
+            # boundary is at its radius whatever the direction; for a
+            # rect it is the exact ray/edge intersection distance.
+            if border is TextBorder.ELLIPSE:
+                t = math.hypot(w, h) / 2.0  # circumscribed circle radius
+            else:
+                tx = (w / 2.0) / abs(ux) if abs(ux) > 1e-9 else float("inf")
+                ty = (h / 2.0) / abs(uy) if abs(uy) > 1e-9 else float("inf")
+                t = min(tx, ty)
+            reach = self._label_gap(is_start) + t
+            cx = endpoint.x() + ux * reach
+            cy = endpoint.y() + uy * reach
+            out.append(
+                (QRectF(cx - w / 2.0, cy - h / 2.0, w, h), text, border)
+            )
+        return out
+
+    def _draw_labels(self, painter) -> None:  # noqa: ANN001
+        rects = self._label_rects()
+        if not rects:
+            return
+        painter.save()
+        painter.setPen(QPen(self._color))
+        painter.setFont(self._label_font())
+        for rect, text, _border in rects:
+            painter.drawText(rect, Qt.AlignCenter, text)
+        border_pen = QPen(self._color, max(1.0, min(self._stroke, 2.0)))
+        painter.setBrush(Qt.NoBrush)
+        for rect, _text, border in rects:
+            outline = self._label_outline_rect(rect, border)
+            if outline is None:
+                continue
+            painter.setPen(border_pen)
+            if border is TextBorder.ELLIPSE:
+                painter.drawEllipse(outline)
+            else:
+                painter.drawRect(outline)
+        painter.restore()
 
     # ------------------------------------------------------------------
     # bend points
@@ -108,12 +272,17 @@ class LineItem(AnnotationItem):
         pts = self.path_points()
         xs = [p.x() for p in pts]
         ys = [p.y() for p in pts]
-        return QRectF(
+        rect = QRectF(
             min(xs) - m,
             min(ys) - m,
             max(xs) - min(xs) + 2 * m,
             max(ys) - min(ys) + 2 * m,
         )
+        for label_rect, _text, border in self._label_rects():
+            outline = self._label_outline_rect(label_rect, border)
+            grown = outline if outline is not None else label_rect
+            rect = rect.united(grown.adjusted(-2.0, -2.0, 2.0, 2.0))
+        return rect
 
     def _pen(self) -> QPen:
         pen = QPen(self._color, self._stroke)
@@ -132,6 +301,7 @@ class LineItem(AnnotationItem):
         painter.setPen(self._pen())
         painter.setBrush(Qt.NoBrush)
         self._draw_shaft(painter)
+        self._draw_labels(painter)
         self._draw_selection_marker(painter, self.boundingRect())
 
     # ------------------------------------------------------------------
@@ -172,10 +342,17 @@ class LineItem(AnnotationItem):
             if isinstance(bends, list):
                 self.set_bends(bends)
 
+    def _copy_line_extras_into(self, dst: "LineItem") -> None:
+        dst.set_bends(self.bends())
+        dst.set_start_label(self._start_label)
+        dst.set_end_label(self._end_label)
+        dst.set_start_label_border(self._start_label_border)
+        dst.set_end_label_border(self._end_label_border)
+
     def clone(self) -> "LineItem":
         c = LineItem(QPointF(self._p1), QPointF(self._p2))
         self._copy_base_style_into(c)
-        c.set_bends(self.bends())
+        self._copy_line_extras_into(c)
         return c
 
 
@@ -254,12 +431,42 @@ class ArrowItem(LineItem):
                 anchor.x() + size * math.cos(a2),
                 anchor.y() + size * math.sin(a2),
             )
-            poly = QPolygonF([anchor, h1, h2])
             if style is EndStyle.CLOSED_ARROW:
                 painter.setBrush(self._color)
+                painter.drawPolygon(QPolygonF([anchor, h1, h2]))
             else:
+                # Open chevron: two barbs only -- drawPolygon would close
+                # the triangle and add a bar across the back of the head.
                 painter.setBrush(Qt.NoBrush)
-            painter.drawPolygon(poly)
+                painter.drawPolyline(QPolygonF([h1, anchor, h2]))
+            return
+
+        if style in (EndStyle.TRIANGLE, EndStyle.TRIANGLE_FILLED):
+            # GD&T datum-feature triangle (ISO 5459): flat base sitting
+            # ON the endpoint, perpendicular to the shaft, apex pointing
+            # back along the line so the leader meets the apex.
+            apex = QPointF(
+                anchor.x() + size * math.cos(ang),
+                anchor.y() + size * math.sin(ang),
+            )
+            half_base = size / math.sqrt(3.0)  # equilateral proportions
+            perp = ang + math.pi / 2
+            b1 = QPointF(
+                anchor.x() + half_base * math.cos(perp),
+                anchor.y() + half_base * math.sin(perp),
+            )
+            b2 = QPointF(
+                anchor.x() - half_base * math.cos(perp),
+                anchor.y() - half_base * math.sin(perp),
+            )
+            if style is EndStyle.TRIANGLE_FILLED:
+                painter.setBrush(self._color)
+            else:
+                # Opaque white (not transparent) so the shaft does not
+                # show through the "hollow" triangle -- same convention
+                # as the GD&T frame cells.
+                painter.setBrush(QColor("#FFFFFF"))
+            painter.drawPolygon(QPolygonF([b1, apex, b2]))
             return
 
         if style is EndStyle.BUTT:
@@ -347,12 +554,23 @@ class ArrowItem(LineItem):
         pts = self.path_points()
         self._draw_end(painter, pts[0], pts[1], self._start_end)
         self._draw_end(painter, pts[-1], pts[-2], self._end_end)
+        self._draw_labels(painter)
         self._draw_selection_marker(painter, self.boundingRect())
+
+    def _label_gap(self, start: bool) -> float:
+        # Clear the arrowhead when THAT end has one; a bare end keeps
+        # the label flush against the line like a plain LineItem (the
+        # datum-frame case: triangle at one end, boxed letter hugging
+        # the other).
+        style = self._start_end if start else self._end_end
+        if style is EndStyle.NONE:
+            return super()._label_gap(start)
+        return max(self._head_size(), self._stroke / 2.0 + 3.0) + 2.0
 
     def clone(self) -> "ArrowItem":
         c = ArrowItem(QPointF(self._p1), QPointF(self._p2))
         self._copy_base_style_into(c)
-        c.set_bends(self.bends())
+        self._copy_line_extras_into(c)
         c.set_start_end(self._start_end)
         c.set_end_end(self._end_end)
         return c

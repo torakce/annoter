@@ -46,6 +46,11 @@ class MeasurementHud(QLabel):
         self._place(anchor)
 
     def _place(self, anchor: QPoint) -> None:
+        if not self.text():
+            # Never show an empty HUD: it renders as a small dark
+            # square (bug reported in Discussion #1).
+            self.hide()
+            return
         self.adjustSize()
         self.move(anchor.x() + 16, anchor.y() + 16)
         self.show()

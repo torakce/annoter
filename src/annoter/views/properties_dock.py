@@ -23,7 +23,6 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QUndoStack
 from PySide6.QtWidgets import (
     QCheckBox,
-    QColorDialog,
     QComboBox,
     QDockWidget,
     QDoubleSpinBox,
@@ -47,7 +46,6 @@ from annoter.controllers.convert import (
     callout_to_arrow,
     convert_poly_closed,
     convert_shape_outline,
-    line_to_callout,
 )
 from annoter.controllers.geometry import (
     item_local_rect,
@@ -56,8 +54,16 @@ from annoter.controllers.geometry import (
     pt_to_px,
     px_to_pt,
 )
-from annoter.model.styles import DashStyle, EndStyle, TextAlign
+from annoter.model.styles import (
+    END_STYLE_LABELS,
+    TEXT_BORDER_LABELS,
+    DashStyle,
+    EndStyle,
+    TextAlign,
+)
+from annoter.views.color_picker import popup_color_picker
 from annoter.views.icons import align_icon, dash_icon, end_icon
+from annoter.views.stroke_spin import StrokeSpinBox
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.callout import CalloutItem
 from annoter.views.items.freehand import FreehandItem
@@ -77,16 +83,7 @@ _DASH_LABELS: list[tuple[DashStyle, str]] = [
     (DashStyle.DASH_DOT_DOT, "Dash-dot-dot"),
 ]
 
-_END_LABELS: list[tuple[EndStyle, str]] = [
-    (EndStyle.NONE, "None"),
-    (EndStyle.OPEN_ARROW, "Open arrow"),
-    (EndStyle.CLOSED_ARROW, "Closed arrow"),
-    (EndStyle.BUTT, "Butt (perp. tick)"),
-    (EndStyle.SLASH, "Slash"),
-    (EndStyle.DIAMOND, "Diamond"),
-    (EndStyle.CIRCLE, "Circle"),
-    (EndStyle.SQUARE, "Square"),
-]
+_END_LABELS = END_STYLE_LABELS  # shared with the endpoint context menu
 
 _ALIGN_LABELS: list[tuple[TextAlign, str]] = [
     (TextAlign.LEFT, "Left"),
@@ -112,6 +109,7 @@ class PropertiesDock(QDockWidget):
         self.setObjectName("PropertiesDock")
         self._undo_stack: QUndoStack | None = None
         self._items: list[AnnotationItem] = []
+        self._icon_color: QColor = QColor("#212121")
 
         self._body = QWidget(self)
         self._body_layout = QVBoxLayout(self._body)
@@ -131,6 +129,17 @@ class PropertiesDock(QDockWidget):
 
     def set_items(self, items: list[AnnotationItem]) -> None:
         self._items = list(items)
+        self._rebuild()
+
+    def set_icon_color(self, color: QColor) -> None:
+        """Glyph color for the combo icons (dash/end/align previews).
+
+        The QSS themes do not update QPalette, so MainWindow pushes its
+        theme glyph color here (same contract as ToolPalette) and the
+        form is rebuilt so existing combos repaint -- previously the
+        icons were always near-black and vanished in the dark theme
+        (Discussion #1, item 8)."""
+        self._icon_color = QColor(color)
         self._rebuild()
 
     # ------------------------------------------------------------------
@@ -178,9 +187,9 @@ class PropertiesDock(QDockWidget):
                 self._add_closed_row(form)
             elif issubclass(cls, ArrowItem):
                 self._add_arrow_rows(form)
-                self._add_line_label_row(form)
+                self._add_line_label_rows(form)
             elif issubclass(cls, LineItem):
-                self._add_line_label_row(form)
+                self._add_line_label_rows(form)
             elif issubclass(cls, CalloutItem):
                 self._add_text_rows(form)
                 self._add_callout_to_arrow_row(form)
@@ -210,9 +219,9 @@ class PropertiesDock(QDockWidget):
         )
         form.addRow("Color", color_btn)
 
-        # Stroke width
-        spin = QSpinBox()
-        spin.setRange(0, 20)
+        # Stroke width: typed value + ladder-stepping arrows; 0 = no
+        # border (fill only).
+        spin = StrokeSpinBox(minimum=0)
         spin.setSpecialValueText("None")
         spin.setValue(int(round(first.stroke())))
         self._wire_live_prop(spin, "stroke", transform=float)
@@ -636,26 +645,29 @@ class PropertiesDock(QDockWidget):
         if converted is not None:
             self._push_replace(item, converted)
 
-    def _add_line_label_row(self, form: QFormLayout) -> None:
-        """Lines/arrows: typing a label turns the item into a callout
-        (a callout is just an arrow with text at the tail end)."""
-        if len(self._items) != 1:
-            return
+    def _add_line_label_rows(self, form: QFormLayout) -> None:
+        """Lines/arrows carry an optional text label at EACH end,
+        rendered just past the endpoint. Labels live on the line itself
+        (not a converted callout), so they coexist with bend points."""
         first = self._items[0]
-        edit = QLineEdit()
-        edit.setPlaceholderText("Add text -> callout")
-        edit.editingFinished.connect(
-            lambda e=edit, it=first: self._on_line_label_committed(it, e)
-        )
-        form.addRow("Label", edit)
-
-    def _on_line_label_committed(self, item, edit: QLineEdit) -> None:  # noqa: ANN001
-        text = edit.text().strip()
-        if not text or not isinstance(item, LineItem):
-            return
-        if item.scene() is None:
-            return  # already converted (editingFinished can fire twice)
-        self._push_replace(item, line_to_callout(item, text))
+        for prop, border_prop, title, border_title in (
+            ("start_label", "start_label_border", "Start label",
+             "Start frame"),
+            ("end_label", "end_label_border", "End label", "End frame"),
+        ):
+            edit = QLineEdit()
+            edit.setText(str(getattr(first, prop)()))
+            self._wire_live_prop(edit, prop, is_line_edit=True, transform=str)
+            form.addRow(title, edit)
+            combo = self._enum_combo(
+                TEXT_BORDER_LABELS, getattr(first, border_prop)()
+            )
+            combo.currentIndexChanged.connect(
+                lambda _i, c=combo, bp=border_prop: self._push_prop(
+                    bp, c.currentData()
+                )
+            )
+            form.addRow(border_title, combo)
 
     def _add_callout_to_arrow_row(self, form: QFormLayout) -> None:
         if len(self._items) != 1:
@@ -716,6 +728,12 @@ class PropertiesDock(QDockWidget):
             lambda _i, c=align: self._push_prop("align", c.currentData())
         )
         form.addRow("Align", align)
+
+        border = self._enum_combo(TEXT_BORDER_LABELS, first.border())
+        border.currentIndexChanged.connect(
+            lambda _i, c=border: self._push_prop("border", c.currentData())
+        )
+        form.addRow("Border", border)
 
     def _add_stamp_rows(self, form: QFormLayout) -> None:
         first = self._items[0]
@@ -792,9 +810,10 @@ class PropertiesDock(QDockWidget):
         combo = QComboBox()
         if icon_for is not None:
             combo.setIconSize(QSize(48, 16))
+        icon_color = self._icon_color
         for value, label in entries:
             if icon_for is not None:
-                combo.addItem(icon_for(value), label, value)
+                combo.addItem(icon_for(value, color=icon_color), label, value)
             else:
                 combo.addItem(label, value)
         idx = next(
@@ -807,12 +826,19 @@ class PropertiesDock(QDockWidget):
     def _pick_color(
         self, prop: str, initial: QColor, button: QPushButton
     ) -> None:
-        c = QColorDialog.getColor(initial, self, "Pick color")
-        if not c.isValid():
-            return
-        self._push_prop(prop, QColor(c))
-        button.setStyleSheet(
-            f"background: {c.name()}; border: 1px solid #888;"
+        def apply(c: QColor) -> None:
+            if not c.isValid():
+                return
+            self._push_prop(prop, QColor(c))
+            button.setStyleSheet(
+                f"background: {c.name()}; border: 1px solid #888;"
+            )
+
+        popup_color_picker(
+            self,
+            initial,
+            apply,
+            global_pos=button.mapToGlobal(button.rect().bottomLeft()),
         )
 
     def _push_prop(self, name: str, new_value: object) -> None:

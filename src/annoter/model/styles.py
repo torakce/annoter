@@ -29,7 +29,9 @@ DASH_PATTERNS: dict[DashStyle, list[float]] = {
 
 
 class EndStyle(Enum):
-    """Line-end / arrow-head decoration. Names mirror PDF /LE values."""
+    """Line-end / arrow-head decoration. Names mirror PDF /LE values,
+    plus datum-style triangles (no PDF equivalent; exported as
+    ClosedArrow for external viewers, exact style kept in our JSON)."""
 
     NONE = "none"
     OPEN_ARROW = "open_arrow"
@@ -39,12 +41,51 @@ class EndStyle(Enum):
     CIRCLE = "circle"
     SQUARE = "square"
     SLASH = "slash"
+    # Flat-based isoceles triangle at the very endpoint, apex toward the
+    # line: the GD&T datum-feature symbol (ISO 5459), hollow or filled.
+    TRIANGLE = "triangle"
+    TRIANGLE_FILLED = "triangle_filled"
+
+
+# Display order + labels shared by the Properties dock combos and the
+# endpoint context menu.
+END_STYLE_LABELS: list[tuple[EndStyle, str]] = [
+    (EndStyle.NONE, "None"),
+    (EndStyle.OPEN_ARROW, "Open arrow"),
+    (EndStyle.CLOSED_ARROW, "Closed arrow"),
+    (EndStyle.TRIANGLE, "Triangle (datum, hollow)"),
+    (EndStyle.TRIANGLE_FILLED, "Triangle (datum, filled)"),
+    (EndStyle.BUTT, "Butt (perp. tick)"),
+    (EndStyle.SLASH, "Slash"),
+    (EndStyle.DIAMOND, "Diamond"),
+    (EndStyle.CIRCLE, "Circle"),
+    (EndStyle.SQUARE, "Square"),
+]
 
 
 class TextAlign(Enum):
     LEFT = "left"
     CENTER = "center"
     RIGHT = "right"
+
+
+class TextBorder(Enum):
+    """Optional outline drawn around a text (or a line's end label).
+
+    ELLIPSE renders as a true CIRCLE (user feedback); the enum value is
+    kept as "ellipse" for persistence compatibility.
+    """
+
+    NONE = "none"
+    BOX = "box"
+    ELLIPSE = "ellipse"
+
+
+TEXT_BORDER_LABELS: list[tuple[TextBorder, str]] = [
+    (TextBorder.NONE, "None"),
+    (TextBorder.BOX, "Box"),
+    (TextBorder.ELLIPSE, "Circle"),
+]
 
 
 class HandleRole(Enum):

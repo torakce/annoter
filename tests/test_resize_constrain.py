@@ -77,20 +77,75 @@ def test_line_endpoint_preserves_original_angle_when_shift_held(scene) -> None:
     assert (p2_final - p2).manhattanLength() > 1.0
 
 
-def test_line_resize_without_shift_is_unconstrained(scene) -> None:
+def test_line_resize_without_shift_is_free_beyond_magnet_range(scene) -> None:
     item = LineItem(QPointF(50, 50), QPointF(150, 53))
     item.setParentItem(scene.page_item())
     item.setSelected(True)
 
     p2 = QPointF(150, 53)
     scene.mousePressEvent(_ev(QEvent.GraphicsSceneMousePress, p2))
-    drag_to = QPointF(200, 40)
+    # ~15 degrees off horizontal: well outside the 4-degree magnet.
+    drag_to = QPointF(200, 90)
     scene.mouseMoveEvent(_ev(QEvent.GraphicsSceneMouseMove, drag_to))
     scene.mouseReleaseEvent(_ev(QEvent.GraphicsSceneMouseRelease, drag_to))
 
     _, p2_final = item.line_points()
     assert p2_final.x() == pytest.approx(200, abs=0.5)
+    assert p2_final.y() == pytest.approx(90, abs=0.5)
+
+
+def test_line_resize_without_shift_magnets_near_important_angles(
+    scene,
+) -> None:
+    item = LineItem(QPointF(50, 50), QPointF(150, 53))
+    item.setParentItem(scene.page_item())
+    item.setSelected(True)
+
+    p2 = QPointF(150, 53)
+    scene.mousePressEvent(_ev(QEvent.GraphicsSceneMousePress, p2))
+    # ~3.8 degrees off horizontal: inside the magnet -> snaps flat.
+    drag_to = QPointF(200, 40)
+    scene.mouseMoveEvent(_ev(QEvent.GraphicsSceneMouseMove, drag_to))
+    scene.mouseReleaseEvent(_ev(QEvent.GraphicsSceneMouseRelease, drag_to))
+
+    p1_final, p2_final = item.line_points()
+    assert p2_final.y() == pytest.approx(p1_final.y(), abs=0.5)
+
+
+def test_alt_disables_angle_magnet(scene) -> None:
+    item = LineItem(QPointF(50, 50), QPointF(150, 53))
+    item.setParentItem(scene.page_item())
+    item.setSelected(True)
+
+    p2 = QPointF(150, 53)
+    scene.mousePressEvent(_ev(QEvent.GraphicsSceneMousePress, p2))
+    drag_to = QPointF(200, 40)  # inside the magnet range...
+    scene.mouseMoveEvent(
+        _ev(QEvent.GraphicsSceneMouseMove, drag_to, Qt.AltModifier)
+    )
+    scene.mouseReleaseEvent(_ev(QEvent.GraphicsSceneMouseRelease, drag_to))
+
+    _, p2_final = item.line_points()
+    # ...but Alt keeps the drag completely free.
     assert p2_final.y() == pytest.approx(40, abs=0.5)
+
+
+def test_bent_line_endpoint_magnet_uses_adjacent_bend(scene) -> None:
+    item = LineItem(QPointF(0, 0), QPointF(100, 40))
+    item.setParentItem(scene.page_item())
+    item.set_bends([QPointF(60, 43)])
+    item.setSelected(True)
+
+    p2 = QPointF(100, 40)
+    scene.mousePressEvent(_ev(QEvent.GraphicsSceneMousePress, p2))
+    # End segment bend(60,43)->cursor(160,40): ~1.7 degrees off flat ->
+    # magnets onto the bend's horizontal, NOT the p1->p2 chord.
+    drag_to = QPointF(160, 40)
+    scene.mouseMoveEvent(_ev(QEvent.GraphicsSceneMouseMove, drag_to))
+    scene.mouseReleaseEvent(_ev(QEvent.GraphicsSceneMouseRelease, drag_to))
+
+    _, p2_final = item.line_points()
+    assert p2_final.y() == pytest.approx(43, abs=0.5)
 
 
 def test_arrow_endpoint_also_snaps(scene) -> None:

@@ -96,7 +96,8 @@ class CalloutItem(TextAnnotationItem):
             tip.x() + size * math.cos(a2), tip.y() + size * math.sin(a2)
         )
         painter.setBrush(Qt.NoBrush)
-        painter.drawPolygon(QPolygonF([h1, tip, h2]))
+        # Open chevron (no closing bar), matching ArrowItem's open head.
+        painter.drawPolyline(QPolygonF([h1, tip, h2]))
 
     # ------------------------------------------------------------------
     # geometry bounds (text box + leader + arrowhead)
@@ -140,5 +141,6 @@ class CalloutItem(TextAnnotationItem):
         c.set_bold(self.bold())
         c.set_italic(self.italic())
         c.set_align(self.align())
+        c.set_border(self.border())
         c.set_tip(self.tip())
         return c

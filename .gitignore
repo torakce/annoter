@@ -38,3 +38,4 @@ htmlcov/
 
 # Dev screenshots / scratch images (root)
 /*.png
+build_*.log

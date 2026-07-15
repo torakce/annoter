@@ -35,9 +35,15 @@ def _placeholder(size: int = THUMB_MAX_PX) -> QIcon:
 
 
 class PageThumbnailDock(QDockWidget):
-    """Dockable list of page thumbnails; clicking one navigates."""
+    """Dockable list of page thumbnails.
+
+    Clicking a thumbnail navigates; dragging one to another position
+    reorders the document's pages (`pageMoved(from, to)` -- MainWindow
+    applies the move to the PDF and remaps its per-page state).
+    """
 
     pageClicked = Signal(int)
+    pageMoved = Signal(int, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Pages", parent)
@@ -48,19 +54,33 @@ class PageThumbnailDock(QDockWidget):
         self._list = QListWidget(self)
         self._list.setViewMode(QListWidget.IconMode)
         self._list.setIconSize(QSize(THUMB_MAX_PX, THUMB_MAX_PX))
-        self._list.setMovement(QListWidget.Static)
         self._list.setResizeMode(QListWidget.Adjust)
         self._list.setUniformItemSizes(True)
         self._list.setSpacing(8)
+        self._list.setDragDropMode(QListWidget.InternalMove)
+        self._list.setDefaultDropAction(Qt.MoveAction)
         self._list.itemClicked.connect(
             lambda it: self.pageClicked.emit(self._list.row(it))
         )
+        self._list.model().rowsMoved.connect(self._on_rows_moved)
         self.setWidget(self._list)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(0)
         self._timer.timeout.connect(self._render_next)
+
+    def _on_rows_moved(
+        self, _parent, start: int, _end: int, _dest, row: int
+    ) -> None:  # noqa: ANN001
+        # Qt reports the destination in pre-removal indexing; convert to
+        # the page's FINAL index. Deferred so the drop finishes before
+        # MainWindow rebuilds this very list.
+        final = row if row < start else row - 1
+        if final != start:
+            QTimer.singleShot(
+                0, lambda f=start, t=final: self.pageMoved.emit(f, t)
+            )
 
     # ------------------------------------------------------------------
     # document lifecycle

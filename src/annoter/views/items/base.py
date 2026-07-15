@@ -232,6 +232,19 @@ class AnnotationItem(QGraphicsItem):
         return super().itemChange(change, value)
 
     # ------------------------------------------------------------------
+    # document resize (A3 -> A0 etc.)
+    # ------------------------------------------------------------------
+    def scale_geometry(self, s: float) -> None:
+        """Uniformly scale this item's page-space footprint by `s`.
+
+        Used when the whole document is resized to another paper format:
+        positions, geometry and visual weight (stroke) must follow the
+        page. Subclasses extend with their type-specific geometry.
+        """
+        self.setPos(QPointF(self.pos().x() * s, self.pos().y() * s))
+        self.set_stroke(self._stroke * s)
+
+    # ------------------------------------------------------------------
     # duplication
     # ------------------------------------------------------------------
     def _copy_base_style_into(self, dst: "AnnotationItem") -> None:

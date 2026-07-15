@@ -126,6 +126,10 @@ class MainWindow(QMainWindow):
         # True while the open document is an unsaved scratch PDF created
         # by "New blank document" -- Save then redirects to Save As.
         self._is_untitled: bool = False
+        # Structural edits (inserted/moved pages, document resize) live
+        # in the raw fitz document, not in any undo stack; this flag
+        # keeps the unsaved-changes prompt honest about them.
+        self._doc_structure_dirty: bool = False
         self._renderer: PageRenderer | None = None
         self._page_index: int = 0
         self._page_rotation: int = 0  # multiples of 90, in [0, 360)
@@ -215,6 +219,7 @@ class MainWindow(QMainWindow):
 
         self._thumbnail_dock = PageThumbnailDock(self)
         self._thumbnail_dock.pageClicked.connect(self._show_page)
+        self._thumbnail_dock.pageMoved.connect(self._on_page_reordered)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._thumbnail_dock)
 
         self._annotation_list = AnnotationListDock(self)
@@ -272,6 +277,19 @@ class MainWindow(QMainWindow):
         self.act_save_as = QAction("Save &As...", self)
         self.act_save_as.setShortcut(QKeySequence.SaveAs)
         self.act_save_as.triggered.connect(self._on_save_as)
+
+        self.act_insert_pdf = QAction("&Insert Pages from PDF...", self)
+        self.act_insert_pdf.triggered.connect(self._on_insert_pdf)
+
+        self.act_resize_doc = QAction("&Resize Document...", self)
+        self.act_resize_doc.triggered.connect(self._on_resize_document)
+
+        self.act_export_images = QAction("&Export as Images...", self)
+        self.act_export_images.triggered.connect(self._on_export_images)
+
+        self.act_grayscale = QAction("&Grayscale Page", self)
+        self.act_grayscale.setCheckable(True)
+        self.act_grayscale.toggled.connect(self._on_grayscale_toggled)
 
         self.act_close = QAction("&Close", self)
         self.act_close.setShortcut("Ctrl+W")
@@ -481,6 +499,11 @@ class MainWindow(QMainWindow):
         m_file.addAction(self.act_open)
         m_file.addAction(self.act_save)
         m_file.addAction(self.act_save_as)
+        m_file.addAction(self.act_export_images)
+        m_file.addSeparator()
+        m_file.addAction(self.act_insert_pdf)
+        m_file.addAction(self.act_resize_doc)
+        m_file.addSeparator()
         m_file.addAction(self.act_close)
         m_file.addSeparator()
         self._menu_recent = m_file.addMenu("Recent &Files")
@@ -532,6 +555,8 @@ class MainWindow(QMainWindow):
         m_view.addAction(self.act_rotate_ccw)
         m_view.addAction(self.act_rotate_180)
         m_view.addAction(self.act_rotate_reset)
+        m_view.addSeparator()
+        m_view.addAction(self.act_grayscale)
         m_view.addSeparator()
         m_panels = m_view.addMenu("&Panels")
         for dock in (
@@ -721,6 +746,9 @@ class MainWindow(QMainWindow):
             self.act_close,
             self.act_save,
             self.act_save_as,
+            self.act_export_images,
+            self.act_insert_pdf,
+            self.act_resize_doc,
             self.act_zoom_in,
             self.act_zoom_out,
             self.act_zoom_fit,
@@ -764,9 +792,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # file ops
     # ------------------------------------------------------------------
+    _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+
     def _on_open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open PDF", "", "PDF files (*.pdf);;All files (*.*)"
+            self,
+            "Open PDF or Image",
+            "",
+            "PDF and images (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp)"
+            ";;PDF files (*.pdf)"
+            ";;Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)"
+            ";;All files (*.*)",
         )
         if path:
             self._open_path(path)
@@ -783,6 +819,30 @@ class MainWindow(QMainWindow):
 
     def _recent_remove(self, path: str) -> None:
         self._recent.remove(path)
+
+    @staticmethod
+    def _image_to_scratch_pdf(path: str) -> Path | None:
+        """Convert an image file to a temp single-page PDF, or None."""
+        import tempfile
+
+        import fitz
+
+        try:
+            img = fitz.open(path)
+            try:
+                pdf_bytes = img.convert_to_pdf()
+            finally:
+                img.close()
+            tmp_dir = Path(tempfile.mkdtemp(prefix="annoter_"))
+            target = tmp_dir / (Path(path).stem + ".pdf")
+            pdf = fitz.open("pdf", pdf_bytes)
+            try:
+                pdf.save(str(target))
+            finally:
+                pdf.close()
+            return target
+        except Exception:
+            return None
 
     def _new_blank_document(self) -> None:
         """Create and open an untitled single-page A4 scratch PDF.
@@ -811,6 +871,21 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not self._confirm_discard_changes():
             return
+        if path.lower().endswith(self._IMAGE_SUFFIXES):
+            # An image opens as a single-page scratch PDF (its page has
+            # the image's pixel size in points) -- annotate it, then
+            # Save As decides where the real PDF lives, exactly like a
+            # blank document.
+            converted = self._image_to_scratch_pdf(path)
+            if converted is None:
+                QMessageBox.critical(
+                    self,
+                    "Open failed",
+                    f"Could not open image\n{path}",
+                )
+                return
+            self._open_path(str(converted), add_to_recent=False, untitled=True)
+            return
         try:
             doc = PdfDocument(Path(path))
         except Exception as e:
@@ -827,6 +902,7 @@ class MainWindow(QMainWindow):
         self._renderer = PageRenderer(
             doc, BASE_RENDER_DPI, PIXMAP_CACHE_PAGES
         )
+        self._renderer.set_grayscale(self.act_grayscale.isChecked())
         self._page_index = 0
         self._page_rotation = 0
         self._render_scale = 1.0
@@ -846,6 +922,7 @@ class MainWindow(QMainWindow):
                 elif isinstance(it, StickyNoteItem):
                     it.set_edit_callback(self._open_note_editor)
         self._is_untitled = untitled
+        self._doc_structure_dirty = False
         if add_to_recent:
             self._recent.add(path)
         self._refresh_window_title()
@@ -960,6 +1037,7 @@ class MainWindow(QMainWindow):
         # so the dirty flag (and the reopen below) see a saved document.
         for stack in self._page_stacks.values():
             stack.setClean()
+        self._doc_structure_dirty = False
         return True
 
     def _reopen_after_save(self, target: Path) -> None:
@@ -972,9 +1050,17 @@ class MainWindow(QMainWindow):
     # unsaved-changes guard
     # ------------------------------------------------------------------
     def _has_unsaved_changes(self) -> bool:
-        return self._doc is not None and any(
-            not stack.isClean() for stack in self._page_stacks.values()
+        return self._doc is not None and (
+            self._doc_structure_dirty
+            or any(
+                not stack.isClean()
+                for stack in self._page_stacks.values()
+            )
         )
+
+    def _mark_structure_dirty(self) -> None:
+        self._doc_structure_dirty = True
+        self._update_modified_flag()
 
     def _update_modified_flag(self, _clean: bool = False) -> None:
         # Drives the native "*" marker in the window title (via the [*]
@@ -1039,6 +1125,248 @@ class MainWindow(QMainWindow):
         self._central.setCurrentWidget(self._welcome)
         self._welcome.set_recent(self._recent.list())
         self._update_actions_enabled()
+
+    # ------------------------------------------------------------------
+    # document-level operations (merge / reorder / resize / export)
+    # ------------------------------------------------------------------
+    def _stash_current_page_items(self) -> None:
+        """Park the on-screen page's items back into _page_items so a
+        structural operation can touch every page uniformly."""
+        self._commit_gdt_editor_if_open()
+        self._commit_note_editor_if_open()
+        if self._scene.page_item() is not None:
+            self._page_items[self._page_index] = self._scene.detach_children()
+
+    def _refresh_after_structure_change(self, show_index: int) -> None:
+        self._renderer.clear_cache()
+        self._mark_structure_dirty()
+        self._thumbnail_dock.set_document(
+            self._renderer, self._doc.page_count
+        )
+        self._show_page(show_index, _is_initial=True)
+
+    def _on_insert_pdf(self) -> None:
+        if self._doc is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Insert Pages from PDF",
+            "",
+            "PDF files (*.pdf);;All files (*.*)",
+        )
+        if not path:
+            return
+        import fitz
+
+        self._stash_current_page_items()
+        first_new = self._doc.page_count
+        try:
+            other = fitz.open(path)
+            try:
+                if other.needs_pass:
+                    raise ValueError("Encrypted PDFs are not supported.")
+                self._doc.raw.insert_pdf(other)
+            finally:
+                other.close()
+        except Exception as e:
+            QMessageBox.critical(self, "Insert failed", str(e))
+            return
+        # The inserted pages' own annotations become editable items too.
+        try:
+            inserted = read_annotations(self._doc.raw, BASE_RENDER_DPI)
+            for idx in range(first_new, self._doc.page_count):
+                items = inserted.get(idx, [])
+                for it in items:
+                    if isinstance(it, GdtAnnotationItem):
+                        it.set_edit_callback(self._open_gdt_editor)
+                    elif isinstance(it, StickyNoteItem):
+                        it.set_edit_callback(self._open_note_editor)
+                self._page_items[idx] = items
+        except Exception:
+            pass
+        self._refresh_after_structure_change(first_new)
+
+    def _on_page_reordered(self, frm: int, to: int) -> None:
+        """The thumbnail dock moved a page by drag & drop."""
+        if self._doc is None or frm == to:
+            return
+        self._stash_current_page_items()
+        try:
+            # move_page's `to` means "insert BEFORE this position" in the
+            # pre-removal numbering: moving down needs +1 to land AT the
+            # requested final index, and "end of document" must be -1
+            # (an out-of-range target hangs PyMuPDF).
+            count = self._doc.page_count
+            if to > frm:
+                target = -1 if to >= count - 1 else to + 1
+            else:
+                target = to
+            self._doc.raw.move_page(frm, target)
+        except Exception as e:
+            QMessageBox.critical(self, "Move failed", str(e))
+            self._refresh_after_structure_change(self._page_index)
+            return
+        # Remap every per-page dict through the old->new index order.
+        count = self._doc.page_count
+        order = list(range(count))
+        page = order.pop(frm)
+        order.insert(to, page)
+        self._page_items = {
+            new: self._page_items[old]
+            for new, old in enumerate(order)
+            if old in self._page_items
+        }
+        self._page_stacks = {
+            new: self._page_stacks[old]
+            for new, old in enumerate(order)
+            if old in self._page_stacks
+        }
+        current = order.index(self._page_index)
+        self._refresh_after_structure_change(current)
+
+    _PAPER_FORMATS: dict[str, tuple[float, float]] = {
+        "A0 (841 x 1189 mm)": (2384.0, 3370.0),
+        "A1 (594 x 841 mm)": (1684.0, 2384.0),
+        "A2 (420 x 594 mm)": (1191.0, 1684.0),
+        "A3 (297 x 420 mm)": (842.0, 1191.0),
+        "A4 (210 x 297 mm)": (595.0, 842.0),
+    }
+
+    def _on_resize_document(self) -> None:
+        """Rescale every page (content + annotations) to a paper format,
+        e.g. an A3 plan becomes a true A0."""
+        if self._doc is None:
+            return
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Resize Document",
+            "Target format (orientation is preserved):",
+            list(self._PAPER_FORMATS),
+            0,
+            False,
+        )
+        if not ok:
+            return
+        import fitz
+
+        tw_portrait, th_portrait = self._PAPER_FORMATS[choice]
+        self._stash_current_page_items()
+        raw = self._doc.raw
+        n = raw.page_count
+        factors: list[float] = []
+        rebuilt = fitz.open()
+        for i in range(n):
+            page = raw[i]
+            sw, sh = page.rect.width, page.rect.height
+            landscape = sw > sh
+            tw = th_portrait if landscape else tw_portrait
+            th = tw_portrait if landscape else th_portrait
+            s = min(tw / sw, th / sh)
+            factors.append(s)
+            np = rebuilt.new_page(width=tw, height=th)
+            np.show_pdf_page(fitz.Rect(0, 0, sw * s, sh * s), raw, i)
+        # Swap the rebuilt pages into the SAME document object so the
+        # file path (and Save) are unaffected: append, then drop the
+        # originals.
+        raw.insert_pdf(rebuilt)
+        rebuilt.close()
+        raw.delete_pages(0, n - 1)
+        # Items live in page pixels: scale each page's items by its own
+        # factor so annotations land exactly where they were.
+        for idx, items in self._page_items.items():
+            s = factors[idx] if idx < len(factors) else 1.0
+            for it in items:
+                it.scale_geometry(s)
+        self._refresh_after_structure_change(self._page_index)
+
+    def _on_export_images(self) -> None:
+        """Render every page (with annotations) to TIFF/PNG/JPEG.
+
+        TIFF produces one multi-page file; PNG/JPEG produce one file per
+        page suffixed _p<N>. Uses Pillow for encoding.
+        """
+        if self._doc is None:
+            return
+        path, selected = QFileDialog.getSaveFileName(
+            self,
+            "Export as Images",
+            str(self._doc.path.with_suffix("")),
+            "TIFF, multi-page (*.tif);;PNG (*.png);;JPEG (*.jpg)",
+        )
+        if not path:
+            return
+        dpi, ok = QInputDialog.getInt(
+            self, "Export as Images", "Resolution (DPI):", 150, 50, 600
+        )
+        if not ok:
+            return
+        import fitz
+        from PIL import Image
+
+        self._stash_current_page_items()
+        try:
+            # Render from a throwaway copy carrying the CURRENT editor
+            # items, so unsaved annotations are part of the export.
+            copy = fitz.open("pdf", self._doc.raw.tobytes())
+            try:
+                write_annotations(
+                    copy, self._collect_all_page_items(), BASE_RENDER_DPI
+                )
+                images = []
+                for page in copy:
+                    pix = page.get_pixmap(dpi=dpi, alpha=False)
+                    images.append(
+                        Image.frombytes(
+                            "RGB",
+                            (pix.width, pix.height),
+                            pix.samples,
+                        )
+                    )
+            finally:
+                copy.close()
+            target = Path(path)
+            if "TIFF" in selected or target.suffix.lower() in (
+                ".tif",
+                ".tiff",
+            ):
+                images[0].save(
+                    str(target),
+                    save_all=True,
+                    append_images=images[1:],
+                    compression="tiff_lzw",
+                    dpi=(dpi, dpi),
+                )
+                written = [target]
+            else:
+                written = []
+                for i, img in enumerate(images):
+                    p = (
+                        target
+                        if len(images) == 1
+                        else target.with_name(
+                            f"{target.stem}_p{i + 1}{target.suffix}"
+                        )
+                    )
+                    img.save(str(p), dpi=(dpi, dpi))
+                    written.append(p)
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+        finally:
+            # Put the on-screen page's items back.
+            self._show_page(self._page_index, _is_initial=True)
+        self.statusBar().showMessage(
+            f"Exported {len(written)} file(s)", 5000
+        )
+
+    def _on_grayscale_toggled(self, checked: bool) -> None:
+        if self._renderer is not None:
+            self._renderer.set_grayscale(checked)
+            self._stash_current_page_items()
+            self._thumbnail_dock.set_document(
+                self._renderer, self._doc.page_count
+            )
+            self._show_page(self._page_index, _is_initial=True)
 
     def _refresh_window_title(self) -> None:
         # [*] is Qt's windowModified placeholder: it renders as "*" while
@@ -2056,7 +2384,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls() and any(
-            u.toLocalFile().lower().endswith(".pdf")
+            self._is_openable_file(u.toLocalFile())
             for u in event.mimeData().urls()
         ):
             event.acceptProposedAction()
@@ -2066,11 +2394,18 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event: QDropEvent) -> None:
         for url in event.mimeData().urls():
             local = url.toLocalFile()
-            if local.lower().endswith(".pdf"):
+            if self._is_openable_file(local):
                 self._open_path(local)
                 event.acceptProposedAction()
                 return
         event.ignore()
+
+    @classmethod
+    def _is_openable_file(cls, path: str) -> bool:
+        lower = path.lower()
+        return lower.endswith(".pdf") or lower.endswith(
+            tuple(cls._IMAGE_SUFFIXES)
+        )
 
     # ------------------------------------------------------------------
     # close

@@ -203,6 +203,13 @@ class TextAnnotationItem(AnnotationItem):
     def begin_text_edit(self) -> None:
         self.begin_edit()
 
+    def scale_geometry(self, s: float) -> None:
+        super().scale_geometry(s)
+        self.set_font_size(max(4, round(self._font_size * s)))
+        if self._text_width > 0:
+            self._text_width *= s
+            self._inner.setTextWidth(self._text_width)
+
     def start_typing(self, text: str) -> None:
         """Enter edit mode and append `text` at the end."""
         self.begin_edit()

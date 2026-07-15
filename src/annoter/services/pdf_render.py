@@ -31,10 +31,41 @@ class PageRenderer:
         # but sharing the 3-entry page LRU would evict a full A0 render
         # for every thumbnail and vice versa.
         self._thumb_cache: dict[tuple[int, int], QPixmap] = {}
+        self._grayscale: bool = False
 
     @property
     def dpi(self) -> int:
         return self._dpi
+
+    def clear_cache(self) -> None:
+        """Drop every cached pixmap (page structure or look changed)."""
+        self._cache.clear()
+        self._thumb_cache.clear()
+
+    def grayscale(self) -> bool:
+        return self._grayscale
+
+    def set_grayscale(self, enabled: bool) -> None:
+        """Render pages in grayscale (display-only; the PDF is untouched,
+        and annotation items keep their colors on top)."""
+        if bool(enabled) == self._grayscale:
+            return
+        self._grayscale = bool(enabled)
+        self.clear_cache()
+
+    def _colorspace(self):  # noqa: ANN202
+        return fitz.csGRAY if self._grayscale else fitz.csRGB
+
+    def _to_qimage(self, pix: fitz.Pixmap) -> QImage:
+        fmt = (
+            QImage.Format_Grayscale8
+            if pix.n == 1
+            else QImage.Format_RGB888
+        )
+        # The QImage must own its pixel data: PyMuPDF frees `pix` on GC.
+        return QImage(
+            pix.samples, pix.width, pix.height, pix.stride, fmt
+        ).copy()
 
     def render(
         self, page_index: int, rotation: int = 0, scale: float = 1.0
@@ -59,16 +90,10 @@ class PageRenderer:
         matrix = fitz.Matrix(zoom, zoom)
         if rotation:
             matrix = matrix.prerotate(rotation)
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
-        # The QImage must own its pixel data: PyMuPDF will free `pix` when GC'd.
-        image = QImage(
-            pix.samples,
-            pix.width,
-            pix.height,
-            pix.stride,
-            QImage.Format_RGB888,
-        ).copy()
-        pixmap = QPixmap.fromImage(image)
+        pix = page.get_pixmap(
+            matrix=matrix, alpha=False, colorspace=self._colorspace()
+        )
+        pixmap = QPixmap.fromImage(self._to_qimage(pix))
         pixmap.setDevicePixelRatio(scale)
 
         self._cache[key] = pixmap
@@ -95,15 +120,12 @@ class PageRenderer:
         rect = page.rect
         side = max(rect.width, rect.height, 1.0)
         zoom = max_px / side
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-        image = QImage(
-            pix.samples,
-            pix.width,
-            pix.height,
-            pix.stride,
-            QImage.Format_RGB888,
-        ).copy()
-        pixmap = QPixmap.fromImage(image)
+        pix = page.get_pixmap(
+            matrix=fitz.Matrix(zoom, zoom),
+            alpha=False,
+            colorspace=self._colorspace(),
+        )
+        pixmap = QPixmap.fromImage(self._to_qimage(pix))
         self._thumb_cache[key] = pixmap
         return pixmap
 
@@ -147,15 +169,13 @@ class PageRenderer:
         matrix = fitz.Matrix(zoom0 * scale, zoom0 * scale)
         if rotation:
             matrix = matrix.prerotate(rotation)
-        pix = page.get_pixmap(matrix=matrix, clip=clip_page, alpha=False)
-        image = QImage(
-            pix.samples,
-            pix.width,
-            pix.height,
-            pix.stride,
-            QImage.Format_RGB888,
-        ).copy()
-        pixmap = QPixmap.fromImage(image)
+        pix = page.get_pixmap(
+            matrix=matrix,
+            clip=clip_page,
+            alpha=False,
+            colorspace=self._colorspace(),
+        )
+        pixmap = QPixmap.fromImage(self._to_qimage(pix))
         pixmap.setDevicePixelRatio(scale)
         pos = QPointF(
             pix.x / scale - bbox0.x0,

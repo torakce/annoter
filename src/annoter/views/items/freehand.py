@@ -71,6 +71,12 @@ class FreehandItem(AnnotationItem):
         painter.drawPath(self._path())
         self._draw_selection_marker(painter, self.boundingRect())
 
+    def scale_geometry(self, s: float) -> None:
+        super().scale_geometry(s)
+        self.set_points(
+            [QPointF(p.x() * s, p.y() * s) for p in self._points]
+        )
+
     def clone(self) -> "FreehandItem":
         c = FreehandItem([QPointF(p) for p in self._points])
         self._copy_base_style_into(c)

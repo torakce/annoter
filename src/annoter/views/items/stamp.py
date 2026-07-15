@@ -63,6 +63,10 @@ class StampItem(AnnotationItem):
         self._text = s
         self.update()
 
+    def scale_geometry(self, s: float) -> None:
+        super().scale_geometry(s)
+        self.set_font_size(max(4, round(self._font_size * s)))
+
     def font_size(self) -> int:
         return self._font_size
 

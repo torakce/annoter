@@ -348,6 +348,14 @@ class _ShapeItem(AnnotationItem):
         if isinstance(snapshot, QRectF):
             self.set_rect(snapshot)
 
+    def scale_geometry(self, s: float) -> None:
+        super().scale_geometry(s)
+        r = self._rect
+        self.set_rect(
+            QRectF(r.x() * s, r.y() * s, r.width() * s, r.height() * s)
+        )
+        self.set_label_font_size(max(4, round(self._label_font_size * s)))
+
 
 class RectangleItem(_ShapeItem):
     KIND = "rect"
@@ -360,6 +368,10 @@ class RectangleItem(_ShapeItem):
 
     def corner_radius(self) -> float:
         return self._corner_radius
+
+    def scale_geometry(self, s: float) -> None:
+        super().scale_geometry(s)
+        self.set_corner_radius(self._corner_radius * s)
 
     def set_corner_radius(self, r: float) -> None:
         v = max(0.0, float(r))

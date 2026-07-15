@@ -107,6 +107,12 @@ class _PolyItem(AnnotationItem):
         if isinstance(snapshot, list):
             self.set_points(snapshot)
 
+    def scale_geometry(self, s: float) -> None:
+        super().scale_geometry(s)
+        self.set_points(
+            [QPointF(p.x() * s, p.y() * s) for p in self._points]
+        )
+
 
 class PolylineItem(_PolyItem):
     """Open multi-segment path."""

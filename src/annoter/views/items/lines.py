@@ -342,6 +342,16 @@ class LineItem(AnnotationItem):
             if isinstance(bends, list):
                 self.set_bends(bends)
 
+    def scale_geometry(self, s: float) -> None:
+        super().scale_geometry(s)
+        self.set_line_points(
+            QPointF(self._p1.x() * s, self._p1.y() * s),
+            QPointF(self._p2.x() * s, self._p2.y() * s),
+        )
+        self.set_bends(
+            [QPointF(b.x() * s, b.y() * s) for b in self._bends]
+        )
+
     def _copy_line_extras_into(self, dst: "LineItem") -> None:
         dst.set_bends(self.bends())
         dst.set_start_label(self._start_label)

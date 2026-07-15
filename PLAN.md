@@ -587,6 +587,56 @@ first seven lots had left uncovered.
     borders and line end labels; the flush-contact math uses the circle
     radius directly. `TextBorder.ELLIPSE` keeps its enum value for
     persistence compatibility but displays as "Circle".
+### Document-operations batch (2026-07-16, Discussion #2)
+
+Six items from the "Pour plus tard" discussion, landed as one lot:
+
+- **Images as input** (`MainWindow._open_path` + `_image_to_scratch_pdf`):
+  opening/dropping a png/jpg/tif/bmp converts it to a temp single-page
+  PDF (`fitz.convert_to_pdf`) opened through the existing
+  scratch-document path (`untitled=True`, Save redirects to Save As,
+  never enters recents). Open dialog filters and drag&drop
+  (`_is_openable_file`) extended.
+- **Merge** (`_on_insert_pdf`): File > Insert Pages from PDF appends via
+  `raw.insert_pdf`; the inserted pages' own annotations are re-read into
+  editable items (edit callbacks re-attached); jumps to the first
+  inserted page.
+- **Page reorder**: the thumbnail dock is `InternalMove` drag&drop;
+  `rowsMoved` converts Qt's pre-removal destination to the final index
+  and emits `pageMoved(from, to)` DEFERRED (singleShot) so the drop
+  finishes before MainWindow rebuilds the list. `_on_page_reordered`
+  maps the final index to `move_page`'s insert-before semantics --
+  **gotcha: "move to end" must be `to=-1`; an out-of-range target makes
+  PyMuPDF hang**, not raise -- then remaps `_page_items`/`_page_stacks`
+  through the old->new order and follows the current page.
+- **Document resize** (`_on_resize_document`): File > Resize Document
+  offers A0-A4 (per-page orientation preserved). Each page is rebuilt at
+  the target size with `show_pdf_page` scaled content; the rebuilt pages
+  are swapped INTO the same fitz document (append + delete originals) so
+  the path and Save are unaffected. Every item implements
+  `scale_geometry(s)` (base scales pos+stroke; subclasses scale rects,
+  points, bends, tips, corner radius, font sizes) so annotations follow
+  their page exactly. Foreign annot types that `read_annotations` cannot
+  map are lost by the rebuild -- documented limitation.
+- **Export as images** (`_on_export_images`): renders a throwaway copy
+  of the document carrying the CURRENT editor items (`tobytes` +
+  `write_annotations`), then encodes via **Pillow** (first real use of
+  the dependency): multi-page TIFF (LZW) in one file, or one PNG/JPEG
+  per page suffixed `_pN`, at a user-chosen DPI (50-600).
+- **Grayscale display** (View > Grayscale Page): `PageRenderer` gained
+  `set_grayscale` (renders with `fitz.csGRAY`, `Format_Grayscale8`) and
+  a shared `clear_cache()`/`_to_qimage()`; display-only -- the PDF is
+  untouched and annotation items keep their colors on top. The setting
+  survives document switches (re-applied on renderer creation).
+- **Structural dirty flag**: inserted/moved/resized pages live in the
+  raw document, not in any undo stack, so `_doc_structure_dirty` (set by
+  `_mark_structure_dirty`, cleared on open and successful save) is OR-ed
+  into `_has_unsaved_changes` -- the close prompt stays honest about
+  them. All structural ops share `_stash_current_page_items()` +
+  `_refresh_after_structure_change()` (cache clear, dirty, thumbnails,
+  re-show).
+- Tests in `tests/test_doc_ops.py` (10 cases).
+
 - **Selection pill rework: contextual actions + stability**
   (2026-07-04 follow-up): the floating selection toolbar was unstable
   (only repositioned on selection change and zoom/scroll -- never

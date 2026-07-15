@@ -123,6 +123,10 @@ class CalloutItem(TextAnnotationItem):
         else:
             super().apply_resize(role, local_pos)
 
+    def scale_geometry(self, s: float) -> None:
+        super().scale_geometry(s)
+        self.set_tip(QPointF(self._tip.x() * s, self._tip.y() * s))
+
     def geom_snapshot(self) -> object:
         return (super().geom_snapshot(), QPointF(self._tip))
 

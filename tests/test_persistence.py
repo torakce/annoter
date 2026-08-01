@@ -17,6 +17,11 @@ from PySide6.QtCore import QPointF, QRectF  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from annoter.model.dimension import (  # noqa: E402
+    DimensionPrefix,
+    DimensionState,
+    ToleranceMode,
+)
 from annoter.model.gdt import (  # noqa: E402
     Characteristic,
     DatumRef,
@@ -33,6 +38,7 @@ from annoter.services.pdf_export import (  # noqa: E402
     write_annotations,
 )
 from annoter.views.items.callout import CalloutItem  # noqa: E402
+from annoter.views.items.dimension import DimensionAnnotationItem  # noqa: E402
 from annoter.views.items.freehand import FreehandItem  # noqa: E402
 from annoter.views.items.note import StickyNoteItem  # noqa: E402
 from annoter.views.items.stamp import StampItem  # noqa: E402
@@ -570,6 +576,63 @@ def test_gdt_font_size_roundtrip(qapp, blank_doc) -> None:
     g = out[0][0]
     assert isinstance(g, GdtAnnotationItem)
     assert g.font_size() == 20
+
+
+def test_dimension_symmetric_roundtrip_preserves_state(qapp, blank_doc) -> None:
+    state = DimensionState(
+        prefix=DimensionPrefix.DIAMETER,
+        nominal="45.00",
+        tolerance_mode=ToleranceMode.SYMMETRIC,
+        tol_value="0.05",
+    )
+    item = DimensionAnnotationItem(state, QPointF(120, 80))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert len(out[0]) == 1
+    restored = out[0][0]
+    assert isinstance(restored, DimensionAnnotationItem)
+    assert restored.state() == state
+    # Position must not drift across save/reopen cycles (the writer
+    # stores the content rect, whose topleft is exactly item.pos()).
+    assert restored.pos().x() == pytest.approx(120, abs=0.5)
+    assert restored.pos().y() == pytest.approx(80, abs=0.5)
+
+
+def test_dimension_bilateral_roundtrip_preserves_state(qapp, blank_doc) -> None:
+    state = DimensionState(
+        prefix=DimensionPrefix.NONE,
+        nominal="12.50",
+        tolerance_mode=ToleranceMode.BILATERAL,
+        tol_upper="0.10",
+        tol_lower="0.05",
+    )
+    item = DimensionAnnotationItem(state, QPointF(100, 90))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert len(out[0]) == 1
+    restored = out[0][0]
+    assert isinstance(restored, DimensionAnnotationItem)
+    assert restored.state() == state
+    assert restored.pos().x() == pytest.approx(100, abs=0.5)
+    assert restored.pos().y() == pytest.approx(90, abs=0.5)
+
+
+def test_dimension_font_size_roundtrip(qapp, blank_doc) -> None:
+    state = DimensionState(nominal="30.00")
+    item = DimensionAnnotationItem(state, QPointF(120, 80))
+    item.set_font_size(20)
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    d = out[0][0]
+    assert isinstance(d, DimensionAnnotationItem)
+    assert d.font_size() == 20
 
 
 def test_color_roundtrip(qapp, blank_doc) -> None:

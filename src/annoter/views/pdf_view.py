@@ -174,7 +174,33 @@ class PdfView(QGraphicsView):
             return
         super().wheelEvent(event)
 
+    def _is_editing_text(self) -> bool:
+        """True while an inline QGraphicsTextItem owns scene focus.
+
+        Only `TextAnnotationItem`/shape-label inner items ever call
+        `QGraphicsItem.setFocus()` (see views/items/text.py and
+        shapes.py), so a non-None `focusItem()` reliably means "the
+        user is mid-edit inside an annotation's text". Qt's own
+        QGraphicsScene already claims ShortcutOverride for the focused
+        item's native editing keys (Backspace/Delete/Ctrl+A/C/V/Z/...),
+        so app-wide QAction shortcuts bound to the same keys correctly
+        stay silent during an edit without any extra handling here.
+        """
+        scene = self.scene()
+        return scene is not None and scene.focusItem() is not None
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        if self._is_editing_text():
+            # Editing owns the keyboard: no pan, no nudge, no re-typing
+            # trick below -- let Qt's normal scene->focusItem delivery
+            # (via super()) handle every key, including Space and the
+            # arrow keys, exactly like a native text editor would.
+            if event.key() == Qt.Key_Escape:
+                self.scene().focusItem().clearFocus()
+                event.accept()
+                return
+            super().keyPressEvent(event)
+            return
         if event.key() == Qt.Key_Space and not event.isAutoRepeat():
             self._space_held = True
             if not self._panning:

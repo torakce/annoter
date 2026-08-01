@@ -5,7 +5,7 @@ the top toolbar) and the pill now shows the actions SPECIFIC to what is
 selected -- the ones that otherwise need a right-click or a trip to the
 Properties dock:
 
-    text / note / GD&T      Edit
+    text / note / GD&T / dimension   Edit
     rectangle / cloud       Outline (straight/cloud), Fill toggle
     line / arrow            Ends menu, add bend
     polyline / polygon      Closed toggle
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QMenu, QToolButton, QWidget
 from annoter.model.styles import END_STYLE_LABELS, EndStyle, HandleRole
 from annoter.views.icons import end_icon
 from annoter.views.items.base import AnnotationItem
+from annoter.views.items.dimension import DimensionAnnotationItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.note import StickyNoteItem
@@ -165,7 +166,13 @@ class SelectionToolbar(QFrame):
 
     def _build_single(self, item: AnnotationItem) -> None:
         if isinstance(
-            item, (TextAnnotationItem, StickyNoteItem, GdtAnnotationItem)
+            item,
+            (
+                TextAnnotationItem,
+                StickyNoteItem,
+                GdtAnnotationItem,
+                DimensionAnnotationItem,
+            ),
         ):
             edit = self._button("Edit", "Edit content (double-click)")
             edit.clicked.connect(self.editClicked)

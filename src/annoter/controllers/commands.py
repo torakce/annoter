@@ -10,6 +10,7 @@ Commands:
     ChangeColorCommand
     ChangeStrokeCommand
     ChangeGdtCommand           (M3, defined here as a stub)
+    ChangeDimensionCommand
 """
 
 from __future__ import annotations
@@ -291,3 +292,28 @@ class ChangeGdtCommand(QUndoCommand):
     def undo(self) -> None:
         if hasattr(self._item, "apply_gdt_state"):
             self._item.apply_gdt_state(self._old)
+
+
+class ChangeDimensionCommand(QUndoCommand):
+    """Swap the DimensionState of a DimensionAnnotationItem (undo round-trip)."""
+
+    def __init__(
+        self,
+        item: AnnotationItem,
+        old_state,
+        new_state,
+        label: str = "Edit dimension",
+        parent: QUndoCommand | None = None,
+    ) -> None:
+        super().__init__(label, parent)
+        self._item = item
+        self._old = old_state
+        self._new = new_state
+
+    def redo(self) -> None:
+        if hasattr(self._item, "apply_dimension_state"):
+            self._item.apply_dimension_state(self._new)
+
+    def undo(self) -> None:
+        if hasattr(self._item, "apply_dimension_state"):
+            self._item.apply_dimension_state(self._old)

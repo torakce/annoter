@@ -493,8 +493,10 @@ def tool_icon(tool: Tool, size: int = 64, color: QColor | None = None) -> QIcon:
         ])
         p.drawPolygon(poly)
     elif tool is Tool.TEXT:
-        from PySide6.QtGui import QFont
-
+        # QFont is already imported at module level; a local import here
+        # used to shadow it, making the name function-local everywhere
+        # in `tool_icon` and raising UnboundLocalError from any branch
+        # (e.g. Tool.DIMENSION) that runs before this one's import line.
         font = QFont()
         font.setPixelSize(int(size * 0.7))
         font.setBold(True)
@@ -553,6 +555,48 @@ def tool_icon(tool: Tool, size: int = 64, color: QColor | None = None) -> QIcon:
         p.drawLine(
             QPointF(divider_x + size * 0.08, mid_y),
             QPointF(frame.right() - size * 0.08, mid_y),
+        )
+    elif tool is Tool.DIMENSION:
+        # Dimension line: "|<--- 12 --->|" style mark with end ticks and
+        # inward-pointing arrowheads meeting a value in the middle.
+        y = size / 2.0
+        left = margin
+        right = size - margin
+        tick = size * 0.16
+        p.drawLine(QPointF(left, y - tick), QPointF(left, y + tick))
+        p.drawLine(QPointF(right, y - tick), QPointF(right, y + tick))
+        gap = size * 0.16
+        mid_left = size * 0.5 - gap
+        mid_right = size * 0.5 + gap
+        p.drawLine(QPointF(left, y), QPointF(mid_left, y))
+        p.drawLine(QPointF(mid_right, y), QPointF(right, y))
+
+        def _inward_head(tip: QPointF, ang: float) -> None:
+            head = size * 0.16
+            h_ang = math.radians(22.0)
+            h1 = QPointF(
+                tip.x() - head * math.cos(ang - h_ang),
+                tip.y() - head * math.sin(ang - h_ang),
+            )
+            h2 = QPointF(
+                tip.x() - head * math.cos(ang + h_ang),
+                tip.y() - head * math.sin(ang + h_ang),
+            )
+            p.setBrush(c)
+            p.drawPolygon(QPolygonF([tip, h1, h2]))
+
+        _inward_head(QPointF(left, y), 0.0)
+        _inward_head(QPointF(right, y), math.pi)
+        p.setBrush(Qt.NoBrush)
+
+        font = QFont()
+        font.setPixelSize(int(size * 0.28))
+        font.setBold(True)
+        p.setFont(font)
+        p.drawText(
+            QRectF(mid_left, y - size * 0.24, mid_right - mid_left, size * 0.24 * 2),
+            Qt.AlignCenter,
+            "12",
         )
     elif tool is Tool.STICKY_NOTE:
         # Speech bubble with a tail and a couple of text lines.

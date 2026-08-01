@@ -223,8 +223,8 @@ def test_dock_palette_is_tools_only(qapp) -> None:
     assert "Tool" in section_titles
     assert "Color" not in section_titles
     assert "Stroke" not in section_titles
-    # The tool grid itself is intact.
-    assert len(palette._tool_buttons) == 10
+    # The tool grid itself is intact (10 classic tools + Dimension).
+    assert len(palette._tool_buttons) == 11
 
 
 # ----------------------------------------------------------------------

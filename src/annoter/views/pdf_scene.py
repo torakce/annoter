@@ -51,6 +51,7 @@ class PdfScene(QGraphicsScene):
 
     annotationsChanged = Signal()  # emitted after add / delete
     gdtPlacementRequested = Signal(QPointF)  # GD&T tool clicked on the page
+    dimensionPlacementRequested = Signal(QPointF)  # Dimension tool clicked
     notePlacementRequested = Signal(QPointF)  # sticky-note tool clicked
     formatPaintRequested = Signal(object)  # AnnotationItem clicked while painting
     # True while the user is dragging/resizing items with the mouse;
@@ -536,6 +537,13 @@ class PdfScene(QGraphicsScene):
             # Defer to MainWindow: spawns a draft frame and opens the
             # in-place editor; the commit pushes the Add command.
             self.gdtPlacementRequested.emit(pos)
+            event.accept()
+            return
+
+        if tool is Tool.DIMENSION:
+            # Defer to MainWindow: spawns a draft dimension and opens
+            # the in-place editor; the commit pushes the Add command.
+            self.dimensionPlacementRequested.emit(pos)
             event.accept()
             return
 

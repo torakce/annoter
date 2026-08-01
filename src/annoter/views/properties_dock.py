@@ -58,7 +58,6 @@ from annoter.model.styles import (
     END_STYLE_LABELS,
     TEXT_BORDER_LABELS,
     DashStyle,
-    EndStyle,
     TextAlign,
 )
 from annoter.views.color_picker import popup_color_picker

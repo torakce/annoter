@@ -6,6 +6,7 @@ are page-local and page transforms cascade automatically.
 
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.callout import CalloutItem
+from annoter.views.items.dimension import DimensionAnnotationItem
 from annoter.views.items.freehand import FreehandItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
@@ -20,6 +21,7 @@ __all__ = [
     "ArrowItem",
     "CalloutItem",
     "CloudItem",
+    "DimensionAnnotationItem",
     "EllipseItem",
     "FreehandItem",
     "GdtAnnotationItem",

@@ -55,6 +55,7 @@ Standalone, install-free, single-user PDF annotator for **mechanical engineering
 | FreehandItem          | Ink                       |
 | TextAnnotationItem    | FreeText (Helvetica only) |
 | GdtAnnotationItem     | Stamp + JSON in Contents  |
+| DimensionAnnotationItem | Square + JSON in Contents |
 
 ---
 
@@ -696,6 +697,61 @@ Six items from the "Pour plus tard" discussion, landed as one lot:
   `end_icon` preview in `views/icons.py`. CLOSED_ARROW keeps the filled
   polygon. The PDF side needed no change -- the native `/LE /OpenArrow`
   is already rendered as a chevron by Acrobat/MuPDF.
+
+### Inline text editing keyboard fixes + Dimension annotation (2026-08-01)
+
+- **Inline text editing was fighting `PdfView` for the keyboard**: the
+  view's `keyPressEvent` intercepted Space unconditionally (pan
+  shortcut) and Left/Right/Up/Down unconditionally (nudge selection)
+  even while a `TextAnnotationItem`'s inner `QGraphicsTextItem` had
+  scene focus, so it was impossible to type a space or move the
+  cursor with the arrow keys. Worse, the "select an item and just
+  start typing" convenience path (`_maybe_start_typing`) re-fired on
+  *every* keystroke rather than only the one that entered edit mode,
+  force-moving the cursor to the end of the text before each
+  insertion -- so editing anywhere but the very end of the string was
+  impossible (typing "a", "c", Home, Right, "b" produced "acb" instead
+  of "abc"). Fixed by adding `PdfView._is_editing_text()` (true
+  whenever `scene.focusItem()` is not None -- only text/shape-label
+  inner items ever call `setFocus()`) and short-circuiting
+  `keyPressEvent` straight to `super()` while it holds, so Qt's normal
+  scene -> focus-item delivery handles every key exactly like a native
+  text editor. (Investigated and ruled out: Backspace/Delete/Ctrl+A/
+  C/X/V/Z/Y do NOT need a `ShortcutOverride` override alongside this --
+  `QGraphicsTextItem` already claims those correctly via its internal
+  `QTextControl`, confirmed by reverting the guard and re-running the
+  regression tests.) Tests in `tests/test_text_edit_keys.py`.
+- **New Dimension annotation type**: nominal value + optional prefix
+  (Ø/R/SØ/SR/□) + optional tolerance, either symmetric (`±0.05`, one
+  line) or bilateral/offset (`+0.10` / `-0.05`, stacked at a reduced
+  font size, each line keeping its own natural width). Modeled on the
+  GD&T architecture but deliberately un-boxed (a dimension value is
+  plain text on a real drawing, unlike an ISO 1101 feature control
+  frame): `model/dimension.py` (`DimensionState`/`DimensionPrefix`/
+  `ToleranceMode`, serializable), `views/items/dimension.py`
+  (`DimensionAnnotationItem`, `QFontMetricsF` layout, corner-resize
+  scales `font_size()` like GD&T), `views/dimension_editor.py`
+  (`DimensionInlineEditor`, same floating single-row
+  commit-or-cancel-only contract as `GdtInlineEditor`). Wiring in
+  `main_window.py` (`_on_dimension_placement` /
+  `_open_dimension_editor` / `_commit_dimension_editor` /
+  `_cancel_dimension_editor`) and `pdf_scene.py`
+  (`dimensionPlacementRequested`) mirror the GD&T click-to-place /
+  double-click-to-reopen / live-preview-without-undo-until-commit
+  flow exactly, including the pre-existing quirk that cancelling an
+  edit on an *existing* item restores the old state directly (no undo
+  entry, since the live preview never pushed one). Persistence in
+  `services/pdf_export.py`: `Square` annot + JSON blob in `Contents`
+  (`_DIM_TAG`/`_DIM_CONTENT_PREFIX`) plus a rasterized appearance
+  stream, `content_rect()` (not `boundingRect()`) anchors the saved
+  `/Rect` -- identical scheme to GD&T. New `Tool.DIMENSION`, palette
+  entry, toolbar icon. Tests: `tests/test_dimension.py`,
+  `tests/test_dimension_editor.py`, Dimension cases added to
+  `tests/test_persistence.py`. Built as two parallel background agents
+  (editor+icon; wiring+persistence) against a hand-written core
+  model/item, then integration-verified end-to-end through a real
+  `MainWindow` (place, edit, undo/redo, re-edit, cancel-restores-state,
+  save+reopen round-trip, untouched-placement rollback).
 
 ### Known remaining issues
 

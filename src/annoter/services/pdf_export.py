@@ -19,17 +19,19 @@ Mapping (M4):
     GdtAnnotationItem  -> Square + JSON in `Contents` + rasterized
                           appearance stream (so Acrobat/Foxit show the
                           actual feature control frame)
+    DimensionAnnotationItem -> Square + JSON in `Contents` + rasterized
+                          appearance stream (same convention as GD&T)
 
 Coordinates are in page-local pixel space at the renderer's base DPI;
 this module converts to PDF points (1pt = 1/72 in) on write and back on
 read. We do not currently transform across page rotation -- annotations
 are expected to live in the unrotated frame.
 
-Annotations we own are tagged via `/T = "Annoter"` (or "Annoter:gdt" for
-the JSON-bearing GD&T marker) so a Save can wipe-and-rewrite without
-clobbering annotations the user opened from Acrobat. Annotations
-without our tag are left untouched on save and reconstructed on open
-when their type maps to a known item.
+Annotations we own are tagged via `/T = "Annoter"` (or "Annoter:gdt" /
+"Annoter:dim" for the JSON-bearing GD&T / Dimension markers) so a Save
+can wipe-and-rewrite without clobbering annotations the user opened
+from Acrobat. Annotations without our tag are left untouched on save
+and reconstructed on open when their type maps to a known item.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QStyleOptionGraphicsItem
 
+from annoter.model.dimension import DimensionState
 from annoter.model.gdt import GdtState
 from annoter.model.styles import (
     DASH_PATTERNS,
@@ -53,6 +56,7 @@ from annoter.model.styles import (
 )
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.callout import CalloutItem
+from annoter.views.items.dimension import DimensionAnnotationItem
 from annoter.views.items.freehand import FreehandItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
@@ -66,6 +70,8 @@ from annoter.views.items.text import TextAnnotationItem
 _OWNER_TAG = "Annoter"
 _GDT_TAG = "Annoter:gdt"
 _GDT_CONTENT_PREFIX = "annoter.gdt:"
+_DIM_TAG = "Annoter:dim"
+_DIM_CONTENT_PREFIX = "annoter.dim:"
 
 
 # ----------------------------------------------------------------------
@@ -173,7 +179,7 @@ def _scene_rect(item) -> QRectF:
     if isinstance(item, (RectangleItem, EllipseItem, CloudItem)):
         r = item.rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
-    if isinstance(item, GdtAnnotationItem):
+    if isinstance(item, (GdtAnnotationItem, DimensionAnnotationItem)):
         # content_rect, not boundingRect: the bounding rect includes the
         # selection/handle margin, which would shift the item's position
         # on every save/reopen cycle (the reader anchors on rect topleft).
@@ -209,7 +215,14 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
     p: dict[str, object] = {"dash": item.dash_style().value}
     if isinstance(
         item,
-        (RectangleItem, EllipseItem, CloudItem, GdtAnnotationItem, StampItem),
+        (
+            RectangleItem,
+            EllipseItem,
+            CloudItem,
+            GdtAnnotationItem,
+            DimensionAnnotationItem,
+            StampItem,
+        ),
     ):
         r = _scene_rect(item)
         p["rect_pt"] = [
@@ -270,6 +283,8 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
         if item.border() is not TextBorder.NONE:
             p["border"] = item.border().value
     elif isinstance(item, GdtAnnotationItem):
+        p["font_size"] = int(item.font_size())
+    elif isinstance(item, DimensionAnnotationItem):
         p["font_size"] = int(item.font_size())
     elif isinstance(item, StampItem):
         p["text"] = item.text()
@@ -385,6 +400,9 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
     elif isinstance(item, GdtAnnotationItem):
         if "font_size" in props:
             item.set_font_size(int(props["font_size"]))
+    elif isinstance(item, DimensionAnnotationItem):
+        if "font_size" in props:
+            item.set_font_size(int(props["font_size"]))
     elif isinstance(item, StampItem):
         if "text" in props:
             item.set_text(str(props["text"]))
@@ -497,6 +515,22 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         annot = page.add_rect_annot(rect_pt)
         payload = _GDT_CONTENT_PREFIX + json.dumps(item.state().to_dict())
         annot.set_info(title=_GDT_TAG, content=payload, subject=subject)
+        annot.set_colors(stroke=color)
+        _set_dash_border(annot, stroke, item.dash_style())
+        annot.update()
+        try:
+            _set_rasterized_appearance(annot, item, dpi)
+        except Exception:
+            # The appearance is cosmetic for external viewers; never let
+            # it break a save. Acrobat falls back to a plain rectangle.
+            pass
+        return
+
+    if isinstance(item, DimensionAnnotationItem):
+        rect_pt = _rect_pt(_scene_rect(item), dpi)
+        annot = page.add_rect_annot(rect_pt)
+        payload = _DIM_CONTENT_PREFIX + json.dumps(item.state().to_dict())
+        annot.set_info(title=_DIM_TAG, content=payload, subject=subject)
         annot.set_colors(stroke=color)
         _set_dash_border(annot, stroke, item.dash_style())
         annot.update()
@@ -901,6 +935,25 @@ def _annot_to_items(
         except (ValueError, KeyError):
             return []
         item = GdtAnnotationItem(state, QPointF(qrect.x(), qrect.y()))
+        item.set_color(qcolor)
+        item.set_stroke(width)
+        _apply_props_to_item(item, props)
+        return [item]
+
+    # Dimension marker: Square + JSON.
+    if (
+        subtype == "Square"
+        and title.startswith(_DIM_TAG)
+        and content.startswith(_DIM_CONTENT_PREFIX)
+    ):
+        try:
+            data = json.loads(content[len(_DIM_CONTENT_PREFIX) :])
+            dim_state = DimensionState.from_dict(data)
+        except (ValueError, KeyError):
+            return []
+        item = DimensionAnnotationItem(
+            dim_state, QPointF(qrect.x(), qrect.y())
+        )
         item.set_color(qcolor)
         item.set_stroke(width)
         _apply_props_to_item(item, props)

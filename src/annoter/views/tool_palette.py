@@ -41,6 +41,7 @@ _TOOL_LABELS: list[tuple[Tool, str]] = [
     (Tool.STAMP, "Stamp"),
     (Tool.FREEHAND, "Freehand"),
     (Tool.GDT, "GD&T frame"),
+    (Tool.DIMENSION, "Dimension"),
 ]
 
 

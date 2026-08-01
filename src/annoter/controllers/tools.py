@@ -30,6 +30,7 @@ class Tool(Enum):
     STAMP = auto()
     FREEHAND = auto()
     GDT = auto()
+    DIMENSION = auto()
     # Action mode (not shown in the drawing-tool palette): click an
     # annotation to copy a previously captured style onto it.
     FORMAT_PAINTER = auto()

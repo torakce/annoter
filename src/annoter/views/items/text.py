@@ -84,6 +84,16 @@ class _InnerTextItem(QGraphicsTextItem):
         self.setTextInteractionFlags(Qt.NoTextInteraction)
 
     def focusOutEvent(self, event) -> None:  # noqa: ANN001
+        # A popup -- one of the contextual edit toolbar's menus -- takes
+        # keyboard focus off the graphics view, which makes the scene
+        # clear its focus item. That is NOT the end of the edit session:
+        # ending it here would emit editingFinished and roll back a
+        # still-empty new annotation the moment the user opens the
+        # Symbol menu. Keep the interaction flags (hence ItemIsFocusable)
+        # so Qt hands focus straight back when the popup closes.
+        if event.reason() == Qt.PopupFocusReason:
+            super().focusOutEvent(event)
+            return
         self.setTextInteractionFlags(Qt.NoTextInteraction)
         super().focusOutEvent(event)
         parent = self.parentItem()
@@ -347,6 +357,19 @@ class TextAnnotationItem(AnnotationItem):
     # items share the same method name.
     def begin_text_edit(self) -> None:
         self.begin_edit()
+
+    def is_editing(self) -> bool:
+        return self._inner.textInteractionFlags() != Qt.NoTextInteraction
+
+    def refocus_editor(self) -> None:
+        """Hand the caret back after a popup stole keyboard focus.
+
+        Unlike `begin_edit` this does not restart the session (no
+        `editingStarted`, no cursor jump to the end), so the user resumes
+        typing exactly where they were.
+        """
+        if self.is_editing():
+            self._inner.setFocus()
 
     def scale_geometry(self, s: float) -> None:
         super().scale_geometry(s)

@@ -77,6 +77,7 @@ from annoter.services.theme import Theme, apply as apply_theme
 from annoter.views.annotation_list import AnnotationListDock
 from annoter.views.color_picker import popup_color_picker
 from annoter.views.dimension_editor import DimensionInlineEditor
+from annoter.views.edit_toolbar import EditToolbar
 from annoter.views.gdt_editor import GdtInlineEditor
 from annoter.views.icons import action_icon, color_swatch_icon, end_icon
 from annoter.views.items.base import AnnotationItem
@@ -84,6 +85,7 @@ from annoter.views.items.dimension import DimensionAnnotationItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.note import StickyNoteItem
+from annoter.views.items.text import TextAnnotationItem
 from annoter.views.note_editor import NoteEditor
 from annoter.views.page_thumbnails import PageThumbnailDock
 from annoter.views.pdf_scene import PdfScene
@@ -208,6 +210,35 @@ class MainWindow(QMainWindow):
         st.ungroupClicked.connect(self._ungroup_selected)
         st.duplicateClicked.connect(self._duplicate_selected)
         st.deleteClicked.connect(self._delete_selected)
+
+        # Floating contextual bar for the item being EDITED (the pill
+        # above is for the item being SELECTED). Symbols and tolerances
+        # are inserted from here, so they are part of writing a text
+        # rather than tools of their own.
+        self._text_edit_item: TextAnnotationItem | None = None
+        et = EditToolbar(self._view.viewport())
+        self._edit_toolbar = et
+        et.fontSizeChanged.connect(
+            lambda size: self._push_edit_prop("font_size", int(size))
+        )
+        et.boldToggled.connect(
+            lambda on: self._push_edit_prop("bold", bool(on))
+        )
+        et.italicToggled.connect(
+            lambda on: self._push_edit_prop("italic", bool(on))
+        )
+        et.alignPicked.connect(
+            lambda align: self._push_edit_prop("align", align)
+        )
+        et.borderPicked.connect(
+            lambda border: self._push_edit_prop("border", border)
+        )
+        et.symbolPicked.connect(self._insert_symbol_in_edit)
+        et.tolerancePicked.connect(self._insert_tolerance_in_edit)
+        et.refocusRequested.connect(self._refocus_text_edit)
+        self._scene.textEditingStarted.connect(self._on_text_editing_started)
+        self._scene.textEditingFinished.connect(self._on_text_editing_finished)
+
         # Stability: hide the pill during interactive drags/resizes and
         # re-show it (repositioned) on release; refresh it after every
         # undo-stack change so its buttons track the item's real state.
@@ -928,12 +959,7 @@ class MainWindow(QMainWindow):
         # know about.
         for items in self._page_items.values():
             for it in items:
-                if isinstance(it, GdtAnnotationItem):
-                    it.set_edit_callback(self._open_gdt_editor)
-                elif isinstance(it, DimensionAnnotationItem):
-                    it.set_edit_callback(self._open_dimension_editor)
-                elif isinstance(it, StickyNoteItem):
-                    it.set_edit_callback(self._open_note_editor)
+                self._hook_item_callbacks(it)
         self._is_untitled = untitled
         self._doc_structure_dirty = False
         if add_to_recent:
@@ -945,6 +971,25 @@ class MainWindow(QMainWindow):
         # Defer fit to let the layout settle when called during startup.
         QTimer.singleShot(0, self._view.zoom_to_fit)
         self._update_actions_enabled()
+
+    def _hook_item_callbacks(self, item: AnnotationItem) -> None:
+        """Attach the per-item hooks an item's origin cannot know about.
+
+        Every annotation that enters the window from somewhere other
+        than its own tool -- PDF reopen, insert-PDF, paste/duplicate --
+        goes through here: the double-click editors for GD&T, Dimension
+        and sticky notes, and the edit-session relay that raises the
+        contextual edit bar over a text (callouts included, they derive
+        from TextAnnotationItem).
+        """
+        if isinstance(item, GdtAnnotationItem):
+            item.set_edit_callback(self._open_gdt_editor)
+        elif isinstance(item, DimensionAnnotationItem):
+            item.set_edit_callback(self._open_dimension_editor)
+        elif isinstance(item, StickyNoteItem):
+            item.set_edit_callback(self._open_note_editor)
+        elif isinstance(item, TextAnnotationItem):
+            self._scene.hook_text_item(item)
 
     # ------------------------------------------------------------------
     # save / save as
@@ -1124,6 +1169,7 @@ class MainWindow(QMainWindow):
         self._cancel_dimension_editor()
         self._cancel_note_editor()
         self._selection_toolbar.hide()
+        self._close_edit_toolbar()
         if self._doc is not None:
             self._doc.close()
         self._doc = None
@@ -1195,12 +1241,7 @@ class MainWindow(QMainWindow):
             for idx in range(first_new, self._doc.page_count):
                 items = inserted.get(idx, [])
                 for it in items:
-                    if isinstance(it, GdtAnnotationItem):
-                        it.set_edit_callback(self._open_gdt_editor)
-                    elif isinstance(it, DimensionAnnotationItem):
-                        it.set_edit_callback(self._open_dimension_editor)
-                    elif isinstance(it, StickyNoteItem):
-                        it.set_edit_callback(self._open_note_editor)
+                    self._hook_item_callbacks(it)
                 self._page_items[idx] = items
         except Exception:
             pass
@@ -1411,6 +1452,7 @@ class MainWindow(QMainWindow):
         self._commit_gdt_editor_if_open()
         self._commit_dimension_editor_if_open()
         self._commit_note_editor_if_open()
+        self._close_edit_toolbar()
 
         # Stash the leaving page's annotations before swapping the pixmap.
         if not _is_initial and self._scene.page_item() is not None:
@@ -1493,6 +1535,7 @@ class MainWindow(QMainWindow):
         self._position_dimension_editor()
         self._position_note_editor()
         self._position_selection_toolbar()
+        self._position_edit_toolbar()
 
     def _on_view_scrolled(self, _value: int) -> None:
         if hasattr(self, "_hires_timer"):
@@ -1501,6 +1544,7 @@ class MainWindow(QMainWindow):
         self._position_dimension_editor()
         self._position_note_editor()
         self._position_selection_toolbar()
+        self._position_edit_toolbar()
 
     def _maybe_rerender_for_zoom(self, factor: float) -> None:
         """Hysteretic high-DPI re-render.
@@ -1726,8 +1770,10 @@ class MainWindow(QMainWindow):
     def _on_drag_state(self, active: bool) -> None:
         if active:
             self._selection_toolbar.hide()
+            self._edit_toolbar.hide()
         else:
             self._update_selection_toolbar()
+            self._position_edit_toolbar()
 
     # ------------------------------------------------------------------
     # selection pill handlers
@@ -1843,6 +1889,101 @@ class MainWindow(QMainWindow):
         toolbar.raise_()
 
     # ------------------------------------------------------------------
+    # contextual edit bar (shown while an item is being edited)
+    # ------------------------------------------------------------------
+    def _on_text_editing_started(self, item: TextAnnotationItem) -> None:
+        self._text_edit_item = item
+        self._edit_toolbar.set_context(
+            item, icon_color=self._gdt_icon_color()
+        )
+        self._position_edit_toolbar()
+
+    def _on_text_editing_finished(self, item: TextAnnotationItem) -> None:
+        if self._text_edit_item is not item:
+            return
+        self._close_edit_toolbar()
+
+    def _close_edit_toolbar(self) -> None:
+        self._text_edit_item = None
+        self._edit_toolbar.set_context(None)
+        self._edit_toolbar.hide()
+
+    def _position_edit_toolbar(self) -> None:
+        item = self._text_edit_item
+        toolbar = self._edit_toolbar
+        if item is None or item.scene() is None:
+            toolbar.hide()
+            return
+        toolbar.adjustSize()
+        rect = item.mapToScene(item.content_rect()).boundingRect()
+        vp = self._view.viewport()
+        above = self._view.mapFromScene(rect.topLeft())
+        below = self._view.mapFromScene(rect.bottomLeft())
+        x = above.x()
+        y = above.y() - toolbar.height() - 8
+        if y < 4:
+            y = below.y() + 8
+        x = max(4, min(x, vp.width() - toolbar.width() - 4))
+        y = max(4, min(y, vp.height() - toolbar.height() - 4))
+        toolbar.move(int(x), int(y))
+        toolbar.show()
+        toolbar.raise_()
+
+    def _refocus_text_edit(self) -> None:
+        """Hand the caret back after one of the bar's menus closed."""
+        item = self._text_edit_item
+        if item is None or item.scene() is None:
+            return
+        self._view.setFocus()
+        item.refocus_editor()
+
+    def _push_edit_prop(self, name: str, value: object) -> None:
+        """Apply a style property of the item being edited, undoably.
+
+        Same contract as the Properties dock (`ChangePropsCommand`), so
+        the bar and the dock produce interchangeable undo entries.
+        """
+        item = self._text_edit_item
+        if item is None:
+            return
+        try:
+            old = getattr(item, name)()
+        except AttributeError:
+            return
+        if old == value:
+            return
+        cmd = ChangePropsCommand([(item, name, old, value)])
+        stack = self._undo_group.activeStack()
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+        self._position_edit_toolbar()
+        self._refocus_text_edit()
+
+    def _insert_symbol_in_edit(self, symbol: str) -> None:
+        """Insert a character at the caret.
+
+        No command is pushed: the edit session is the undo boundary for
+        content (typing is not undoable step by step either, the whole
+        text commits when the session ends).
+        """
+        item = self._text_edit_item
+        if item is None:
+            return
+        item.insert_symbol(symbol)
+        self._position_edit_toolbar()
+        self._refocus_text_edit()
+
+    def _insert_tolerance_in_edit(self, tol: object) -> None:
+        item = self._text_edit_item
+        if item is None:
+            return
+        item.insert_tolerance(tol)
+        self._position_edit_toolbar()
+        self._refocus_text_edit()
+
+    # ------------------------------------------------------------------
     # clipboard / duplicate / z-order / context menu
     # ------------------------------------------------------------------
     def _copy_selected(self) -> None:
@@ -1877,12 +2018,7 @@ class MainWindow(QMainWindow):
             except NotImplementedError:
                 continue
             c.setPos(c.pos().x() + offset_x, c.pos().y() + offset_y)
-            if isinstance(c, GdtAnnotationItem):
-                c.set_edit_callback(self._open_gdt_editor)
-            elif isinstance(c, DimensionAnnotationItem):
-                c.set_edit_callback(self._open_dimension_editor)
-            elif isinstance(c, StickyNoteItem):
-                c.set_edit_callback(self._open_note_editor)
+            self._hook_item_callbacks(c)
             clones.append(c)
         if not clones:
             return

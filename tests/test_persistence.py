@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -32,6 +33,12 @@ from annoter.model.styles import (  # noqa: E402
     DashStyle,
     EndStyle,
     TextAlign,
+)
+from annoter.model.tolerance import Tolerance  # noqa: E402
+from annoter.model.tolerance import (  # noqa: E402
+    # Aliased: `model.dimension` exports a same-named enum for the
+    # standalone Dimension tool, already imported above.
+    ToleranceMode as InlineToleranceMode,
 )
 from annoter.services.pdf_export import (  # noqa: E402
     read_annotations,
@@ -561,6 +568,180 @@ def test_text_props_roundtrip(qapp, blank_doc) -> None:
     assert t.align() is TextAlign.CENTER
 
 
+# ----------------------------------------------------------------------
+# inline tolerance runs inside a text annotation (three tiers)
+# ----------------------------------------------------------------------
+def _first_annot(page: fitz.Page) -> fitz.Annot:
+    """The page has to stay referenced by the caller: an annot whose
+    page is collected raises 'not bound to any page' on every access."""
+    return next(page.annots())
+
+
+def _subject_props(annot: fitz.Annot) -> dict:
+    return json.loads((annot.info or {}).get("subject") or "{}")
+
+
+def _appearance_resources(doc: fitz.Document, annot: fitz.Annot) -> str:
+    """The /AP/N form's /Resources as text ('' when there is no form)."""
+    ap = doc.xref_get_key(annot.xref, "AP/N")
+    if ap[0] != "xref":
+        return ""
+    ap_xref = int(ap[1].split()[0])
+    return doc.xref_get_key(ap_xref, "Resources")[1] or ""
+
+
+def test_plain_text_writes_no_runs_payload(qapp, blank_doc) -> None:
+    """Tier 1: text without runs must keep producing the exact same
+    payload as before inline tolerances existed."""
+    item = TextAnnotationItem(QPointF(50, 50), "Percer avant soudure")
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = _first_annot(page)
+    assert annot.type[1] == "FreeText"
+    assert "runs" not in _subject_props(annot)
+    # No rasterized appearance either: the native FreeText is correct.
+    assert "AnnoterAP" not in _appearance_resources(reopened, annot)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    restored = out[0][0]
+    assert isinstance(restored, TextAnnotationItem)
+    assert restored.text() == "Percer avant soudure"
+    assert restored.has_tolerance_runs() is False
+
+
+def test_text_symmetric_run_roundtrip(qapp, blank_doc) -> None:
+    """Tier 2: symmetric runs stay native FreeText (no appearance
+    override), but reopen as editable runs rather than flat text."""
+    item = TextAnnotationItem(QPointF(50, 50), "Bore ")
+    item.insert_tolerance(
+        Tolerance(mode=InlineToleranceMode.SYMMETRIC, value="0.05")
+    )
+    expected_runs = item.rich_runs()
+    expected_text = item.text()
+    assert item.has_stacked_runs() is False
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = _first_annot(page)
+    assert annot.type[1] == "FreeText"
+    # /Contents keeps the plain form for external viewers and search.
+    assert "±0.05" in (annot.info or {}).get("content", "")
+    assert _subject_props(annot)["runs"] == expected_runs
+    assert "AnnoterAP" not in _appearance_resources(reopened, annot)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    restored = out[0][0]
+    assert isinstance(restored, TextAnnotationItem)
+    assert restored.has_tolerance_runs() is True
+    assert restored.has_stacked_runs() is False
+    assert restored.rich_runs() == expected_runs
+    assert restored.text() == expected_text
+
+
+def test_text_bilateral_run_roundtrip(qapp, blank_doc) -> None:
+    """Tier 3: a stacked run has no plain-string form, so the annot also
+    carries a rasterized appearance of the real two-line layout."""
+    item = TextAnnotationItem(QPointF(60, 70), "Percer 12 ")
+    item.insert_tolerance(
+        Tolerance(
+            mode=InlineToleranceMode.BILATERAL, upper="0.10", lower="0.05"
+        )
+    )
+    expected_runs = item.rich_runs()
+    expected_text = item.text()
+    assert item.has_stacked_runs() is True
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = _first_annot(page)
+    assert annot.type[1] == "FreeText"
+    assert "+0.10/-0.05" in (annot.info or {}).get("content", "")
+    assert _subject_props(annot)["runs"] == expected_runs
+    # Our raster, not MuPDF's flattened text rendering.
+    assert "AnnoterAP" in _appearance_resources(reopened, annot)
+    # And it actually draws something inside the rect.
+    pix = reopened[0].get_pixmap(clip=annot.rect, matrix=fitz.Matrix(3, 3))
+    dark = sum(1 for b in pix.samples if b < 128)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    assert dark > 50, "appearance stream did not draw the runs"
+    restored = out[0][0]
+    assert isinstance(restored, TextAnnotationItem)
+    assert restored.has_tolerance_runs() is True
+    assert restored.has_stacked_runs() is True
+    assert restored.rich_runs() == expected_runs
+    assert restored.text() == expected_text
+
+
+def test_text_mixed_runs_roundtrip(qapp, blank_doc) -> None:
+    """Text, both tolerance modes and a line break, in order."""
+    item = TextAnnotationItem(QPointF(60, 70), "Percer ")
+    item.insert_tolerance(
+        Tolerance(mode=InlineToleranceMode.SYMMETRIC, value="0.05")
+    )
+    item.insert_symbol(" et ")
+    item.insert_tolerance(
+        Tolerance(
+            mode=InlineToleranceMode.BILATERAL, upper="0.10", lower="0.05"
+        )
+    )
+    item.insert_symbol("\navant soudure")
+    expected_runs = item.rich_runs()
+    # Guard the fixture itself: the assertions below are only meaningful
+    # if the source really holds both modes and a break.
+    assert expected_runs == [
+        {"t": "Percer "},
+        {"tol": {"mode": "symmetric", "value": "0.05"}},
+        {"t": " et "},
+        {"tol": {"mode": "bilateral", "upper": "0.10", "lower": "0.05"}},
+        {"br": 1},
+        {"t": "avant soudure"},
+    ]
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    restored = out[0][0]
+    assert isinstance(restored, TextAnnotationItem)
+    assert restored.rich_runs() == expected_runs
+    assert restored.text() == item.text()
+
+
+def test_text_runs_restored_at_the_saved_font_size(
+    qapp, blank_doc
+) -> None:
+    """Runs are rasterized against the item's current font, so the font
+    props must be restored *before* them -- otherwise the reopened runs
+    (and the text typed after one, which carries an explicit char
+    format) come back at the default size and the frame shrinks."""
+    item = TextAnnotationItem(QPointF(40, 40), "Percer ")
+    item.set_font_size(20)
+    item.insert_tolerance(
+        Tolerance(
+            mode=InlineToleranceMode.BILATERAL, upper="0.10", lower="0.05"
+        )
+    )
+    item.insert_symbol(" avant soudure")
+    expected = item.content_rect()
+    assert expected.width() > 0 and expected.height() > 0
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    restored = out[0][0]
+    assert isinstance(restored, TextAnnotationItem)
+    assert restored.font_size() == 20
+    got = restored.content_rect()
+    assert got.width() == pytest.approx(expected.width(), abs=1.0)
+    assert got.height() == pytest.approx(expected.height(), abs=1.0)
+
+
 def test_gdt_font_size_roundtrip(qapp, blank_doc) -> None:
     state = GdtState(
         characteristic=Characteristic.POSITION,
@@ -648,3 +829,48 @@ def test_color_roundtrip(qapp, blank_doc) -> None:
     assert abs(restored_color.red() - 0x43) <= 2
     assert abs(restored_color.green() - 0xA0) <= 2
     assert abs(restored_color.blue() - 0x47) <= 2
+
+
+def test_boxed_text_saves_without_aborting(qapp, blank_doc) -> None:
+    """A boxed text annotation must not take the whole save down.
+
+    PyMuPDF 1.27 rejects `border_color` on a FreeText ("cannot set
+    border_color if rich_text is False") while offering no `rich_text`
+    argument, so an unguarded call aborts `write_annotations` for the
+    entire page. The border is Annoter-side anyway (it paints the
+    outline from the /Subject JSON), so the save degrades to a
+    borderless native annot instead of failing.
+    """
+    from annoter.model.styles import TextBorder
+
+    item = TextAnnotationItem(QPointF(40, 40), "Revision A")
+    item.set_border(TextBorder.BOX)
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = _first_annot(page)
+    assert annot.type[1] == "FreeText"
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    restored = out[0][0]
+    assert isinstance(restored, TextAnnotationItem)
+    assert restored.text() == "Revision A"
+    # The outline itself round-trips through the JSON payload.
+    assert restored.border() is TextBorder.BOX
+
+
+def test_boxed_line_labels_save_without_aborting(qapp, blank_doc) -> None:
+    """Same guard on the line-label companion FreeText annots."""
+    from annoter.model.styles import TextBorder
+    from annoter.views.items.lines import LineItem
+
+    line = LineItem(QPointF(10, 10), QPointF(120, 60))
+    line.set_end_label("A")
+    line.set_end_label_border(TextBorder.BOX)
+    write_annotations(blank_doc, {0: [line]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    assert len(list(page.annots())) >= 1
+    reopened.close()

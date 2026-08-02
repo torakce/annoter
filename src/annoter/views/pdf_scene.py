@@ -58,6 +58,12 @@ class PdfScene(QGraphicsScene):
     # lets chrome like the floating selection pill hide during the
     # gesture and re-show (repositioned) on release.
     interactiveDragChanged = Signal(bool)
+    # Relayed edit sessions of text items (payload: the item). Text items
+    # are born in several places -- tool click, PDF reopen, paste,
+    # insert-PDF -- so `hook_text_item` funnels them all through here and
+    # MainWindow gets one connection point for the contextual edit bar.
+    textEditingStarted = Signal(object)
+    textEditingFinished = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1011,12 +1017,27 @@ class PdfScene(QGraphicsScene):
     # ------------------------------------------------------------------
     # text spawning (no command pushed until edit is confirmed)
     # ------------------------------------------------------------------
+    def hook_text_item(self, item: TextAnnotationItem) -> None:
+        """Relay a text item's edit-session signals to the scene's.
+
+        Idempotent, so the creation sites (tool click, reopen, paste,
+        insert-PDF) can all call it without double-emitting.
+        """
+        if getattr(item, "_edit_signals_hooked", False):
+            return
+        item._edit_signals_hooked = True
+        item.editingStarted.connect(self.textEditingStarted)
+        item.editingFinished.connect(
+            lambda _txt, it=item: self.textEditingFinished.emit(it)
+        )
+
     def _spawn_text_at(self, pos: QPointF) -> None:
         if self._page_item is None:
             return
         item = TextAnnotationItem(pos)
         self._apply_current_style(item)
         item.setParentItem(self._page_item)
+        self.hook_text_item(item)
         item.editingFinished.connect(
             lambda txt, it=item: self._on_text_edit_finished(it, txt)
         )
@@ -1025,6 +1046,7 @@ class PdfScene(QGraphicsScene):
     def _finish_callout_draft(self, item: CalloutItem) -> None:
         # A click without a real drag leaves the tip at its default
         # offset (set in the ctor), so the leader is always visible.
+        self.hook_text_item(item)
         item.editingFinished.connect(
             lambda txt, it=item: self._on_text_edit_finished(it, txt)
         )

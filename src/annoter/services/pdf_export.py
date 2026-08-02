@@ -9,7 +9,15 @@ Mapping (M4):
     LineItem           -> Line
     ArrowItem          -> Line + endStyle OpenArrow
     FreehandItem       -> Ink
-    TextAnnotationItem -> FreeText  (Helvetica only, for Acrobat compat)
+    TextAnnotationItem -> FreeText  (Helvetica only, for Acrobat compat).
+                          Inline tolerance runs persist in three tiers:
+                          no run -> plain FreeText; symmetric runs only
+                          -> FreeText plus a "runs" list in the
+                          /Subject JSON (/Contents already reads
+                          "±0.05", so no appearance is needed); at
+                          least one stacked bilateral run -> same plus
+                          a rasterized appearance stream, because the
+                          two stacked lines have no plain-string form
     CalloutItem        -> FreeText + /IT /FreeTextCallout + /CL leader
                           line (leader geometry also in /Subject JSON, the
                           authoritative source on reopen)
@@ -282,6 +290,12 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
         p["align"] = item.align().value
         if item.border() is not TextBorder.NONE:
             p["border"] = item.border().value
+        if item.has_tolerance_runs():
+            # Only written when there is something to restore, so text
+            # without inline runs keeps producing the exact same JSON
+            # as before this feature. /Contents still carries the
+            # degraded plain form for external viewers and text search.
+            p["runs"] = item.rich_runs()
     elif isinstance(item, GdtAnnotationItem):
         p["font_size"] = int(item.font_size())
     elif isinstance(item, DimensionAnnotationItem):
@@ -397,6 +411,14 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
                 item.set_border(TextBorder(props["border"]))
             except ValueError:
                 pass
+        runs = props.get("runs")
+        if isinstance(runs, list):
+            # Last, deliberately: `set_rich_runs` rasterizes every
+            # inline run against the item's *current* font and colour,
+            # so the font props above (and the colour, applied by the
+            # caller before this function) must already be in place or
+            # the runs come back rendered at the wrong size.
+            item.set_rich_runs(runs)
     elif isinstance(item, GdtAnnotationItem):
         if "font_size" in props:
             item.set_font_size(int(props["font_size"]))
@@ -648,7 +670,8 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         rect.adjust(0, 0, 4.0, 4.0)
         rect_pt = _rect_pt(rect, dpi)
         fontname = _TEXT_FONT_TO_PDF.get(item.font_family(), "Helv")
-        annot = page.add_freetext_annot(
+        annot = _add_freetext_annot(
+            page,
             rect_pt,
             item.text(),
             fontsize=int(item.font_size()),
@@ -660,11 +683,56 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
             border_color=(
                 color if item.border() is TextBorder.BOX else None
             ),
-            fill_color=None,
         )
         annot.set_info(title=_OWNER_TAG, subject=subject)
         annot.update()
+        if item.has_stacked_runs():
+            # A stacked bilateral run has no plain-string equivalent,
+            # so MuPDF's generated appearance would show the flattened
+            # "+0.10/-0.05" instead of the two stacked lines. Give
+            # external viewers the real layout; Annoter still rebuilds
+            # the editable runs from the /Subject JSON. Best-effort,
+            # like the GD&T frame: never let it break a save.
+            try:
+                _set_rasterized_appearance(annot, item, dpi)
+            except Exception:
+                pass
         return
+
+
+def _add_freetext_annot(
+    page: fitz.Page,
+    rect_pt,  # noqa: ANN001
+    text: str,
+    *,
+    fontsize: int,
+    fontname: str,
+    text_color,  # noqa: ANN001
+    border_color=None,  # noqa: ANN001
+):  # noqa: ANN201
+    """`page.add_freetext_annot` that tolerates a bordered FreeText.
+
+    PyMuPDF 1.27 rejects `border_color` outright -- "cannot set
+    border_color if rich_text is False" -- while not accepting a
+    `rich_text` argument either, so a boxed text annotation would abort
+    the entire save. Fall back to a borderless annot: Annoter paints
+    the outline itself from the /Subject JSON, so only external viewers
+    lose it, and only on the PyMuPDF versions carrying the bug.
+    """
+    kwargs = dict(
+        fontsize=fontsize,
+        fontname=fontname,
+        text_color=text_color,
+        fill_color=None,
+    )
+    if border_color is not None:
+        try:
+            return page.add_freetext_annot(
+                rect_pt, text, border_color=border_color, **kwargs
+            )
+        except (ValueError, TypeError):
+            pass
+    return page.add_freetext_annot(rect_pt, text, **kwargs)
 
 
 def _write_line_label_companions(
@@ -682,14 +750,14 @@ def _write_line_label_companions(
     for local_rect, text, border in item._label_rects():
         rect = _QRectF(local_rect).translated(pos.x(), pos.y())
         rect.adjust(0, 0, 4.0, 4.0)
-        annot = page.add_freetext_annot(
+        annot = _add_freetext_annot(
+            page,
             _rect_pt(rect, dpi),
             text,
             fontsize=11,
             fontname="Helv",
             text_color=color,
             border_color=(color if border is TextBorder.BOX else None),
-            fill_color=None,
         )
         annot.set_info(
             title=_OWNER_TAG,
@@ -740,34 +808,66 @@ def _set_callout_line(
 _GDT_AP_PX_PER_PT = 3.0  # raster density of the appearance image
 
 
+def _paint_source_rect(item) -> QRectF:
+    """Local rect the appearance raster has to cover.
+
+    It must be the rect `_scene_rect` derives the annot geometry from,
+    or the image lands offset inside the appearance stream. Text items
+    paint an optional outline *outside* their content rect, so they use
+    `boundingRect` -- the caller deselects first, which drops the
+    handle margin that rect would otherwise carry.
+    """
+    if isinstance(item, TextAnnotationItem):
+        return item.boundingRect()
+    return item.content_rect()
+
+
 def _rasterize_item_planes(
     item, dpi: int
-) -> tuple[bytes, bytes, int, int]:
-    """Rasterize an item's `content_rect` to raw (RGB, alpha) planes.
+) -> tuple[bytes, bytes, int, int, QRectF]:
+    """Rasterize an item's painted rect to raw (RGB, alpha) planes.
 
     Works for any item exposing `content_rect()` and `paint()`; used for
-    GD&T frames and stamps, whose native annot appearance we replace so
-    external viewers show the real glyphs."""
-    src = item.content_rect()
-    # Item units are page pixels at `dpi`; target density is
-    # _GDT_AP_PX_PER_PT device pixels per PDF point.
-    scale = _GDT_AP_PX_PER_PT * 72.0 / dpi
-    w = max(1, math.ceil(src.width() * scale))
-    h = max(1, math.ceil(src.height() * scale))
-    img = QImage(w, h, QImage.Format_RGBA8888)
-    img.fill(Qt.transparent)
-    painter = QPainter(img)
-    painter.setRenderHint(QPainter.Antialiasing, True)
-    painter.setRenderHint(QPainter.TextAntialiasing, True)
-    painter.scale(scale, scale)
-    painter.translate(-src.left(), -src.top())
+    GD&T frames, stamps and text carrying stacked tolerance runs, whose
+    native annot appearance we replace so external viewers show the
+    real glyphs. Returns the source rect alongside the planes so the
+    caller can place the image at exactly the geometry it rendered."""
     was_selected = item.isSelected()
     if was_selected:
-        item.setSelected(False)  # keep the selection marker out of the AP
+        # Before measuring, not just before painting: the selection
+        # marker must stay out of the AP, and a selected item's
+        # boundingRect is inflated by the handle margin.
+        item.setSelected(False)
     try:
-        item.paint(painter, QStyleOptionGraphicsItem(), None)
+        src = _paint_source_rect(item)
+        # Item units are page pixels at `dpi`; target density is
+        # _GDT_AP_PX_PER_PT device pixels per PDF point.
+        scale = _GDT_AP_PX_PER_PT * 72.0 / dpi
+        w = max(1, math.ceil(src.width() * scale))
+        h = max(1, math.ceil(src.height() * scale))
+        img = QImage(w, h, QImage.Format_RGBA8888)
+        img.fill(Qt.transparent)
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        painter.scale(scale, scale)
+        painter.translate(-src.left(), -src.top())
+        try:
+            item.paint(painter, QStyleOptionGraphicsItem(), None)
+            # Child items paint themselves in a real scene, so an item
+            # that delegates its content to one (TextAnnotationItem
+            # holds the glyphs in an inner QGraphicsTextItem) would
+            # otherwise rasterize empty.
+            for child in item.childItems():
+                if not child.isVisible():
+                    continue
+                painter.save()
+                painter.translate(child.pos())
+                child.paint(painter, QStyleOptionGraphicsItem(), None)
+                painter.restore()
+        finally:
+            painter.end()
     finally:
-        painter.end()
         if was_selected:
             item.setSelected(True)
 
@@ -780,7 +880,7 @@ def _rasterize_item_planes(
         alpha[y * w : (y + 1) * w] = row[3::4]
         del row[3::4]
         rgb[y * w * 3 : (y + 1) * w * 3] = row
-    return bytes(rgb), bytes(alpha), w, h
+    return bytes(rgb), bytes(alpha), w, h, src
 
 
 def _set_rasterized_appearance(
@@ -796,7 +896,7 @@ def _set_rasterized_appearance(
     """
     page = annot.parent
     doc = page.parent
-    rgb, alpha, w, h = _rasterize_item_planes(item, dpi)
+    rgb, alpha, w, h, src = _rasterize_item_planes(item, dpi)
 
     smask_xref = doc.get_new_xref()
     doc.update_object(
@@ -823,8 +923,17 @@ def _set_rasterized_appearance(
     w_pt, h_pt = rect.width, rect.height
     # /Rect is padded by MuPDF (border width); draw the image at the
     # exact frame rect so it lines up with the stored geometry. AP form
-    # space has its origin at the rect's bottom-left with y up.
-    exact = _rect_pt(_scene_rect(item), dpi)
+    # space has its origin at the rect's bottom-left with y up. The
+    # rect comes from the rasterizer rather than `_scene_rect` so the
+    # placement always matches what was actually drawn (they differ for
+    # a text item that happened to be selected at save time).
+    pos = item.pos()
+    exact = _rect_pt(
+        QRectF(
+            src.x() + pos.x(), src.y() + pos.y(), src.width(), src.height()
+        ),
+        dpi,
+    )
     x = exact.x0 - rect.x0
     y = rect.y1 - exact.y1
     content = (

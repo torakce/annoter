@@ -22,7 +22,14 @@ from PySide6.QtWidgets import (
 )
 
 from annoter.model.styles import HandleRole, TextAlign, TextBorder
+from annoter.model.tolerance import Tolerance, ToleranceMode
 from annoter.views.items.base import AnnotationItem
+from annoter.views.items.text_objects import (
+    insert_tolerance,
+    iter_fragments,
+    refresh_tolerances,
+    tolerance_from_format,
+)
 
 
 _BORDER_PAD = 3.0  # gap between the text frame and its optional outline
@@ -60,9 +67,12 @@ _QT_ALIGN: dict[TextAlign, Qt.AlignmentFlag] = {
 
 
 class _TextNotifier(QObject):
-    """QObject relay so the plain QGraphicsItem can expose a Qt signal."""
+    """QObject relay so the plain QGraphicsItem can expose Qt signals."""
 
     editingFinished = Signal(str)
+    # Emitted when the item enters edit mode, so MainWindow can raise
+    # the contextual edit toolbar over it.
+    editingStarted = Signal(object)  # the TextAnnotationItem
 
 
 class _InnerTextItem(QGraphicsTextItem):
@@ -95,6 +105,7 @@ class TextAnnotationItem(AnnotationItem):
         super().__init__(parent)
         self._notifier = _TextNotifier()
         self.editingFinished = self._notifier.editingFinished
+        self.editingStarted = self._notifier.editingStarted
 
         self._font_family: str = DEFAULT_TEXT_FONT_FAMILY
         self._font_size: int = DEFAULT_TEXT_POINT_SIZE
@@ -172,6 +183,10 @@ class TextAnnotationItem(AnnotationItem):
         font.setBold(self._bold)
         font.setItalic(self._italic)
         self._inner.setFont(font)
+        # Inline runs are rasterized against the font they were made
+        # with, so they have to be redrawn or they stop matching the
+        # text around them.
+        self._refresh_runs()
         self.update()
 
     def _sync_inner_align(self) -> None:
@@ -184,12 +199,141 @@ class TextAnnotationItem(AnnotationItem):
     # text
     # ------------------------------------------------------------------
     def text(self) -> str:
-        return self._inner.toPlainText()
+        """Plain-text form; a tolerance run renders as "+0.10/-0.05".
+
+        This is what the annotation list, the empty-rollback check and
+        the PDF `/Contents` string all read, so inline runs must degrade
+        to something a human (and a text search) can make sense of --
+        never the bare object-replacement character Qt stores.
+        """
+        doc = self._inner.document()
+        lines: list[str] = []
+        block = doc.begin()
+        while block.isValid():
+            buf: list[str] = []
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                if fragment.isValid():
+                    tol = tolerance_from_format(fragment.charFormat())
+                    buf.append(
+                        tol.plain() if tol is not None else fragment.text()
+                    )
+                it += 1
+            lines.append("".join(buf))
+            block = block.next()
+        return "\n".join(lines)
 
     def set_text(self, text: str) -> None:
         self.prepareGeometryChange()
         self._inner.setPlainText(text)
         self.update()
+
+    # ------------------------------------------------------------------
+    # inline runs (symbols and tolerances)
+    # ------------------------------------------------------------------
+    def _insertion_cursor(self) -> QTextCursor:
+        """Caret to insert at: the live one while editing, else the end.
+
+        Outside edit mode the item's cursor sits at position 0 (that is
+        where `setPlainText` leaves it), so inserting there would prefix
+        the annotation instead of appending to it.
+        """
+        cursor = self._inner.textCursor()
+        if self._inner.textInteractionFlags() == Qt.NoTextInteraction:
+            cursor.movePosition(QTextCursor.End)
+        return cursor
+
+    def insert_symbol(self, symbol: str) -> None:
+        """Insert a plain character at the caret (or at the end)."""
+        if not symbol:
+            return
+        self.prepareGeometryChange()
+        cursor = self._insertion_cursor()
+        cursor.insertText(symbol)
+        self._inner.setTextCursor(cursor)
+        self.update()
+
+    def insert_tolerance(self, tol: Tolerance) -> None:
+        """Insert a tolerance run at the caret (or at the end)."""
+        if tol.is_empty():
+            return
+        self.prepareGeometryChange()
+        cursor = self._insertion_cursor()
+        insert_tolerance(cursor, tol, self._inner.font(), self._color)
+        self._inner.setTextCursor(cursor)
+        self.update()
+
+    def tolerances(self) -> list[Tolerance]:
+        return [
+            tol
+            for _b, fragment in iter_fragments(self._inner.document())
+            if (tol := tolerance_from_format(fragment.charFormat())) is not None
+        ]
+
+    def has_tolerance_runs(self) -> bool:
+        return bool(self.tolerances())
+
+    def has_stacked_runs(self) -> bool:
+        """True when a run cannot be written as a plain PDF string.
+
+        A symmetric tolerance is just "±0.05" and survives as native
+        FreeText; a stacked bilateral one does not, and is what forces
+        the rasterized-appearance path on save.
+        """
+        return any(
+            t.mode is ToleranceMode.BILATERAL for t in self.tolerances()
+        )
+
+    def rich_runs(self) -> list[dict]:
+        """Serialize the document as ordered runs, for PDF persistence."""
+        runs: list[dict] = []
+        doc = self._inner.document()
+        block = doc.begin()
+        first = True
+        while block.isValid():
+            if not first:
+                runs.append({"br": 1})
+            first = False
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                if fragment.isValid():
+                    tol = tolerance_from_format(fragment.charFormat())
+                    if tol is not None:
+                        runs.append({"tol": tol.to_dict()})
+                    elif fragment.text():
+                        runs.append({"t": fragment.text()})
+                it += 1
+            block = block.next()
+        return runs
+
+    def set_rich_runs(self, runs: list[dict]) -> None:
+        """Rebuild the document from `rich_runs` output."""
+        self.prepareGeometryChange()
+        doc = self._inner.document()
+        doc.clear()
+        cursor = QTextCursor(doc)
+        font = self._inner.font()
+        for run in runs:
+            if "br" in run:
+                cursor.insertBlock()
+            elif "tol" in run:
+                insert_tolerance(
+                    cursor, Tolerance.from_dict(run["tol"]), font, self._color
+                )
+            elif "t" in run:
+                cursor.insertText(str(run["t"]))
+        self._sync_inner_align()
+        self.update()
+
+    def _refresh_runs(self) -> None:
+        """Re-render inline runs after a font or colour change."""
+        if refresh_tolerances(
+            self._inner.document(), self._inner.font(), self._color
+        ):
+            self.prepareGeometryChange()
+            self.update()
 
     def begin_edit(self) -> None:
         self._inner.setTextInteractionFlags(Qt.TextEditorInteraction)
@@ -197,6 +341,7 @@ class TextAnnotationItem(AnnotationItem):
         cursor = self._inner.textCursor()
         cursor.movePosition(QTextCursor.End)
         self._inner.setTextCursor(cursor)
+        self.editingStarted.emit(self)
 
     # Alias used by the view's typing-to-edit path so shapes and text
     # items share the same method name.
@@ -229,6 +374,7 @@ class TextAnnotationItem(AnnotationItem):
 
     def _sync_inner_color(self) -> None:
         self._inner.setDefaultTextColor(self._color)
+        self._refresh_runs()
 
     # ------------------------------------------------------------------
     # geometry
@@ -426,7 +572,7 @@ class TextAnnotationItem(AnnotationItem):
         event.accept()
 
     def clone(self) -> "TextAnnotationItem":
-        c = TextAnnotationItem(QPointF(self.pos()), self.text())
+        c = TextAnnotationItem(QPointF(self.pos()), "")
         # Override _copy_base_style_into's setPos because the ctor already
         # took the position; keep style copies in sync.
         c.set_color(self.color())
@@ -438,6 +584,10 @@ class TextAnnotationItem(AnnotationItem):
         c.set_italic(self._italic)
         c.set_align(self._align)
         c.set_border(self._border)
+        # Rebuild from runs, not from plain text: a copied annotation
+        # must keep its tolerance runs editable, not flatten them to
+        # "+0.10/-0.05" characters.
+        c.set_rich_runs(self.rich_runs())
         if self._text_width > 0:
             c._text_width = self._text_width
             c._inner.setTextWidth(self._text_width)

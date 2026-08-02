@@ -753,6 +753,85 @@ Six items from the "Pour plus tard" discussion, landed as one lot:
   `MainWindow` (place, edit, undo/redo, re-edit, cancel-restores-state,
   save+reopen round-trip, untouched-placement rollback).
 
+### Contextual edit toolbar + inline tolerance runs (2026-08-03)
+
+Per user feedback, placing a dimension is **not** a tool of its own: it
+is something you do while writing the text that carries it. Same
+principle that already removed colour/stroke from the tools dock --
+one function, one place.
+
+- **`EditToolbar`** (`views/edit_toolbar.py`) is the editing
+  counterpart of the selection pill: `SelectionToolbar` is contextual
+  on what is *selected*, this one on what is being *edited*. Identical
+  contract (dumb widget, semantic signals, `set_context(item)` rebuilds
+  per type, MainWindow owns behaviour and the undo commands), including
+  the `SetFixedSize` + `invalidate/activate/resize` dance and the
+  `setParent(None)`-before-`deleteLater` rule. Only the text branch is
+  implemented; the extension point for other kinds is marked in
+  `set_context`.
+- **Focus was the whole difficulty.** A `QMenu` popup pulls keyboard
+  focus off the graphics view, the scene clears its focus item, and the
+  old `focusOutEvent` read that as "the user finished editing" -- which
+  emitted `editingFinished` and **rolled back a still-empty new
+  annotation the moment the user opened the Symbol menu**.
+  `_InnerTextItem.focusOutEvent` now ignores `Qt.PopupFocusReason`, and
+  `refocus_editor()` hands the caret back without restarting the
+  session or moving the cursor.
+- **`PdfScene.hook_text_item`** (idempotent) funnels every text item's
+  edit signals through two scene signals, so the bar works regardless
+  of where the item came from (tool click, PDF reopen, paste,
+  insert-PDF). `MainWindow._hook_item_callbacks` is the single place
+  that re-attaches per-item hooks for all editable kinds.
+- **Inline tolerance runs** (`model/tolerance.py`,
+  `views/items/text_objects.py`): a tolerance is a run *inside* the
+  text, so the nominal value is just the surrounding characters.
+  `QTextObjectInterface` is the API designed for exactly this, but
+  **`registerHandler` silently fails under PySide6 6.11** --
+  `handlerForObject` returns None right after registering, with every
+  inheritance order, on a bare `QTextDocument` and a live
+  `QGraphicsTextItem` document alike, so the callbacks never fire and
+  the object lays out as a zero-size glyph. The working equivalent is
+  an **inline image carrying custom format properties**: the caret
+  steps over it as one unit, Backspace deletes it whole, it wraps and
+  scales with the text, and the properties keep it re-editable. Cost:
+  it is raster, so it is supersampled 4x and re-rendered on font or
+  colour change. Do not re-attempt the broken API without checking
+  `handlerForObject` first.
+  - Gotcha: a cursor keeps the char format of what it just inserted, so
+    text typed right after a run inherited its properties and was read
+    back as a second tolerance. Fixed on both sides (reset the typing
+    format after inserting; require `isImageFormat()` when reading).
+- **Persistence in three tiers** (`services/pdf_export.py`): plain text
+  is untouched native `FreeText`; symmetric runs stay native (they are
+  literally `±0.05`) but carry a `runs` payload so they reopen
+  editable; only a **stacked bilateral** run adds a rasterized
+  appearance. `_rasterize_item_planes` needed a real fix to support
+  this -- it only called `item.paint()`, which for text draws the
+  outline and nothing else (the glyphs live in a child
+  `QGraphicsTextItem`), so the stream would have been blank; it now
+  also walks child items, deselects *before measuring*, and returns the
+  source rect it used so the image is placed from the same rect.
+  Symbol menu groups WinAnsi-safe glyphs (`Ø`, `°`, `±`) apart from the
+  ISO ones (`⌀`, `□`) that force the raster path.
+- **Save-aborting bug fixed on the way** (would have been exposed by
+  the bar's Border menu): PyMuPDF 1.27 rejects `border_color` on a
+  FreeText -- "cannot set border_color if rich_text is False" -- while
+  not accepting a `rich_text` argument either, so **a boxed text
+  annotation took the entire save down**. `_add_freetext_annot` falls
+  back to a borderless annot; Annoter paints the outline itself from
+  the JSON, so only external viewers lose it, and only on affected
+  PyMuPDF versions.
+- Tests: `tests/test_edit_toolbar.py` (20), tolerance-run cases in
+  `tests/test_persistence.py`, plus two regression tests for the boxed
+  save. Suite at 380.
+
+**Still open**: the standalone Dimension tool from the previous batch
+is now a second way to do the same thing. Retiring it (tool, palette
+entry, `views/items/dimension.py`, `views/dimension_editor.py`,
+`model/dimension.py` and its persistence branch) is the intended
+follow-up; `model/tolerance.py` deliberately duplicates the three-state
+mode enum so that removal is a clean delete.
+
 ### Known remaining issues
 
 - Page rotation is still view-only (see M4 notes).

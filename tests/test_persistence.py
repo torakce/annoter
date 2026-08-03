@@ -453,8 +453,8 @@ def test_gdt_composite_roundtrip(qapp, blank_doc) -> None:
         datum_secondary=DatumRef(["B", "B"]),
         datum_tertiary=DatumRef(["C"], modifier="M"),
         additional_rows=[GdtRow(tolerance_prefix="Ø", tolerance_value="0.5CZ")],
-        upper_text="2x",
-        lower_text="VALID FOR BOTH PARTS",
+        upper_runs=[{"t": "2x"}],
+        lower_runs=[{"t": "VALID FOR BOTH PARTS"}],
         aux_symbol=Characteristic.PARALLELISM,
         aux_text="A-B",
     )
@@ -874,3 +874,78 @@ def test_boxed_line_labels_save_without_aborting(qapp, blank_doc) -> None:
     page = reopened[0]
     assert len(list(page.annots())) >= 1
     reopened.close()
+
+
+def test_gdt_note_with_tolerance_roundtrip(qapp, blank_doc) -> None:
+    """A note above a GD&T frame is rich text: it carries symbols and
+    inline tolerance runs, and comes back editable."""
+    from annoter.model.gdt import GdtState
+    from annoter.model.tolerance import Tolerance as InlineTolerance
+    from annoter.model.tolerance import ToleranceMode as InlineMode
+    from annoter.views.items.gdt import GdtAnnotationItem
+
+    item = GdtAnnotationItem(
+        GdtState(tolerance_value="0.05"), QPointF(60, 60)
+    )
+    note = item.ensure_sub_text("upper")
+    note.insert_symbol("Ø12 ")
+    note.insert_tolerance(
+        InlineTolerance(mode=InlineMode.BILATERAL, upper="0.10", lower="0.05")
+    )
+    item.set_state(item.state_with_sub_text("upper", note.rich_runs()))
+    expected_runs = item.state().upper_runs
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    restored = out[0][0]
+    assert isinstance(restored, GdtAnnotationItem)
+    assert restored.state().upper_runs == expected_runs
+    back = restored.sub_text("upper")
+    assert back is not None
+    assert back.text() == "Ø12 +0.10/-0.05"
+    assert back.has_stacked_runs()
+    # The frame's own data survived alongside the note.
+    assert restored.state().tolerance_value == "0.05"
+
+
+def test_gdt_note_is_rasterized_into_the_appearance(qapp, blank_doc) -> None:
+    """The note lives two levels down (frame -> sub text -> inner text
+    item), so a non-recursive paint walk would write a blank stream."""
+    from annoter.model.gdt import GdtState
+    from annoter.views.items.gdt import GdtAnnotationItem
+
+    item = GdtAnnotationItem(
+        GdtState(tolerance_value="0.05"), QPointF(60, 60)
+    )
+    note = item.ensure_sub_text("upper")
+    note.insert_symbol("2X NOTE")
+    item.set_state(item.state_with_sub_text("upper", note.rich_runs()))
+    write_annotations(blank_doc, {0: [item]}, dpi=150)
+
+    reopened = _save_then_reopen(blank_doc)
+    page = reopened[0]
+    annot = _first_annot(page)
+    pix = annot.get_pixmap(alpha=False)
+    buf = pix.samples
+    dark = sum(1 for i in range(0, len(buf), pix.n) if sum(buf[i : i + 3]) < 600)
+    reopened.close()
+    assert dark > 100, "appearance stream looks blank"
+
+
+def test_legacy_gdt_plain_notes_still_open(qapp, blank_doc) -> None:
+    """PDFs written before the notes became rich text stored them as
+    plain strings; they must reopen as single text runs."""
+    from annoter.model.gdt import GdtState
+
+    state = GdtState.from_dict(
+        {
+            "characteristic": "position",
+            "tolerance_value": "0.1",
+            "upper_text": "4X",
+            "lower_text": "SEE NOTE 3",
+        }
+    )
+    assert state.upper_runs == [{"t": "4X"}]
+    assert state.lower_runs == [{"t": "SEE NOTE 3"}]

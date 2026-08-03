@@ -26,6 +26,7 @@ from annoter.model.gdt import Characteristic, GdtState
 from annoter.model.styles import HandleRole
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.gdt_symbols import symbol_path
+from annoter.views.items.sub_text import SubTextItem
 
 
 _GDT_MIN_FONT_POINTS = 6
@@ -65,6 +66,12 @@ class GdtAnnotationItem(AnnotationItem):
         self._symbol_draws: list[tuple[QRectF, Characteristic]] = []
         self._text_draws: list[tuple[QRectF, str, object]] = []
         self._total_size: QRectF = QRectF()
+        # The notes above / below the frame are real editable text
+        # sub-items, so they take symbols and inline tolerance runs like
+        # any other text. Keyed by role: "upper" / "lower".
+        self._sub_texts: dict[str, SubTextItem] = {}
+        self._sub_text_hook = None  # type: ignore[var-annotated]
+        self._sync_sub_texts()
         self._compute_layout()
         if pos is not None:
             self.setPos(pos)
@@ -78,6 +85,107 @@ class GdtAnnotationItem(AnnotationItem):
     def set_state(self, state: GdtState) -> None:
         self.prepareGeometryChange()
         self._state = state
+        self._sync_sub_texts()
+        self._compute_layout()
+        self.update()
+
+    # ------------------------------------------------------------------
+    # upper / lower notes (editable text sub-items)
+    # ------------------------------------------------------------------
+    SUB_TEXT_ROLES = ("upper", "lower")
+
+    def _runs_for(self, role: str) -> list[dict]:
+        return (
+            self._state.upper_runs
+            if role == "upper"
+            else self._state.lower_runs
+        )
+
+    def _sync_sub_texts(self) -> None:
+        """Bring the sub-items in line with the state's runs.
+
+        A sub-item that is currently being edited is left alone: it is
+        the live source of truth until its session ends, and rebuilding
+        it mid-edit would drop the caret.
+        """
+        for role in self.SUB_TEXT_ROLES:
+            runs = self._runs_for(role)
+            item = self._sub_texts.get(role)
+            if item is not None and item.is_editing():
+                continue
+            if runs:
+                if item is None:
+                    item = self._make_sub_text(role)
+                if item.rich_runs() != runs:
+                    item.set_rich_runs(runs)
+            elif item is not None:
+                self._drop_sub_text(role)
+
+    def set_sub_text_hook(self, callback) -> None:
+        """Called with each note sub-item as it is created.
+
+        Notes are born inside this item (on state changes, not only on
+        user action), so the window cannot hook them at a creation site
+        the way it does for top-level annotations; it registers here
+        instead and every note gets wired for the contextual bar.
+        """
+        self._sub_text_hook = callback
+        for sub in self._sub_texts.values():
+            callback(sub)
+
+    def _make_sub_text(self, role: str) -> SubTextItem:
+        item = SubTextItem(self, role)
+        item.set_color(self._color)
+        item.set_font_size(self._font_size)
+        self._sub_texts[role] = item
+        if self._sub_text_hook is not None:
+            self._sub_text_hook(item)
+        return item
+
+    def _drop_sub_text(self, role: str) -> None:
+        item = self._sub_texts.pop(role, None)
+        if item is None:
+            return
+        item.setParentItem(None)
+        scene = item.scene()
+        if scene is not None:
+            scene.removeItem(item)
+
+    def sub_text(self, role: str) -> SubTextItem | None:
+        return self._sub_texts.get(role)
+
+    def ensure_sub_text(self, role: str) -> SubTextItem:
+        """The sub-item for `role`, created empty if it does not exist.
+
+        Used by the "add a note" affordance: an empty note has nothing
+        on screen to click, so the editor asks for it by name.
+        """
+        item = self._sub_texts.get(role)
+        if item is None:
+            item = self._make_sub_text(role)
+            self.prepareGeometryChange()
+            self._compute_layout()
+            self.update()
+        return item
+
+    def state_with_sub_text(self, role: str, runs: list[dict]) -> GdtState:
+        """A copy of the state carrying `runs` in `role`'s slot.
+
+        Returned rather than applied so the caller can wrap the change
+        in the usual undo command.
+        """
+        from copy import deepcopy
+
+        new_state = deepcopy(self._state)
+        if role == "upper":
+            new_state.upper_runs = runs
+        else:
+            new_state.lower_runs = runs
+        return new_state
+
+    def refresh_sub_text_layout(self) -> None:
+        """Re-measure after a sub-item changed size while being edited."""
+        self.prepareGeometryChange()
         self._compute_layout()
         self.update()
 
@@ -96,8 +204,14 @@ class GdtAnnotationItem(AnnotationItem):
         s = max(6, int(size))
         if s == self._font_size:
             return
+        ratio = s / float(self._font_size) if self._font_size else 1.0
         self._font_size = s
         self._font = QFont(_DEFAULT_FONT_FAMILY, s)
+        # Scale the notes by the same ratio rather than forcing them to
+        # the frame's size: the user may have sized one deliberately,
+        # and a ratio keeps that relative choice intact.
+        for sub in self._sub_texts.values():
+            sub.set_font_size(max(4, round(sub.font_size() * ratio)))
         self.prepareGeometryChange()
         self._compute_layout()
         self.update()
@@ -109,7 +223,6 @@ class GdtAnnotationItem(AnnotationItem):
         fm = QFontMetricsF(self._font)
         pad_x, pad_y = _CELL_PADDING_X, _CELL_PADDING_Y
         h = fm.height() + 2 * pad_y  # row height
-        text_h = fm.height()
         gap = pad_y  # vertical gap between the frame and upper/lower text
 
         def cell_w(text: str) -> float:
@@ -140,9 +253,17 @@ class GdtAnnotationItem(AnnotationItem):
         frame_w = symbol_w + max_content
         frame_h = n_rows * h
 
-        upper = self._state.upper_text.strip()
-        lower = self._state.lower_text.strip()
-        frame_top = (text_h + gap) if upper else 0.0
+        # The notes paint themselves (they are child items); the frame
+        # only has to reserve room for them and place them.
+        upper_item = self._sub_texts.get("upper")
+        lower_item = self._sub_texts.get("lower")
+        upper_size = (
+            upper_item.content_rect() if upper_item is not None else None
+        )
+        lower_size = (
+            lower_item.content_rect() if lower_item is not None else None
+        )
+        frame_top = (upper_size.height() + gap) if upper_size else 0.0
 
         borders: list[QRectF] = []
         symbols: list[tuple[QRectF, Characteristic]] = []
@@ -199,24 +320,16 @@ class GdtAnnotationItem(AnnotationItem):
                 ax += aw
             total_w = max(total_w, ax)
 
-        # Upper / lower text, left-aligned with the frame's left edge.
-        if upper:
-            w = max(total_w, fm.horizontalAdvance(upper))
-            texts.append(
-                (QRectF(0.0, 0.0, w, text_h), upper,
-                 Qt.AlignLeft | Qt.AlignVCenter)
-            )
-            total_w = max(total_w, w)
+        # Upper / lower notes, left-aligned with the frame's left edge.
+        if upper_item is not None and upper_size is not None:
+            upper_item.setPos(0.0, 0.0)
+            total_w = max(total_w, upper_size.width())
         bottom = frame_top + frame_h
-        if lower:
+        if lower_item is not None and lower_size is not None:
             ly = bottom + gap
-            w = max(total_w, fm.horizontalAdvance(lower))
-            texts.append(
-                (QRectF(0.0, ly, w, text_h), lower,
-                 Qt.AlignLeft | Qt.AlignVCenter)
-            )
-            total_w = max(total_w, w)
-            bottom = ly + text_h
+            lower_item.setPos(0.0, ly)
+            total_w = max(total_w, lower_size.width())
+            bottom = ly + lower_size.height()
 
         self._border_rects = borders
         self._symbol_draws = symbols
@@ -393,6 +506,13 @@ class GdtAnnotationItem(AnnotationItem):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    def set_color(self, color: QColor) -> None:
+        super().set_color(color)
+        # The notes are part of the callout, not independent items, so
+        # they follow the frame's colour.
+        for sub in self._sub_texts.values():
+            sub.set_color(color)
 
     def clone(self) -> "GdtAnnotationItem":
         from copy import deepcopy

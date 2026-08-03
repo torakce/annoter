@@ -825,6 +825,55 @@ one function, one place.
   `tests/test_persistence.py`, plus two regression tests for the boxed
   save. Suite at 380.
 
+### GD&T notes are editable texts (2026-08-03)
+
+The notes above / below a feature control frame are now authored like
+any other text -- contextual bar, symbols, inline tolerance runs
+included -- instead of being plain strings typed into two panel fields.
+
+- **`SubTextItem`** (`views/items/sub_text.py`) is the reusable
+  mechanism: a `TextAnnotationItem` that lives *inside* another
+  annotation. Being a child of its owner gets almost everything right
+  for free, because **every collection site in the app walks
+  `page.childItems()`** -- direct children of the page -- so a nested
+  text is automatically invisible to selection, to the annotation list
+  and to the save loop, while the appearance rasterizer walks the item
+  tree and picks it up as part of its owner. It only has to clear
+  `ItemIsSelectable` / `ItemIsMovable`.
+- `GdtState.upper_text` / `lower_text` became `upper_runs` /
+  `lower_runs`. `GdtState.from_dict` reads a legacy plain string back
+  as a single text run, so older PDFs open unchanged.
+- `GdtAnnotationItem` owns the two notes, positions them in
+  `_compute_layout` (measuring `content_rect()` instead of drawing text
+  itself) and keeps them in sync with the state -- except while one is
+  being edited, when the sub-item is the live source of truth and
+  rebuilding it would drop the caret. Colour follows the frame; font
+  size scales *by ratio* so a deliberately-sized note keeps its
+  relative size.
+- Notes are born inside the item (on any state change, not only on user
+  action), so `set_sub_text_hook` lets MainWindow wire every one of
+  them to the edit-session relay -- there is no creation site it could
+  hook instead.
+- **The panel hands over rather than competing**: its Top/Bottom fields
+  are gone (a `QLineEdit` cannot hold a stacked tolerance), replaced by
+  "+ Top / Bottom note" buttons emitting `noteEditRequested`. MainWindow
+  commits the panel and starts the in-place session, so only one
+  editing surface is ever open.
+- **Bug found and fixed doing this**: committing the panel discards an
+  untouched new frame, so placing a frame and immediately clicking
+  "+ note" **deleted the frame out from under the user**.
+  `_commit_gdt_editor(keep_empty=True)` suppresses that rule for the
+  hand-over, since authoring continues on the note.
+- **Second bug fixed**: `_rasterize_item_planes` walked child items only
+  one level deep. A note lives two levels down (frame -> sub text ->
+  inner `QGraphicsTextItem`), so its glyphs would have rasterized
+  blank; `_paint_item_tree` now recurses.
+- Tests: GD&T note cases in `tests/test_edit_toolbar.py` (in-place
+  hand-over, symbols/tolerances, folding back into state, undo, blank
+  note dropped, not a separate annotation) and in
+  `tests/test_persistence.py` (round-trip, appearance not blank, legacy
+  plain notes). Suite at 391.
+
 **Still open**: the standalone Dimension tool from the previous batch
 is now a second way to do the same thing. Retiring it (tool, palette
 entry, `views/items/dimension.py`, `views/dimension_editor.py`,

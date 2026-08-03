@@ -85,6 +85,7 @@ from annoter.views.items.dimension import DimensionAnnotationItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.note import StickyNoteItem
+from annoter.views.items.sub_text import SubTextItem
 from annoter.views.items.text import TextAnnotationItem
 from annoter.views.note_editor import NoteEditor
 from annoter.views.page_thumbnails import PageThumbnailDock
@@ -984,6 +985,9 @@ class MainWindow(QMainWindow):
         """
         if isinstance(item, GdtAnnotationItem):
             item.set_edit_callback(self._open_gdt_editor)
+            # Its notes are editable texts in their own right, so they
+            # go through the same edit-session relay as any other text.
+            item.set_sub_text_hook(self._scene.hook_text_item)
         elif isinstance(item, DimensionAnnotationItem):
             item.set_edit_callback(self._open_dimension_editor)
         elif isinstance(item, StickyNoteItem):
@@ -1898,7 +1902,45 @@ class MainWindow(QMainWindow):
         )
         self._position_edit_toolbar()
 
+    def _edit_gdt_note(self, role: str) -> None:
+        """Hand over from the GD&T panel to the note's in-place editor.
+
+        The panel is committed first: the notes are rich text edited on
+        the frame itself, so keeping both surfaces open would leave two
+        editors fighting over the keyboard.
+        """
+        item = self._gdt_edit_item
+        if item is None:
+            return
+        self._commit_gdt_editor(keep_empty=True)
+        sub = item.ensure_sub_text(role)
+        self._scene.hook_text_item(sub)
+        sub.begin_edit()
+
+    def _commit_sub_text(self, sub: SubTextItem) -> None:
+        """Fold a finished note back into its owner's state, undoably."""
+        owner = sub.owner()
+        if not isinstance(owner, GdtAnnotationItem):
+            return
+        runs = [] if sub.is_blank() else sub.rich_runs()
+        old_state = owner.state()
+        new_state = owner.state_with_sub_text(sub.role(), runs)
+        if new_state == old_state:
+            # Nothing to record, but a note left blank still has to go:
+            # re-applying the state drops the empty sub-item.
+            owner.set_state(old_state)
+            return
+        cmd = ChangeGdtCommand(owner, old_state, new_state)
+        stack = self._undo_group.activeStack()
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+        self._on_annotations_changed()
+
     def _on_text_editing_finished(self, item: TextAnnotationItem) -> None:
+        if isinstance(item, SubTextItem):
+            self._commit_sub_text(item)
         if self._text_edit_item is not item:
             return
         self._close_edit_toolbar()
@@ -2319,6 +2361,7 @@ class MainWindow(QMainWindow):
         item.set_color(self._tool_controller.color())
         item.set_stroke(self._tool_controller.stroke())
         item.set_edit_callback(self._open_gdt_editor)
+        item.set_sub_text_hook(self._scene.hook_text_item)
         item.setParentItem(page)
         self._open_gdt_inline(item, is_new=True)
 
@@ -2341,6 +2384,7 @@ class MainWindow(QMainWindow):
         editor.stateEdited.connect(self._on_gdt_state_edited)
         editor.committed.connect(self._commit_gdt_editor)
         editor.cancelled.connect(self._cancel_gdt_editor)
+        editor.noteEditRequested.connect(self._edit_gdt_note)
         self._gdt_editor = editor
         self._position_gdt_editor()
         editor.open()
@@ -2355,7 +2399,14 @@ class MainWindow(QMainWindow):
         if self._gdt_editor is not None:
             self._commit_gdt_editor()
 
-    def _commit_gdt_editor(self) -> None:
+    def _commit_gdt_editor(self, *, keep_empty: bool = False) -> None:
+        """Close the GD&T panel, recording whatever it holds.
+
+        `keep_empty` suppresses the discard-an-untouched-frame rule: the
+        user is handing over to the note editor, so authoring continues
+        and the frame must survive even though the panel itself is still
+        blank.
+        """
         editor = self._gdt_editor
         item = self._gdt_edit_item
         is_new = self._gdt_edit_is_new
@@ -2367,7 +2418,7 @@ class MainWindow(QMainWindow):
 
         if is_new:
             # Untouched frame -> rollback, like an empty text annotation.
-            if new_state == GdtState():
+            if new_state == GdtState() and not keep_empty:
                 if item.scene() is not None:
                     self._scene.removeItem(item)
                 return

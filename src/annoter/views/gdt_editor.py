@@ -53,6 +53,7 @@ from annoter.model.gdt import (
     TOLERANCE_PREFIXES,
     by_family,
     enclosed,
+    runs_to_plain,
 )
 from annoter.views.icons import action_icon, gdt_symbol_icon
 
@@ -332,6 +333,11 @@ class GdtInlineEditor(QFrame):
     stateEdited = Signal(object)  # GdtState, on every live change
     committed = Signal()
     cancelled = Signal()
+    # The user asked to write the note above / below the frame (payload:
+    # "upper" or "lower"). The caller commits this panel and hands over
+    # to the in-place text editor, so there is only ever one editing
+    # surface at a time.
+    noteEditRequested = Signal(str)
 
     def __init__(
         self,
@@ -366,16 +372,13 @@ class GdtInlineEditor(QFrame):
         # the panel instead of crushing the new line.
         outer.setSizeConstraint(QLayout.SetFixedSize)
 
-        # Upper text.
-        top = QHBoxLayout()
-        top.setSpacing(6)
-        top.addWidget(self._field_label("Top"))
-        self._upper_edit = QLineEdit(initial.upper_text, self)
-        self._upper_edit.setPlaceholderText("upper text (e.g. 2x)")
-        self._upper_edit.textChanged.connect(self._emit_state)
-        self._upper_edit.returnPressed.connect(self._commit)
-        top.addWidget(self._upper_edit)
-        outer.addLayout(top)
+        # Upper note. Not a field: the notes are rich text (symbols,
+        # inline tolerance runs) edited in place on the frame itself, so
+        # the panel only offers a way in -- an empty note has nothing on
+        # screen to click.
+        self._upper_runs: list[dict] = list(initial.upper_runs)
+        self._lower_runs: list[dict] = list(initial.lower_runs)
+        outer.addWidget(self._note_button("upper", "Top"))
 
         # Tolerance rows (each with its own symbol).
         self._rows_box = QVBoxLayout()
@@ -393,16 +396,8 @@ class GdtInlineEditor(QFrame):
 
         outer.addWidget(self._h_separator())
 
-        # Lower text.
-        low = QHBoxLayout()
-        low.setSpacing(6)
-        low.addWidget(self._field_label("Bottom"))
-        self._lower_edit = QLineEdit(initial.lower_text, self)
-        self._lower_edit.setPlaceholderText("lower text")
-        self._lower_edit.textChanged.connect(self._emit_state)
-        self._lower_edit.returnPressed.connect(self._commit)
-        low.addWidget(self._lower_edit)
-        outer.addLayout(low)
+        # Lower note (see the upper one above).
+        outer.addWidget(self._note_button("lower", "Bottom"))
 
         outer.addWidget(self._h_separator())
 
@@ -431,6 +426,23 @@ class GdtInlineEditor(QFrame):
     # ------------------------------------------------------------------
     # small builders
     # ------------------------------------------------------------------
+    def _note_button(self, role: str, title: str) -> QToolButton:
+        """Way into the in-place editor for the note above / below."""
+        runs = self._upper_runs if role == "upper" else self._lower_runs
+        btn = QToolButton(self)
+        btn.setFocusPolicy(Qt.ClickFocus)
+        preview = runs_to_plain(runs).replace("\n", " ").strip()
+        btn.setText(
+            f"{title} note: {preview}" if preview else f"+ {title} note"
+        )
+        btn.setToolTip(
+            "Edit this note on the frame, with symbols and tolerances"
+        )
+        btn.clicked.connect(
+            lambda _c=False, r=role: self.noteEditRequested.emit(r)
+        )
+        return btn
+
     def _field_label(self, text: str) -> QLabel:
         lbl = QLabel(text, self)
         lbl.setFixedWidth(46)
@@ -485,8 +497,8 @@ class GdtInlineEditor(QFrame):
             datum_secondary=row0.datum_secondary,
             datum_tertiary=row0.datum_tertiary,
             additional_rows=rows[1:],
-            upper_text=self._upper_edit.text(),
-            lower_text=self._lower_edit.text(),
+            upper_runs=list(self._upper_runs),
+            lower_runs=list(self._lower_runs),
             aux_symbol=self._aux_symbol,
             aux_text=self._aux_text,
         )

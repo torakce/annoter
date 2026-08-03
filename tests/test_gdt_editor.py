@@ -12,7 +12,11 @@ pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
 
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QKeyEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QToolButton,
+    QWidget,
+)
 
 from annoter.model.gdt import (  # noqa: E402
     Characteristic,
@@ -170,13 +174,43 @@ def test_add_and_remove_rows(host) -> None:
     assert len(editor._row_editors) == 1
 
 
-def test_upper_lower_in_state(host) -> None:
-    editor = GdtInlineEditor(GdtState(), host)
-    editor._upper_edit.setText("2x")
-    editor._lower_edit.setText("VALID FOR BOTH PARTS")
+def test_upper_lower_runs_pass_through_untouched(host) -> None:
+    """The notes are edited in place on the frame, not in the panel, so
+    the panel must carry their runs across a commit without altering
+    them."""
+    runs_up = [{"t": "2x"}]
+    runs_low = [{"t": "VALID FOR BOTH PARTS"}]
+    editor = GdtInlineEditor(
+        GdtState(upper_runs=runs_up, lower_runs=runs_low), host
+    )
     out = editor.current_state()
-    assert out.upper_text == "2x"
-    assert out.lower_text == "VALID FOR BOTH PARTS"
+    assert out.upper_runs == runs_up
+    assert out.lower_runs == runs_low
+
+
+def test_note_buttons_request_in_place_editing(host) -> None:
+    editor = GdtInlineEditor(GdtState(), host)
+    asked: list[str] = []
+    editor.noteEditRequested.connect(asked.append)
+    buttons = [
+        b
+        for b in editor.findChildren(QToolButton)
+        if "note" in b.text().lower()
+    ]
+    assert len(buttons) == 2, [b.text() for b in buttons]
+    for b in buttons:
+        b.click()
+    assert sorted(asked) == ["lower", "upper"]
+
+
+def test_note_button_previews_existing_text(host) -> None:
+    editor = GdtInlineEditor(
+        GdtState(upper_runs=[{"t": "4X"}]), host
+    )
+    labels = [b.text() for b in editor.findChildren(QToolButton)]
+    assert any("4X" in t for t in labels), labels
+    # The empty one still reads as an invitation to add it.
+    assert any(t.startswith("+ Bottom") for t in labels), labels
 
 
 def test_adding_a_row_grows_the_panel(host) -> None:

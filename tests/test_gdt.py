@@ -52,8 +52,8 @@ def _composite_state() -> GdtState:
                 tolerance_value="0.5CZ",
             )
         ],
-        upper_text="2x",
-        lower_text="VALID FOR BOTH PARTS",
+        upper_runs=[{"t": "2x"}],
+        lower_runs=[{"t": "VALID FOR BOTH PARTS"}],
         aux_symbol=Characteristic.PARALLELISM,
         aux_text="A-B",
     )
@@ -146,7 +146,7 @@ def test_backward_compat_single_row_dict() -> None:
     }
     state = GdtState.from_dict(old)
     assert state.additional_rows == []
-    assert state.upper_text == "" and state.lower_text == ""
+    assert state.upper_runs == [] and state.lower_runs == []
     assert state.aux_symbol is None
     assert len(state.all_rows()) == 1
     assert state.tolerance_value == "0.1"

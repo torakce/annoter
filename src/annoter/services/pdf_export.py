@@ -822,6 +822,25 @@ def _paint_source_rect(item) -> QRectF:
     return item.content_rect()
 
 
+def _paint_item_tree(painter: QPainter, item) -> None:  # noqa: ANN001
+    """Paint `item` and its whole descendant tree into `painter`.
+
+    Child items paint themselves in a real scene, so an item that
+    delegates its content to one would otherwise rasterize empty. The
+    walk has to recurse, not stop at the first level: a text sub-item
+    nested in a GD&T frame keeps its glyphs in an inner
+    QGraphicsTextItem one level further down again.
+    """
+    item.paint(painter, QStyleOptionGraphicsItem(), None)
+    for child in item.childItems():
+        if not child.isVisible():
+            continue
+        painter.save()
+        painter.translate(child.pos())
+        _paint_item_tree(painter, child)
+        painter.restore()
+
+
 def _rasterize_item_planes(
     item, dpi: int
 ) -> tuple[bytes, bytes, int, int, QRectF]:
@@ -853,18 +872,7 @@ def _rasterize_item_planes(
         painter.scale(scale, scale)
         painter.translate(-src.left(), -src.top())
         try:
-            item.paint(painter, QStyleOptionGraphicsItem(), None)
-            # Child items paint themselves in a real scene, so an item
-            # that delegates its content to one (TextAnnotationItem
-            # holds the glyphs in an inner QGraphicsTextItem) would
-            # otherwise rasterize empty.
-            for child in item.childItems():
-                if not child.isVisible():
-                    continue
-                painter.save()
-                painter.translate(child.pos())
-                child.paint(painter, QStyleOptionGraphicsItem(), None)
-                painter.restore()
+            _paint_item_tree(painter, item)
         finally:
             painter.end()
     finally:

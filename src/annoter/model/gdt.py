@@ -228,6 +228,30 @@ class GdtRow:
         )
 
 
+def _runs_from_dict(data: dict, slot: str) -> list[dict]:
+    """Read `<slot>_runs`, falling back to the pre-rich plain string."""
+    runs = data.get(f"{slot}_runs")
+    if isinstance(runs, list):
+        return [r for r in runs if isinstance(r, dict)]
+    plain = str(data.get(f"{slot}_text", ""))
+    return [{"t": plain}] if plain else []
+
+
+def runs_to_plain(runs: list[dict]) -> str:
+    """Flatten serialized runs to text, for labels and measurements."""
+    out: list[str] = []
+    for run in runs:
+        if "br" in run:
+            out.append("\n")
+        elif "t" in run:
+            out.append(str(run["t"]))
+        elif "tol" in run:
+            from annoter.model.tolerance import Tolerance
+
+            out.append(Tolerance.from_dict(run["tol"]).plain())
+    return "".join(out)
+
+
 @dataclass
 class GdtState:
     """Full state of a feature control frame.
@@ -235,9 +259,9 @@ class GdtState:
     The first tolerance row is held in the flat `tolerance_*` / `datum_*`
     fields (backward compatible with single-row FCFs persisted before the
     composite rework); extra composite rows live in `additional_rows`.
-    `upper_text` / `lower_text` are the texts shown above / below the
-    frame, and an optional auxiliary frame (`aux_symbol` + `aux_text`) is
-    appended to the right.
+    `upper_runs` / `lower_runs` are the rich texts shown above / below
+    the frame, and an optional auxiliary frame (`aux_symbol` +
+    `aux_text`) is appended to the right.
     """
 
     characteristic: Characteristic = Characteristic.PERPENDICULARITY
@@ -250,8 +274,12 @@ class GdtState:
     datum_tertiary: DatumRef = field(default_factory=DatumRef)
     # Composite rows beyond the first.
     additional_rows: list[GdtRow] = field(default_factory=list)
-    upper_text: str = ""
-    lower_text: str = ""
+    # Serialized rich runs (see TextAnnotationItem.rich_runs), so the
+    # notes above / below the frame can carry symbols and inline
+    # tolerance runs like any other text. Plain strings persisted by
+    # earlier versions are read back as a single text run.
+    upper_runs: list[dict] = field(default_factory=list)
+    lower_runs: list[dict] = field(default_factory=list)
     # Optional auxiliary frame appended to the right (e.g. // | A-B).
     aux_symbol: Characteristic | None = None
     aux_text: str = ""
@@ -301,10 +329,10 @@ class GdtState:
             data["additional_rows"] = [
                 r.to_dict() for r in self.additional_rows
             ]
-        if self.upper_text:
-            data["upper_text"] = self.upper_text
-        if self.lower_text:
-            data["lower_text"] = self.lower_text
+        if self.upper_runs:
+            data["upper_runs"] = self.upper_runs
+        if self.lower_runs:
+            data["lower_runs"] = self.lower_runs
         if self.aux_symbol is not None:
             data["aux_symbol"] = self.aux_symbol.value
         if self.aux_text:
@@ -333,8 +361,8 @@ class GdtState:
                 GdtRow.from_dict(r)
                 for r in data.get("additional_rows", [])
             ],
-            upper_text=str(data.get("upper_text", "")),
-            lower_text=str(data.get("lower_text", "")),
+            upper_runs=_runs_from_dict(data, "upper"),
+            lower_runs=_runs_from_dict(data, "lower"),
             aux_symbol=Characteristic(aux_raw) if aux_raw else None,
             aux_text=str(data.get("aux_text", "")),
         )

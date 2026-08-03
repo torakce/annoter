@@ -350,3 +350,141 @@ def test_font_size_from_the_bar_is_undoable(qapp, sample_pdf: Path) -> None:
     finally:
         win._on_close()
         win.close()
+
+
+# ----------------------------------------------------------------------
+# GD&T notes: text above / below a frame is authored like any other text
+# ----------------------------------------------------------------------
+def _open_gdt(qapp, sample_pdf: Path):
+    from annoter.views.main_window import MainWindow
+
+    win = MainWindow()
+    win.open_path(sample_pdf)
+    win._tool_controller.set_tool(Tool.GDT)
+    win._on_gdt_placement(QPointF(150, 150))
+    qapp.processEvents()
+    return win, win._gdt_edit_item
+
+
+def test_gdt_note_button_opens_in_place_editor(qapp, sample_pdf: Path) -> None:
+    win, frame = _open_gdt(qapp, sample_pdf)
+    try:
+        win._gdt_editor.noteEditRequested.emit("upper")
+        qapp.processEvents()
+        # The panel handed over: one editing surface at a time.
+        assert win._gdt_editor is None
+        sub = frame.sub_text("upper")
+        assert sub is not None and sub.is_editing()
+        # ...and the contextual bar followed the note.
+        assert win._text_edit_item is sub
+        assert not win._edit_toolbar.isHidden()
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_gdt_note_takes_symbols_and_tolerances(qapp, sample_pdf: Path) -> None:
+    win, frame = _open_gdt(qapp, sample_pdf)
+    try:
+        win._gdt_editor.noteEditRequested.emit("upper")
+        qapp.processEvents()
+        win._edit_toolbar.symbolPicked.emit("Ø")
+        win._edit_toolbar.tolerancePicked.emit(
+            Tolerance(
+                mode=ToleranceMode.BILATERAL, upper="0.10", lower="0.05"
+            )
+        )
+        qapp.processEvents()
+        sub = frame.sub_text("upper")
+        assert sub.text() == "Ø+0.10/-0.05"
+        assert sub.has_stacked_runs()
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_finished_gdt_note_folds_into_the_frame_state(
+    qapp, sample_pdf: Path
+) -> None:
+    win, frame = _open_gdt(qapp, sample_pdf)
+    try:
+        win._gdt_editor.noteEditRequested.emit("upper")
+        qapp.processEvents()
+        sub = frame.sub_text("upper")
+        sub.insert_symbol("2x")
+        _focus_out(sub, Qt.OtherFocusReason)
+        qapp.processEvents()
+        assert frame.state().upper_runs == [{"t": "2x"}]
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_gdt_note_change_is_undoable(qapp, sample_pdf: Path) -> None:
+    win, frame = _open_gdt(qapp, sample_pdf)
+    try:
+        # Give the frame a committed note first.
+        win._gdt_editor.noteEditRequested.emit("upper")
+        qapp.processEvents()
+        sub = frame.sub_text("upper")
+        sub.insert_symbol("2x")
+        _focus_out(sub, Qt.OtherFocusReason)
+        qapp.processEvents()
+        assert frame.state().upper_runs == [{"t": "2x"}]
+
+        # Now edit it again and undo that second change.
+        frame.sub_text("upper").begin_edit()
+        frame.sub_text("upper").insert_symbol(" REVISED")
+        _focus_out(frame.sub_text("upper"), Qt.OtherFocusReason)
+        qapp.processEvents()
+        assert frame.state().upper_runs == [{"t": "2x REVISED"}]
+        win._undo_group.activeStack().undo()
+        assert frame.state().upper_runs == [{"t": "2x"}]
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_blank_gdt_note_is_dropped(qapp, sample_pdf: Path) -> None:
+    win, frame = _open_gdt(qapp, sample_pdf)
+    try:
+        win._gdt_editor.noteEditRequested.emit("upper")
+        qapp.processEvents()
+        sub = frame.sub_text("upper")
+        assert sub is not None
+        _focus_out(sub, Qt.OtherFocusReason)  # never typed anything
+        qapp.processEvents()
+        assert frame.sub_text("upper") is None
+        assert frame.state().upper_runs == []
+    finally:
+        win._on_close()
+        win.close()
+
+
+def test_gdt_note_is_not_a_separate_annotation(
+    qapp, sample_pdf: Path
+) -> None:
+    """A note belongs to its frame: it must not be selectable, listed
+    or saved on its own."""
+    from annoter.views.items.base import AnnotationItem
+
+    win, frame = _open_gdt(qapp, sample_pdf)
+    try:
+        win._gdt_editor.noteEditRequested.emit("upper")
+        qapp.processEvents()
+        sub = frame.sub_text("upper")
+        sub.insert_symbol("2x")
+        _focus_out(sub, Qt.OtherFocusReason)
+        qapp.processEvents()
+
+        page = win._scene.page_item()
+        top_level = [
+            c for c in page.childItems() if isinstance(c, AnnotationItem)
+        ]
+        assert frame in top_level
+        assert frame.sub_text("upper") not in top_level
+        win._select_all()
+        assert frame.sub_text("upper") not in win._scene.selectedItems()
+    finally:
+        win._on_close()
+        win.close()

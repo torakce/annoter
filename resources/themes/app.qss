@@ -1,0 +1,1429 @@
+/* Annoter stylesheet template (light and dark).
+
+   Every color, radius and font below is a placeholder filled from the
+   active theme's tokens by services/theme.py (see services/tokens.py).
+   Do not hard-code colors here: add a token instead, so both themes
+   stay in step. Placeholders are an at-sign followed by a token name. */
+
+/* ---------------------------------------------------------------- base */
+QWidget {
+    font-family: @font_ui;
+    background: @panel;
+    color: @text;
+}
+
+/* After the QWidget rule on purpose: same specificity, later wins. */
+QMainWindow,
+QDialog {
+    background: @app;
+    color: @text;
+}
+
+QLabel {
+    background: transparent;
+    color: @text;
+}
+
+QToolTip {
+    background: @tooltip_bg;
+    color: @tooltip_text;
+    border: none;
+    border-radius: @radius_sm;
+    padding: 5px 9px;
+}
+
+QMainWindow::separator {
+    background: @line;
+    width: 1px;
+    height: 1px;
+}
+
+QMainWindow::separator:hover {
+    background: @accent;
+}
+
+QStatusBar {
+    background: @app;
+    color: @text_muted;
+    border-top: 1px solid @line;
+}
+
+QStatusBar::item {
+    border: none;
+}
+
+/* --------------------------------------------------------------- menus */
+QMenuBar {
+    background: @app;
+    color: @text;
+    padding: 2px 4px;
+    border-bottom: 1px solid @line;
+}
+
+QMenuBar::item {
+    background: transparent;
+    padding: 5px 10px;
+    border-radius: @radius_sm;
+}
+
+QMenuBar::item:selected {
+    background: @hover;
+}
+
+QMenu {
+    background: @pill;
+    color: @text;
+    border: 1px solid @line;
+    border-radius: @radius_lg;
+    padding: 6px;
+}
+
+QMenu::item {
+    background: transparent;
+    padding: 6px 28px 6px 10px;
+    border-radius: @radius_sm;
+}
+
+QMenu::item:selected {
+    background: @hover;
+    color: @text;
+}
+
+QMenu::separator {
+    height: 1px;
+    background: @line;
+    margin: 4px 6px;
+}
+
+QMenu::indicator {
+    width: 14px;
+    height: 14px;
+    margin-left: 4px;
+}
+
+/* ------------------------------------------------------------- toolbar */
+QToolBar {
+    background: @app;
+    border: none;
+    border-bottom: 1px solid @line;
+    padding: 4px 8px;
+    spacing: 2px;
+}
+
+QToolBar::separator {
+    width: 1px;
+    background: @line;
+    margin: 6px 6px;
+}
+
+QToolBar QToolButton {
+    background: transparent;
+    color: @text;
+    border: 1px solid transparent;
+    border-radius: @radius;
+    padding: 5px;
+}
+
+QToolBar QToolButton:hover {
+    background: @hover;
+}
+
+QToolBar QToolButton:pressed {
+    background: @pressed;
+}
+
+QToolBar QToolButton:checked {
+    background: @soft;
+    color: @soft_text;
+}
+
+/* --------------------------------------------------------------- docks */
+QDockWidget {
+    color: @text;
+}
+
+QDockWidget::title {
+    background: @panel;
+    color: @text_muted;
+    padding: 8px 10px;
+    border-bottom: 1px solid @line;
+}
+
+QDockWidget::close-button,
+QDockWidget::float-button {
+    background: transparent;
+    border: none;
+    border-radius: @radius_sm;
+    padding: 2px;
+}
+
+QDockWidget::close-button:hover,
+QDockWidget::float-button:hover {
+    background: @hover;
+}
+
+QScrollArea {
+    background: @panel;
+    border: none;
+}
+
+/* ----------------------------------------------------------- group box */
+QGroupBox {
+    color: @text_muted;
+    border: 1px solid @line;
+    border-radius: @radius;
+    margin-top: 14px;
+    padding: 10px 6px 6px 6px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
+    background: @panel;
+    color: @text_muted;
+}
+
+/* ------------------------------------------------------------- buttons */
+QPushButton,
+QToolButton {
+    background: @field;
+    color: @text;
+    border: 1px solid @line_strong;
+    border-radius: @radius;
+    padding: 5px 12px;
+}
+
+QToolButton {
+    padding: 4px 6px;
+}
+
+QPushButton:hover,
+QToolButton:hover {
+    background: @hover;
+}
+
+QPushButton:pressed,
+QToolButton:pressed {
+    background: @pressed;
+}
+
+QPushButton:checked,
+QToolButton:checked {
+    background: @soft;
+    color: @soft_text;
+    border: 1px solid @soft;
+}
+
+QPushButton:default {
+    background: @accent_bg;
+    color: @on_accent;
+    border: 1px solid @accent_bg;
+}
+
+/* -------------------------------------------------------------- inputs */
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox,
+QPlainTextEdit,
+QTextEdit {
+    background: @field;
+    color: @text;
+    border: 1px solid @line_strong;
+    border-radius: @radius_sm;
+    padding: 4px 7px;
+    selection-background-color: @accent_bg;
+    selection-color: @on_accent;
+}
+
+QLineEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus,
+QPlainTextEdit:focus,
+QTextEdit:focus {
+    border: 1px solid @accent;
+}
+
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 18px;
+    border: none;
+    background: transparent;
+}
+
+QComboBox::down-arrow {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid @text_muted;
+    margin-right: 4px;
+}
+
+QComboBox QAbstractItemView {
+    background: @pill;
+    color: @text;
+    border: 1px solid @line;
+    border-radius: @radius_sm;
+    padding: 4px;
+    selection-background-color: @soft;
+    selection-color: @soft_text;
+}
+
+/* Explicit sub-control sizing for the spinbox up/down buttons; without
+   these, partial styling collapses them to zero width and the I-beam
+   cursor covers the area where the arrows should be. */
+QSpinBox,
+QDoubleSpinBox {
+    padding-right: 20px;
+    min-height: 20px;
+}
+
+QSpinBox::up-button,
+QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    border: none;
+    border-left: 1px solid @line;
+    border-top-right-radius: @radius_sm;
+    background: transparent;
+}
+
+QSpinBox::down-button,
+QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    border: none;
+    border-left: 1px solid @line;
+    border-bottom-right-radius: @radius_sm;
+    background: transparent;
+}
+
+QSpinBox::up-button:hover,
+QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover {
+    background: @hover;
+}
+
+QSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed,
+QDoubleSpinBox::up-button:pressed,
+QDoubleSpinBox::down-button:pressed {
+    background: @pressed;
+}
+
+QSpinBox::up-arrow,
+QDoubleSpinBox::up-arrow {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid @text_muted;
+}
+
+QSpinBox::down-arrow,
+QDoubleSpinBox::down-arrow {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid @text_muted;
+}
+
+/* ---------------------------------------------------- check and radio */
+QCheckBox,
+QRadioButton {
+    background: transparent;
+    spacing: 7px;
+}
+
+QCheckBox::indicator,
+QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+    background: @field;
+    border: 1px solid @line_strong;
+}
+
+QCheckBox::indicator {
+    border-radius: 4px;
+}
+
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+
+QCheckBox::indicator:hover,
+QRadioButton::indicator:hover {
+    border: 1px solid @accent;
+}
+
+QCheckBox::indicator:checked,
+QRadioButton::indicator:checked {
+    background: @accent_bg;
+    border: 1px solid @accent_bg;
+}
+
+QCheckBox::indicator:disabled,
+QRadioButton::indicator:disabled {
+    background: @panel;
+    border: 1px solid @line;
+}
+
+/* --------------------------------------------------------------- lists */
+QListWidget,
+QListView,
+QTreeView {
+    background: @field;
+    color: @text;
+    border: 1px solid @line;
+    border-radius: @radius;
+    padding: 3px;
+    outline: none;
+}
+
+QListWidget::item,
+QListView::item,
+QTreeView::item {
+    padding: 4px 6px;
+    border-radius: @radius_sm;
+}
+
+QListWidget::item:hover,
+QListView::item:hover,
+QTreeView::item:hover {
+    background: @hover;
+}
+
+QListWidget::item:selected,
+QListView::item:selected,
+QTreeView::item:selected {
+    background: @soft;
+    color: @soft_text;
+}
+
+/* ---------------------------------------------------------------- tabs */
+QTabWidget::pane {
+    border: none;
+}
+
+QTabBar {
+    background: transparent;
+}
+
+QTabBar::tab {
+    background: transparent;
+    color: @text_muted;
+    border: none;
+    border-radius: @radius_sm;
+    padding: 6px 12px;
+    margin: 2px;
+}
+
+QTabBar::tab:hover {
+    color: @text;
+}
+
+QTabBar::tab:selected {
+    background: @field;
+    color: @text;
+}
+
+/* -------------------------------------------------------------- canvas */
+QGraphicsView {
+    background: @canvas;
+    border: none;
+}
+
+/* ---------------------------------------------------------- scrollbars */
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 2px;
+}
+
+QScrollBar::handle {
+    background: @scrollbar;
+    border-radius: 3px;
+    min-height: 28px;
+    min-width: 28px;
+}
+
+QScrollBar::handle:hover {
+    background: @scrollbar_hover;
+}
+
+QScrollBar::add-line,
+QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+}
+
+QScrollBar::add-page,
+QScrollBar::sub-page {
+    background: transparent;
+}
+
+/* ------------------------------------------------------------ disabled */
+QPushButton:disabled,
+QToolButton:disabled,
+QLabel:disabled,
+QGroupBox:disabled,
+QGroupBox::title:disabled,
+QMenu::item:disabled,
+QMenuBar::item:disabled,
+QLineEdit:disabled,
+QComboBox:disabled,
+QSpinBox:disabled,
+QDoubleSpinBox:disabled {
+    color: @text_disabled;
+}
+
+QPushButton:disabled,
+QToolButton:disabled {
+    background: transparent;
+    border: 1px solid @line;
+}
+
+QToolBar QToolButton:disabled {
+    border: 1px solid transparent;
+}
+
+/* ------------------------------------------ floating contextual pills */
+/* SelectionToolbar (what is selected) and EditToolbar (what is being
+   edited) float over the page next to their item. */
+QFrame#SelectionToolbar,
+QFrame#EditToolbar {
+    background: @pill;
+    border: 1px solid @line;
+    border-radius: @radius_lg;
+}
+
+QFrame#EditToolbar {
+    border: 1px solid @accent;
+}
+
+QFrame#SelectionToolbar QToolButton,
+QFrame#EditToolbar QToolButton {
+    background: transparent;
+    color: @text;
+    border: 1px solid transparent;
+    border-radius: @radius_sm;
+    padding: 4px 8px;
+}
+
+QFrame#SelectionToolbar QToolButton:hover,
+QFrame#EditToolbar QToolButton:hover {
+    background: @hover;
+}
+
+QFrame#SelectionToolbar QToolButton:checked,
+QFrame#EditToolbar QToolButton:checked {
+    background: @soft;
+    color: @soft_text;
+}
+
+QFrame#EditToolbar QLineEdit {
+    padding: 2px 5px;
+}
+
+/* ------------------------------------------------ inline editors (dim) */
+/* The dimension strip shown over the page while an item is being
+   created or edited; the accent border marks the editing state. */
+QFrame#DimensionInlineEditor {
+    background: @pill;
+    border: 2px solid @accent;
+    border-radius: @radius_lg;
+}
+
+QFrame#DimensionInlineEditor QLineEdit {
+    background: @field;
+    border: 1px solid @line_strong;
+    border-radius: 4px;
+    padding: 1px 4px;
+}
+
+QFrame#DimensionInlineEditor QLineEdit:focus {
+    border: 1px solid @accent;
+}
+
+QFrame#DimensionInlineEditor QToolButton {
+    background: transparent;
+    color: @text;
+    border: 1px solid @line_strong;
+    border-radius: 4px;
+    padding: 1px 5px;
+}
+
+QFrame#DimensionInlineEditor QToolButton:hover {
+    background: @hover;
+    border: 1px solid @accent;
+}
+
+QFrame#DimensionInlineEditor QToolButton:checked {
+    background: @soft;
+    color: @soft_text;
+    border: 1px solid @accent;
+}
+
+QFrame#DimensionInlineEditor QToolButton::menu-indicator {
+    image: none;
+    width: 0;
+}
+
+/* ------------------------------------------------------------- top bar */
+/* The window header installed with QMainWindow.setMenuWidget (Lot B). */
+QFrame#TopBar {
+    background: @app;
+    border: none;
+    border-bottom: 1px solid @line;
+}
+
+QFrame#TopBar QWidget#TopBarSection,
+QFrame#TopBar QLabel {
+    background: transparent;
+}
+
+QFrame#TopBar QToolButton {
+    background: transparent;
+    border: none;
+    border-radius: @radius;
+    padding: 7px;
+}
+
+QFrame#TopBar QToolButton:hover {
+    background: @hover;
+}
+
+QFrame#TopBar QToolButton:pressed,
+QFrame#TopBar QToolButton:open {
+    background: @pressed;
+}
+
+QFrame#TopBar QToolButton:disabled {
+    background: transparent;
+    border: none;
+}
+
+QFrame#TopBar QToolButton::menu-indicator {
+    image: none;
+    width: 0;
+}
+
+QLabel#TopBarTitle {
+    font-weight: 600;
+    font-size: 10pt;
+}
+
+QFrame#TopBarDivider {
+    background: @line;
+}
+
+QFrame#UnsavedChip {
+    background: @hover;
+    border-radius: 11px;
+}
+
+QFrame#UnsavedDot {
+    background: @warning;
+    border-radius: 3px;
+}
+
+QLabel#UnsavedText {
+    color: @text_muted;
+}
+
+QPushButton#CommandSearch {
+    background: @field;
+    border: 1px solid @line_strong;
+    border-radius: 9px;
+    padding: 0;
+}
+
+QPushButton#CommandSearch:hover {
+    background: @field;
+    border: 1px solid @accent;
+}
+
+QLabel#CommandSearchHint {
+    color: @text_muted;
+}
+
+QLabel#Kbd {
+    font-family: @font_mono;
+    font-size: 8pt;
+    color: @text_muted;
+    background: @field;
+    border: 1px solid @line_strong;
+    border-bottom: 2px solid @line_strong;
+    border-radius: 5px;
+    padding: 0 5px;
+}
+
+QPushButton#PrimaryButton {
+    background: @accent_bg;
+    color: @on_accent;
+    border: 1px solid @accent_bg;
+    border-radius: @radius;
+    padding: 7px 16px;
+    font-weight: 600;
+}
+
+QPushButton#PrimaryButton:hover {
+    background: @accent_hover;
+    border: 1px solid @accent_hover;
+}
+
+QPushButton#PrimaryButton:disabled {
+    background: @hover;
+    color: @text_disabled;
+    border: 1px solid @hover;
+}
+
+/* ------------------------------------------------------ command palette */
+QDialog#CommandPalette {
+    background: transparent;
+    border: none;
+}
+
+QFrame#CommandPaletteCard {
+    background: @panel;
+    border: 1px solid @line_strong;
+    border-radius: 14px;
+}
+
+QFrame#CommandPaletteSearch {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid @line;
+}
+
+QLineEdit#CommandPaletteInput {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    font-size: 12pt;
+}
+
+QListWidget#CommandPaletteList {
+    background: transparent;
+    border: none;
+    padding: 6px 8px;
+}
+
+QLabel#CommandPaletteEmpty {
+    color: @text_muted;
+}
+
+QFrame#CommandPaletteFooter {
+    background: @app;
+    border: none;
+    border-top: 1px solid @line;
+    border-bottom-left-radius: 13px;
+    border-bottom-right-radius: 13px;
+}
+
+QLabel#CommandPaletteHint {
+    color: @text_muted;
+    font-size: 8.5pt;
+}
+
+/* ------------------------------------------------------------ tool rail */
+/* Vertical icon-only tool bar (Lot C). Checked = active tool. */
+QToolBar#ToolRail {
+    background: @app;
+    border: none;
+    border-right: 1px solid @line;
+    padding: 8px 9px;
+    spacing: 4px;
+}
+
+QToolBar#ToolRail::separator {
+    height: 1px;
+    background: @line;
+    margin: 6px 10px;
+}
+
+QToolBar#ToolRail QToolButton {
+    background: transparent;
+    border: none;
+    border-radius: @radius_lg;
+    padding: 0;
+}
+
+QToolBar#ToolRail QToolButton:hover {
+    background: @hover;
+}
+
+QToolBar#ToolRail QToolButton:pressed {
+    background: @pressed;
+}
+
+QToolBar#ToolRail QToolButton:checked {
+    background: @soft;
+}
+
+QToolBar#ToolRail QToolButton:disabled {
+    background: transparent;
+    border: none;
+}
+
+/* Variant chooser next to the rail (Line / arrow, Stamp). */
+QFrame#ToolFlyout {
+    background: @pill;
+    border: 1px solid @line_strong;
+    border-radius: @radius_lg;
+}
+
+QFrame#ToolFlyout QWidget {
+    background: transparent;
+}
+
+QLabel#FlyoutTitle {
+    color: @text_muted;
+    font-size: 8pt;
+    font-weight: 600;
+}
+
+QPushButton#FlyoutOption {
+    background: transparent;
+    border: none;
+    border-radius: @radius_sm;
+    padding: 0;
+    text-align: left;
+}
+
+QPushButton#FlyoutOption:hover {
+    background: @hover;
+}
+
+QPushButton#FlyoutOption:checked {
+    background: @soft;
+}
+
+QLabel#FlyoutOptionTitle {
+    font-weight: 600;
+}
+
+QLabel#FlyoutOptionDesc {
+    color: @text_muted;
+    font-size: 8pt;
+}
+
+/* ------------------------------------------------------ canvas overlays */
+/* Floating over the PDF view (Lot D): tool hint, page / zoom pill,
+   transient messages. */
+QFrame#ToolHint,
+QFrame#CanvasPill,
+QFrame#CanvasToast {
+    background: @pill;
+    border: 1px solid @line;
+}
+
+QFrame#ToolHint {
+    border-radius: 15px;
+}
+
+QFrame#ToolHint QLabel,
+QFrame#CanvasPill QLabel,
+QFrame#CanvasToast QLabel {
+    background: transparent;
+}
+
+QLabel#ToolHintName {
+    font-weight: 600;
+}
+
+QLabel#ToolHintText,
+QLabel#PillMuted {
+    color: @text_muted;
+}
+
+QFrame#CanvasPill {
+    border-radius: @radius_lg;
+}
+
+QFrame#CanvasPill QToolButton {
+    background: transparent;
+    color: @text;
+    border: none;
+    border-radius: @radius_sm;
+    padding: 5px 7px;
+}
+
+QFrame#CanvasPill QToolButton:hover {
+    background: @hover;
+}
+
+QFrame#CanvasPill QToolButton:pressed,
+QFrame#CanvasPill QToolButton:open {
+    background: @pressed;
+}
+
+QFrame#CanvasPill QToolButton:disabled {
+    color: @text_disabled;
+    background: transparent;
+    border: none;
+}
+
+QFrame#CanvasPill QToolButton::menu-indicator {
+    image: none;
+    width: 0;
+}
+
+QToolButton#PillZoom {
+    font-family: @font_mono;
+    min-width: 52px;
+}
+
+QLineEdit#PillPageField {
+    font-family: @font_mono;
+    padding: 2px 4px;
+    border-radius: @radius_sm;
+}
+
+QFrame#PillDivider {
+    background: @line;
+}
+
+QFrame#CanvasToast {
+    border-radius: @radius;
+}
+
+/* ------------------------------------------------------------- sidebar */
+/* Left panel with Pages / Annotations tabs (Lot E). */
+QWidget#SidebarBody {
+    background: @panel;
+    border-right: 1px solid @line;
+}
+
+QWidget#SidebarTabs {
+    background: @hover;
+    border-radius: 9px;
+}
+
+QPushButton#SidebarTab {
+    background: transparent;
+    color: @text_muted;
+    border: none;
+    border-radius: 7px;
+    padding: 5px 8px;
+    font-weight: 600;
+}
+
+QPushButton#SidebarTab:hover {
+    color: @text;
+}
+
+QPushButton#SidebarTab:checked {
+    background: @field;
+    color: @text;
+    border: 1px solid @line;
+}
+
+QListWidget#PageThumbnails,
+QTreeWidget#AnnotationTree {
+    background: transparent;
+    border: none;
+    padding: 0;
+    /* The row panel under the indentation uses this; the item itself
+       gets the soft selection color below. */
+    selection-background-color: transparent;
+}
+
+QListWidget#PageThumbnails::item,
+QListWidget#PageThumbnails::item:hover,
+QListWidget#PageThumbnails::item:selected {
+    background: transparent;
+    border: none;
+}
+
+QTreeWidget#AnnotationTree::item {
+    padding: 0;
+    border-radius: @radius_sm;
+}
+
+QTreeWidget#AnnotationTree::item:selected {
+    background: @soft;
+}
+
+QTreeWidget#AnnotationTree::branch,
+QTreeWidget#AnnotationTree::branch:selected {
+    background: transparent;
+}
+
+QToolButton#FilterChip {
+    background: transparent;
+    color: @text_muted;
+    border: 1px solid @line_strong;
+    border-radius: 12px;
+    padding: 3px 8px;
+}
+
+QToolButton#FilterChip:hover {
+    color: @text;
+    background: @hover;
+}
+
+QToolButton#FilterChip:checked {
+    background: @text;
+    color: @panel;
+    border: 1px solid @text;
+}
+
+QLabel#SidebarEmpty {
+    color: @text_muted;
+    padding: 24px 8px;
+}
+
+/* ------------------------------------------------------------ inspector */
+/* Right panel (Lot F): header, titled sections, friendly controls. */
+QScrollArea#InspectorScroll,
+QWidget#InspectorBody {
+    background: @panel;
+    border: none;
+}
+
+QScrollArea#InspectorScroll {
+    border-left: 1px solid @line;
+}
+
+QFrame#InspectorHeader,
+QFrame#InspectorSection {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid @line;
+}
+
+QFrame#InspectorFooter {
+    background: transparent;
+    border: none;
+    border-top: 1px solid @line;
+}
+
+QLabel#InspectorKindTile {
+    background: @hover;
+    border-radius: 9px;
+}
+
+QLabel#InspectorTitle {
+    font-weight: 600;
+    font-size: 10pt;
+}
+
+QLabel#InspectorSubtitle,
+QLabel#InspectorLabel,
+QLabel#InspectorTip {
+    color: @text_muted;
+}
+
+QLabel#InspectorSectionTitle {
+    color: @text_muted;
+    font-size: 8pt;
+    font-weight: 600;
+}
+
+QWidget#Segmented {
+    background: @hover;
+    border-radius: @radius;
+}
+
+QToolButton#SegmentButton {
+    background: transparent;
+    color: @text_muted;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 6px;
+    min-height: 20px;
+}
+
+QToolButton#SegmentButton:hover {
+    color: @text;
+}
+
+QToolButton#SegmentButton:checked {
+    background: @field;
+    color: @text;
+    border: 1px solid @line;
+}
+
+QToolButton#SwatchTool {
+    background: transparent;
+    border: 1px dashed @line_strong;
+    border-radius: 13px;
+    padding: 0;
+}
+
+QToolButton#SwatchTool:hover {
+    background: @hover;
+}
+
+QToolButton#StyleToggle {
+    min-width: 28px;
+    min-height: 24px;
+    padding: 2px 6px;
+}
+
+QPushButton#InspectorButton {
+    padding: 6px 10px;
+}
+
+QPushButton#DangerButton {
+    background: @field;
+    color: @danger;
+    border: 1px solid @line_strong;
+    border-radius: @radius;
+    padding: 6px 10px;
+}
+
+QPushButton#DangerButton:hover {
+    background: @hover;
+}
+
+QLabel#PaletteIntro {
+    color: @text_muted;
+}
+
+/* ------------------------------------------------------ welcome screen */
+QWidget#WelcomeScreen,
+QScrollArea#WelcomeScroll,
+QWidget#WelcomePage {
+    background: @app;
+    border: none;
+}
+
+QWidget#WelcomeBox {
+    background: transparent;
+}
+
+QLabel#WelcomeTitle {
+    font-size: 20pt;
+    font-weight: 600;
+}
+
+QLabel#WelcomeSubtitle {
+    font-size: 11pt;
+    color: @text_muted;
+}
+
+QFrame#DropZone {
+    background: @panel;
+    border: 2px dashed @line_strong;
+    border-radius: 16px;
+}
+
+QFrame#DropZone[dragActive="true"] {
+    background: @soft;
+    border: 2px dashed @accent;
+}
+
+QLabel#DropIcon {
+    background: @soft;
+    border-radius: 22px;
+}
+
+QFrame#DropZone[dragActive="true"] QLabel#DropIcon {
+    background: @panel;
+}
+
+QLabel#DropTitle {
+    font-size: 13pt;
+    font-weight: 600;
+}
+
+QLabel#DropHint,
+QLabel#WelcomeCount,
+QLabel#WelcomeShortcutText {
+    color: @text_muted;
+}
+
+QPushButton#WelcomePrimary {
+    background: @accent_bg;
+    border: 1px solid @accent_bg;
+    border-radius: @radius_lg;
+    padding: 0;
+}
+
+QPushButton#WelcomePrimary:hover {
+    background: @accent_hover;
+    border: 1px solid @accent_hover;
+}
+
+QPushButton#WelcomePrimary:focus {
+    border: 2px solid @soft_text;
+}
+
+QPushButton#WelcomePrimary QLabel {
+    background: transparent;
+    color: @on_accent;
+}
+
+QLabel#WelcomePrimaryText {
+    font-size: 10.5pt;
+    font-weight: 600;
+}
+
+QLabel#WelcomePrimaryKeys {
+    font-family: @font_mono;
+    font-size: 8pt;
+}
+
+QPushButton#WelcomeSecondary {
+    background: @field;
+    border: 1px solid @line_strong;
+    border-radius: @radius_lg;
+    padding: 0 16px;
+    font-size: 10.5pt;
+}
+
+QPushButton#WelcomeSecondary:hover {
+    background: @hover;
+}
+
+QLabel#WelcomeSection {
+    font-size: 12pt;
+    font-weight: 600;
+}
+
+QPushButton#LinkButton {
+    background: transparent;
+    border: none;
+    color: @soft_text;
+    font-weight: 600;
+    padding: 2px 4px;
+}
+
+QPushButton#LinkButton:hover {
+    text-decoration: underline;
+}
+
+QPushButton#RecentCard {
+    background: @panel;
+    border: 1px solid @line;
+    border-radius: 12px;
+    padding: 0;
+    text-align: left;
+}
+
+QPushButton#RecentCard:hover {
+    background: @panel;
+    border: 1px solid @line_strong;
+}
+
+QPushButton#RecentCard:pressed,
+QPushButton#RecentCard:focus {
+    background: @panel;
+    border: 1px solid @accent;
+}
+
+QLabel#RecentThumb {
+    background: @canvas;
+    border-top-left-radius: 11px;
+    border-top-right-radius: 11px;
+}
+
+QLabel#RecentBadge {
+    background: @pill;
+    color: @danger;
+    border: 1px solid @line;
+    border-radius: 9px;
+    padding: 1px 8px;
+    font-size: 8pt;
+    font-weight: 600;
+}
+
+QLabel#RecentName {
+    font-size: 10.5pt;
+    font-weight: 600;
+}
+
+QLabel#RecentFolder,
+QLabel#RecentMeta {
+    color: @text_muted;
+}
+
+QLabel#RecentMeta {
+    font-size: 8.5pt;
+}
+
+QLabel#RecentMeta[problem="true"] {
+    color: @danger;
+}
+
+QLabel#WelcomeShortcutsTitle {
+    font-weight: 600;
+}
+
+/* ---------------------------------------------- GD&T frame builder (I) */
+QFrame#GdtFrameBuilder {
+    background: @panel;
+    border: 1px solid @line_strong;
+    border-radius: 16px;
+}
+
+QFrame#GdtBuilderHeader,
+QScrollArea#GdtBuilderScroll,
+QWidget#GdtBuilderBody,
+QWidget#GdtStep,
+QWidget#GdtRowStrip {
+    background: transparent;
+    border: none;
+}
+
+QLabel#GdtBuilderTitle {
+    font-size: 12.5pt;
+    font-weight: 600;
+}
+
+QLabel#GdtBuilderSubtitle,
+QLabel#GdtFamilyLabel,
+QLabel#GdtFieldLabel,
+QLabel#GdtUnit,
+QLabel#GdtHelp,
+QLabel#GdtStepTitle {
+    color: @text_muted;
+}
+
+QLabel#GdtStepTitle {
+    font-size: 8pt;
+    font-weight: 600;
+}
+
+QLabel#GdtStepValue {
+    font-weight: 600;
+}
+
+QToolButton#GdtBuilderClose {
+    background: transparent;
+    border: none;
+    border-radius: @radius;
+    padding: 6px;
+}
+
+QToolButton#GdtBuilderClose:hover {
+    background: @hover;
+}
+
+QFrame#GdtPreviewCard {
+    background: @app;
+    border: 1px solid @line;
+    border-radius: 12px;
+}
+
+QLabel#GdtPreview {
+    background: @paper;
+    border: 1px solid @line;
+    border-radius: @radius;
+    padding: 12px 18px;
+}
+
+QLabel#GdtReadBack {
+    color: @text;
+}
+
+QLabel#GdtWarning {
+    color: @danger;
+    font-weight: 600;
+}
+
+QToolButton#GdtSymbolButton {
+    background: @field;
+    border: 1px solid @line;
+    border-radius: @radius_lg;
+    padding: 0;
+}
+
+QToolButton#GdtSymbolButton:hover {
+    border: 1px solid @line_strong;
+}
+
+QToolButton#GdtSymbolButton:checked {
+    background: @soft;
+    border: 2px solid @accent;
+}
+
+QFrame#GdtSeparator {
+    background: @line;
+    border: none;
+}
+
+QLineEdit#GdtValueField,
+QLineEdit#GdtDatumField {
+    font-family: @font_mono;
+    font-size: 11pt;
+    padding: 4px 6px;
+    border-radius: @radius;
+}
+
+QToolButton#GdtDatumModifier {
+    background: transparent;
+    border: 1px solid @line;
+    border-radius: @radius_sm;
+    padding: 3px 6px;
+}
+
+QToolButton#GdtDatumModifier:hover {
+    background: @hover;
+}
+
+QToolButton#GdtDatumModifier::menu-indicator {
+    image: none;
+    width: 0;
+}
+
+QLabel#GdtInfoBox {
+    background: @app;
+    color: @text_muted;
+    border-radius: @radius;
+    padding: 10px 12px;
+}
+
+QPushButton#GdtNoteButton {
+    background: transparent;
+    border: 1px dashed @line_strong;
+    border-radius: @radius;
+    padding: 5px 10px;
+}
+
+QPushButton#GdtNoteButton:hover {
+    background: @hover;
+}
+
+QToolButton#GdtRowChip {
+    background: transparent;
+    border: 1px solid @line_strong;
+    border-radius: 12px;
+    padding: 3px 12px;
+}
+
+QToolButton#GdtRowChip:checked {
+    background: @soft;
+    color: @soft_text;
+    border: 1px solid @accent;
+}
+
+QFrame#GdtBuilderFooter {
+    background: @app;
+    border: none;
+    border-top: 1px solid @line;
+    border-bottom-left-radius: 15px;
+    border-bottom-right-radius: 15px;
+}
+
+QPushButton#GdtCancelButton {
+    padding: 7px 16px;
+}

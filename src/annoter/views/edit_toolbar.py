@@ -43,27 +43,8 @@ from annoter.model.tolerance import (
 from annoter.views.icons import align_icon
 from annoter.views.items.text import TextAnnotationItem
 
-_ACCENT = "#1E88E5"
-_FIELD_BORDER = "#9aa0a6"
-
-_TOOLBAR_QSS = f"""
-#EditToolbar {{
-    background-color: palette(window);
-    border: 1px solid {_ACCENT};
-    border-radius: 6px;
-}}
-#EditToolbar QToolButton {{
-    border: 1px solid transparent;
-    border-radius: 4px;
-    padding: 3px 6px;
-}}
-#EditToolbar QToolButton:hover {{
-    border: 1px solid {_FIELD_BORDER};
-}}
-#EditToolbar QToolButton:checked {{
-    border: 1px solid {_ACCENT};
-}}
-"""
+# Styling lives in the app-wide theme template, resources/themes/app.qss
+# (the QFrame#<objectName> rules), so it follows the light/dark tokens.
 
 # Same idiom as STROKE_LADDER in `stroke_spin`: fine steps where
 # precision matters, coarser jumps once the values get large.
@@ -202,7 +183,6 @@ class EditToolbar(QFrame):
         self.setObjectName("EditToolbar")
         self.setFrameShape(QFrame.StyledPanel)
         self.setAutoFillBackground(True)
-        self.setStyleSheet(_TOOLBAR_QSS)
         self._lay = QHBoxLayout(self)
         self._lay.setContentsMargins(4, 3, 4, 3)
         self._lay.setSpacing(2)
@@ -294,7 +274,7 @@ class EditToolbar(QFrame):
         self._lay.addWidget(line)
 
     def _schedule_refocus(self) -> None:
-        # Deferred by one event-loop turn, like GdtInlineEditor's
+        # Deferred by one event-loop turn, like GdtFrameBuilder's
         # `_refocus_after_menu`: the popup is still closing when
         # aboutToHide fires, so taking focus back now would be undone.
         QTimer.singleShot(0, self.refocusRequested.emit)

@@ -79,6 +79,10 @@ class PdfView(QGraphicsView):
     def zoom(self) -> float:
         return self._zoom
 
+    def set_zoom(self, factor: float) -> None:
+        """Absolute zoom (1.0 = 100 %), clamped to the zoom limits."""
+        self._apply_zoom(float(factor))
+
     def zoom_in(self) -> None:
         self._apply_zoom(self._zoom * ZOOM_STEP)
 

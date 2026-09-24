@@ -1,4 +1,5 @@
-"""Page thumbnail dock and thumbnail rendering (Discussion #1, item 10)."""
+"""Page thumbnails (sidebar Pages tab) and thumbnail rendering
+(Discussion #1, item 10)."""
 
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from annoter.services.pdf_render import PageRenderer  # noqa: E402
 from annoter.views.main_window import MainWindow  # noqa: E402
 from annoter.views.page_thumbnails import (  # noqa: E402
     THUMB_MAX_PX,
-    PageThumbnailDock,
+    PageThumbnailList,
 )
 
 
@@ -56,7 +57,7 @@ def test_render_thumbnail_fits_and_caches(qapp, three_page_pdf: Path) -> None:
 
 def test_dock_builds_one_item_per_page(qapp, three_page_pdf: Path) -> None:
     doc = PdfDocument(three_page_pdf)
-    dock = PageThumbnailDock()
+    dock = PageThumbnailList()
     try:
         renderer = PageRenderer(doc, 150, 3)
         dock.set_document(renderer, doc.page_count)
@@ -77,12 +78,12 @@ def test_click_thumbnail_navigates(qapp, three_page_pdf: Path) -> None:
     win = MainWindow()
     try:
         win.open_path(three_page_pdf)
-        assert win._thumbnail_dock._list.count() == 3
-        win._thumbnail_dock.pageClicked.emit(2)
+        assert win._page_list._list.count() == 3
+        win._page_list.pageClicked.emit(2)
         assert win._page_index == 2
         # Page switches keep the dock's current row in sync.
         win._show_page(1)
-        assert win._thumbnail_dock._list.currentRow() == 1
+        assert win._page_list._list.currentRow() == 1
     finally:
         win.close()
 
@@ -92,18 +93,27 @@ def test_dock_cleared_on_close(qapp, three_page_pdf: Path) -> None:
     try:
         win.open_path(three_page_pdf)
         win._on_close()
-        assert win._thumbnail_dock._list.count() == 0
+        assert win._page_list._list.count() == 0
     finally:
         win.close()
 
 
-def test_page_indicator_is_a_button_wired_to_goto(qapp, three_page_pdf: Path) -> None:
+def test_page_indicator_is_an_editable_field(qapp, three_page_pdf: Path) -> None:
+    """The status-bar "Page 1 / 3" button became the canvas pill's page
+    field (UI redesign, Lot D): type a number, press Enter, go there."""
     win = MainWindow()
     try:
         win.open_path(three_page_pdf)
-        assert win._lbl_page.isEnabled()
-        assert win._lbl_page.text() == "Page 1 / 3"
+        pill = win._nav_pill
+        assert pill.page_edit.isEnabled()
+        assert pill.page_edit.text() == "1"
+        assert pill.page_total.text() == "of 3"
+        pill.page_edit.setText("3")
+        pill.page_edit.returnPressed.emit()
+        assert win._page_index == 2
+        assert pill.page_edit.text() == "3"
         win._on_close()
-        assert not win._lbl_page.isEnabled()
+        assert pill.page_edit.text() == ""
+        assert not pill.page_edit.isEnabled()
     finally:
         win.close()

@@ -148,8 +148,6 @@ def test_dock_outline_combo_converts_rect_to_cloud(scene) -> None:
 
 
 def test_dock_label_fields_edit_line_labels_in_place(scene) -> None:
-    from PySide6.QtWidgets import QFormLayout
-
     from annoter.views.properties_dock import PropertiesDock
 
     arrow = ArrowItem(QPointF(0, 0), QPointF(100, 0))
@@ -160,18 +158,9 @@ def test_dock_label_fields_edit_line_labels_in_place(scene) -> None:
     dock.set_undo_stack(scene._undo_stack)
     dock.set_items([arrow])
 
-    host = dock._body_layout.itemAt(0).widget()
-    form = host.layout()
-    edits = {}
-    for i in range(form.rowCount()):
-        lbl = form.itemAt(i, QFormLayout.ItemRole.LabelRole)
-        if lbl is not None and lbl.widget().text() in (
-            "Start label",
-            "End label",
-        ):
-            edits[lbl.widget().text()] = form.itemAt(
-                i, QFormLayout.ItemRole.FieldRole
-            ).widget()
+    edits = {
+        label: dock.field(label) for label in ("Start label", "End label")
+    }
     assert set(edits) == {"Start label", "End label"}
 
     edits["Start label"].setText("datum A")

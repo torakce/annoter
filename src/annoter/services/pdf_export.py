@@ -1002,7 +1002,10 @@ def _annot_to_items(
     rect = annot.rect  # fitz.Rect in PDF points
     colors = annot.colors or {}
     stroke_rgb = colors.get("stroke") or (0.0, 0.0, 0.0)
-    fill_rgb = colors.get("fill")
+    # PyMuPDF reports "no interior color" as an empty list, not None:
+    # treating [] as a color filled every foreign (e.g. Acrobat) square
+    # and circle with black.
+    fill_rgb = colors.get("fill") or None
     border = annot.border or {}
     width = float(border.get("width") or 1.0)
     if width < 0.0:  # PyMuPDF returns -1.0 when undefined

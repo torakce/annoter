@@ -12,7 +12,7 @@ pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
 
 from PySide6.QtCore import QRectF  # noqa: E402
 from PySide6.QtGui import QUndoStack  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFormLayout  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from annoter.views.items.shapes import RectangleItem  # noqa: E402
 from annoter.views.properties_dock import PropertiesDock  # noqa: E402
@@ -33,15 +33,8 @@ def dock(qapp):
 
 
 def _find_row(dock: PropertiesDock, label: str):
-    """Find the input widget for a given row label in the built form."""
-    host = dock._body_layout.itemAt(0).widget()
-    form = host.layout()
-    for i in range(form.rowCount()):
-        lbl_item = form.itemAt(i, QFormLayout.ItemRole.LabelRole)
-        if lbl_item is not None and lbl_item.widget().text() == label:
-            field_item = form.itemAt(i, QFormLayout.ItemRole.FieldRole)
-            return field_item.widget()
-    raise AssertionError(f"row {label!r} not found")
+    """Input widget of a row, through the inspector's field() lookup."""
+    return dock.field(label)
 
 
 def test_spin_arrow_clicks_update_live_without_undo(dock) -> None:
@@ -149,9 +142,10 @@ def test_geometry_x_field_live_preview_and_single_commit(dock) -> None:
 
     d, stack = dock
     item = RectangleItem(QRectF(10, 20, 30, 40))
+    d.set_unit("pt")
     d.set_items([item])
 
-    x_spin = _find_row(d, "X (pt)")
+    x_spin = _find_row(d, "X")
     original_x_pt = px_to_pt(10.0)
     x_spin.setValue(original_x_pt + 50)
     assert item_scene_rect(item).x() > 10.0  # moved live

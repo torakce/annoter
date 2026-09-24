@@ -2,7 +2,7 @@
 
 A small frame with a multi-line text field shown over the page next to
 the note icon, mirroring Acrobat's note popup. Follows the same
-lifecycle contract as `GdtInlineEditor`:
+lifecycle contract as `GdtFrameBuilder`:
 
     - `committed()` on Ctrl+Enter, the confirm button, or when focus
       leaves the editor. The caller pushes the undo command.

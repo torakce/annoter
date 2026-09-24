@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QSize, Qt, QSettings, QTimer
+from PySide6.QtCore import QByteArray, QPointF, Qt, QSettings, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
     QDragEnterEvent,
+    QDragLeaveEvent,
     QDropEvent,
     QKeySequence,
     QUndoGroup,
@@ -22,13 +23,11 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QFileDialog,
     QInputDialog,
-    QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
-    QPushButton,
     QStackedWidget,
-    QToolBar,
+    QWidget,
 )
 
 from annoter.config import (
@@ -71,30 +70,53 @@ from annoter.services.pdf_export import (
     read_annotations,
     write_annotations,
 )
+from annoter.services.command_usage import CommandUsage
 from annoter.services.pdf_render import PageRenderer
 from annoter.services.recent_files import RecentFiles
+from annoter.services.thumbnail_cache import ThumbnailCache
 from annoter.services.theme import Theme, apply as apply_theme
-from annoter.views.annotation_list import AnnotationListDock
+from annoter.services.palette import PaletteStore
+from annoter.services.tokens import tokens_for
+from annoter.views.canvas_overlays import (
+    CanvasNavPill,
+    CanvasToast,
+    ToolHintChip,
+    hint_for,
+)
+from annoter.views.inspector_widgets import PaletteEditor
+from annoter.views.command_palette import (
+    FILES_GROUP,
+    CommandEntry,
+    CommandPalette,
+    entries_from_menu,
+)
+from annoter.views.line_icons import line_icon
+from annoter.views.top_bar import TopBar
 from annoter.views.color_picker import popup_color_picker
 from annoter.views.dimension_editor import DimensionInlineEditor
 from annoter.views.edit_toolbar import EditToolbar
-from annoter.views.gdt_editor import GdtInlineEditor
-from annoter.views.icons import action_icon, color_swatch_icon, end_icon
+from annoter.views.gdt_editor import GdtFrameBuilder
+from annoter.views.icons import action_icon, end_icon
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.dimension import DimensionAnnotationItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.note import StickyNoteItem
+from annoter.views.items.stamp import STAMP_PRESETS
 from annoter.views.items.sub_text import SubTextItem
 from annoter.views.items.text import TextAnnotationItem
 from annoter.views.note_editor import NoteEditor
-from annoter.views.page_thumbnails import PageThumbnailDock
+from annoter.views.document_sidebar import (
+    SIDEBAR_WIDTH,
+    TAB_ANNOTATIONS,
+    DocumentSidebar,
+)
 from annoter.views.pdf_scene import PdfScene
 from annoter.views.pdf_view import PdfView
-from annoter.views.properties_dock import PropertiesDock
+from annoter.views.properties_dock import INSPECTOR_WIDTH, PropertiesDock
 from annoter.views.selection_toolbar import SelectionToolbar
-from annoter.views.stroke_spin import STROKE_LADDER, StrokeSpinBox
-from annoter.views.tool_palette import ToolPalette
+from annoter.views.stroke_spin import STROKE_LADDER
+from annoter.views.tool_rail import TOOL_LABELS, ToolFlyout, ToolRail
 from annoter.views.welcome_screen import WelcomeScreen
 
 
@@ -121,6 +143,12 @@ _PAINTABLE_PROPS: tuple[str, ...] = (
 )
 
 
+# Bumped when the dock / tool-bar layout changes incompatibly, so a
+# layout saved by an older version is ignored instead of misplacing the
+# new panels (2: UI redesign, Lot E -- one left sidebar).
+_WINDOW_STATE_VERSION = 2
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -130,6 +158,13 @@ class MainWindow(QMainWindow):
 
         self._theme: Theme = Theme.LIGHT
         self._doc: PdfDocument | None = None
+        # Start page shown full width (UI redesign, Lot G): the panels
+        # step aside and come back as the user left them.
+        self._welcome_mode: bool = False
+        self._panel_visibility: dict[QWidget, bool] = {}
+        # Last dock / tool-bar layout seen with a document open -- what
+        # gets saved even when the app is closed from the start page.
+        self._layout_state: QByteArray | None = None
         # True while the open document is an unsaved scratch PDF created
         # by "New blank document" -- Save then redirects to Save As.
         self._is_untitled: bool = False
@@ -155,10 +190,15 @@ class MainWindow(QMainWindow):
 
         # In-place GD&T editing (one editor at a time, anchored to the
         # item being created or edited).
-        self._gdt_editor: GdtInlineEditor | None = None
+        self._gdt_editor: GdtFrameBuilder | None = None
         self._gdt_edit_item: GdtAnnotationItem | None = None
         self._gdt_edit_is_new: bool = False
         self._gdt_old_state: GdtState | None = None
+        # What a new frame was opened with: closing it unchanged drops it.
+        self._gdt_initial_state: GdtState | None = None
+        # New frames start from the last characteristic placed (Lot I):
+        # a drawing usually repeats the same control many times.
+        self._last_gdt_characteristic = GdtState().characteristic
 
         # In-place Dimension editing, same contract as GD&T above.
         self._dimension_editor: DimensionInlineEditor | None = None
@@ -187,11 +227,12 @@ class MainWindow(QMainWindow):
 
         # Central area: welcome page while no document is open, the PDF
         # view once one is (Discussion #1, item 12).
-        self._welcome = WelcomeScreen(self)
+        self._welcome = WelcomeScreen(self, thumbnails=ThumbnailCache())
         self._welcome.openRequested.connect(self._on_open)
         self._welcome.blankRequested.connect(self._new_blank_document)
         self._welcome.openPathRequested.connect(self._open_path)
         self._welcome.removePathRequested.connect(self._recent_remove)
+        self._welcome.clearRecentRequested.connect(self._clear_recent)
         self._central = QStackedWidget(self)
         self._central.addWidget(self._welcome)
         self._central.addWidget(self._view)
@@ -257,21 +298,57 @@ class MainWindow(QMainWindow):
         # annotation clicked afterwards until it is toggled off.
         self._format_paint_style: dict[str, object] | None = None
 
-        self._tool_palette = ToolPalette(self._tool_controller, self)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self._tool_palette)
+        # Vertical icon rail (UI redesign, Lot C): the single place to
+        # pick a drawing tool, as the old Tools dock was.
+        self._tool_rail = ToolRail(self._tool_controller, self)
+        self.addToolBar(Qt.LeftToolBarArea, self._tool_rail)
+        # Variant chooser shown next to the rail for Line / arrow and
+        # Stamp; floats over the window, does not grab input.
+        fly = ToolFlyout(STAMP_PRESETS, self)
+        self._tool_flyout = fly
+        fly.lineKindPicked.connect(self._tool_controller.set_line_kind)
+        fly.stampPicked.connect(self._tool_controller.set_stamp_preset)
+        fly.customStampRequested.connect(self._ask_custom_stamp)
+        self._tool_controller.lineKindChanged.connect(fly.sync_line_kind)
+        self._tool_controller.stampPresetChanged.connect(fly.sync_stamp)
 
-        self._thumbnail_dock = PageThumbnailDock(self)
-        self._thumbnail_dock.pageClicked.connect(self._show_page)
-        self._thumbnail_dock.pageMoved.connect(self._on_page_reordered)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self._thumbnail_dock)
+        # Left panel (Lot E): Pages / Annotations tabs in one dock.
+        self._sidebar = DocumentSidebar(self)
+        self._page_list = self._sidebar.pages
+        self._page_list.pageClicked.connect(self._show_page)
+        self._page_list.pageMoved.connect(self._on_page_reordered)
+        self._annotation_tree = self._sidebar.annotations
+        tree = self._annotation_tree
+        tree.deleteRequested.connect(self._delete_selected)
+        tree.selectionRequested.connect(self._on_sidebar_selection)
+        tree.jumpRequested.connect(self._on_sidebar_jump)
+        tree.pageRequested.connect(self._show_page)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._sidebar)
+        self.resizeDocks([self._sidebar], [SIDEBAR_WIDTH], Qt.Horizontal)
+        # Undo / redo add and remove items without annotationsChanged.
+        self._undo_group.indexChanged.connect(
+            lambda _i: self._refresh_sidebar()
+        )
 
-        self._annotation_list = AnnotationListDock(self)
-        self._annotation_list.deleteRequested.connect(self._delete_selected)
-        self.addDockWidget(Qt.RightDockWidgetArea, self._annotation_list)
+        # The user's quick colors (Lot F), shown by the inspector.
+        # QSettings() follows the organization / application names app.py
+        # sets ("Annoter" / "Annoter"), so tests can redirect it.
+        self._palette = PaletteStore(QSettings(), self)
 
-        self._properties_dock = PropertiesDock(self)
-        self.addDockWidget(Qt.RightDockWidgetArea, self._properties_dock)
-        self.tabifyDockWidget(self._annotation_list, self._properties_dock)
+        # Right panel: the inspector (Lot F).
+        pd = PropertiesDock(self, palette=self._palette)
+        self._properties_dock = pd
+        pd.colorPicked.connect(self._on_quick_color_picked)
+        pd.strokePicked.connect(self._on_quick_stroke_picked)
+        pd.strokeCommitted.connect(self._tool_controller.set_stroke)
+        pd.editPaletteRequested.connect(self._edit_palette)
+        pd.editRequested.connect(self._edit_selected)
+        pd.duplicateRequested.connect(self._duplicate_selected)
+        pd.deleteRequested.connect(self._delete_selected)
+        self._tool_controller.colorChanged.connect(self._sync_inspector_defaults)
+        self._tool_controller.strokeChanged.connect(self._sync_inspector_defaults)
+        self.addDockWidget(Qt.RightDockWidgetArea, pd)
+        self.resizeDocks([pd], [INSPECTOR_WIDTH], Qt.Horizontal)
 
         self._recent = RecentFiles(MAX_RECENT_FILES, self)
         self._recent.changed.connect(self._refresh_recent_menu)
@@ -280,8 +357,15 @@ class MainWindow(QMainWindow):
 
         self._build_actions()
         self._build_menus()
+        self._build_top_bar()
         self._build_toolbar()
-        self._build_status_bar()
+        self._build_canvas_overlays()
+        self._properties_dock.set_actions(
+            bring_front=self.act_bring_front,
+            send_back=self.act_send_back,
+            format_painter=self.act_format_painter,
+        )
+        self._sync_inspector_defaults()
         self._refresh_recent_menu()
 
         self._view.zoomChanged.connect(self._on_zoom_changed)
@@ -302,8 +386,9 @@ class MainWindow(QMainWindow):
         )
 
         # Persistent prefs (window geometry / dock state / theme).
-        self._settings = QSettings("Annoter", "Annoter")
+        self._settings = QSettings()
         self._restore_settings()
+        self._set_welcome_mode(self._doc is None)
 
     # ------------------------------------------------------------------
     # build UI
@@ -535,23 +620,41 @@ class MainWindow(QMainWindow):
         self._theme_group.addAction(self.act_theme_light)
         self._theme_group.addAction(self.act_theme_dark)
 
-    def _build_menus(self) -> None:
-        mb = self.menuBar()
+        # One-click light/dark switch for the top bar.
+        self.act_toggle_theme = QAction("Switch &Light / Dark Theme", self)
+        self.act_toggle_theme.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        self.act_toggle_theme.triggered.connect(
+            lambda: self._set_theme(
+                Theme.LIGHT if self._theme is Theme.DARK else Theme.DARK
+            )
+        )
 
-        m_file = mb.addMenu("&File")
-        m_file.addAction(self.act_open)
-        m_file.addAction(self.act_save)
-        m_file.addAction(self.act_save_as)
-        m_file.addAction(self.act_export_images)
-        m_file.addSeparator()
-        m_file.addAction(self.act_insert_pdf)
-        m_file.addAction(self.act_resize_doc)
-        m_file.addSeparator()
-        m_file.addAction(self.act_close)
-        m_file.addSeparator()
-        self._menu_recent = m_file.addMenu("Recent &Files")
-        m_file.addSeparator()
-        m_file.addAction(self.act_quit)
+        # ---- canvas tool hints (Lot D) ----
+        self.act_show_hints = QAction("Show Tool &Hints", self)
+        self.act_show_hints.setCheckable(True)
+        self.act_show_hints.setChecked(True)
+        self.act_show_hints.toggled.connect(self._set_tool_hints_enabled)
+
+        # ---- command palette (Ctrl+K) ----
+        self.act_command_palette = QAction("Search &Commands...", self)
+        self.act_command_palette.setShortcut(QKeySequence("Ctrl+K"))
+        self.act_command_palette.triggered.connect(self._open_command_palette)
+
+    def _build_menus(self) -> None:
+        # UI redesign, Lot B: one main menu behind the top bar's menu
+        # button replaces the menu bar. File commands sit at its root;
+        # Edit / View / Page keep their former content as submenus.
+        mb = QMenu(self)
+        mb.setObjectName("MainMenu")
+        self._main_menu = mb
+
+        mb.addAction(self.act_open)
+        self._menu_recent = mb.addMenu("Open &Recent")
+        mb.addSeparator()
+        mb.addAction(self.act_save)
+        mb.addAction(self.act_save_as)
+        mb.addAction(self.act_export_images)
+        mb.addSeparator()
 
         m_edit = mb.addMenu("&Edit")
         m_edit.addAction(self.act_undo)
@@ -603,12 +706,12 @@ class MainWindow(QMainWindow):
         m_view.addSeparator()
         m_panels = m_view.addMenu("&Panels")
         for dock in (
-            self._tool_palette,
-            self._thumbnail_dock,
-            self._annotation_list,
+            self._tool_rail,
+            self._sidebar,
             self._properties_dock,
         ):
             m_panels.addAction(dock.toggleViewAction())
+        m_view.addAction(self.act_show_hints)
         m_view.addSeparator()
         m_theme = m_view.addMenu("&Theme")
         m_theme.addAction(self.act_theme_light)
@@ -621,103 +724,209 @@ class MainWindow(QMainWindow):
         m_page.addAction(self.act_last)
         m_page.addAction(self.act_goto)
 
+        mb.addSeparator()
+        mb.addAction(self.act_insert_pdf)
+        mb.addAction(self.act_resize_doc)
+        mb.addSeparator()
+        mb.addAction(self.act_command_palette)
+        mb.addSeparator()
+        mb.addAction(self.act_close)
+        mb.addAction(self.act_quit)
+
+        # Actions living only in a popup menu (or nowhere visible) need
+        # to be on the window for their shortcuts to fire.
+        self.addActions(
+            [
+                v
+                for k, v in vars(self).items()
+                if k.startswith("act_") and isinstance(v, QAction)
+            ]
+        )
+
+    def _build_top_bar(self) -> None:
+        bar = TopBar(self)
+        bar.set_menu(self._main_menu)
+        bar.bind(
+            undo=self.act_undo,
+            redo=self.act_redo,
+            save=self.act_save,
+            toggle_theme=self.act_toggle_theme,
+        )
+        bar.searchRequested.connect(self._open_command_palette)
+        self.setMenuWidget(bar)
+        self._top_bar = bar
+        self._command_palette: CommandPalette | None = None
+        # What the palette ranks by (Lot H); same store as the prefs.
+        self._command_usage = CommandUsage(QSettings(), self)
+
+    # ------------------------------------------------------------------
+    # command palette
+    # ------------------------------------------------------------------
+    def _command_entries(self) -> list[CommandEntry]:
+        # Open Recent's file actions are replaced by the palette's own
+        # "Recent files" group; its Clear Recent Files command stays.
+        file_actions = [
+            a
+            for a in self._menu_recent.actions()
+            if a is not self.act_clear_recent
+        ]
+        entries = entries_from_menu(self._main_menu, skip=file_actions)
+        for e in entries:
+            if e.group == "Open Recent":  # i.e. Clear Recent Files
+                e.group = "File"
+        for tool, label in TOOL_LABELS:
+            entries.append(
+                CommandEntry(
+                    label=f"{label} tool",
+                    group="Tools",
+                    run=lambda t=tool: self._tool_controller.set_tool(t),
+                    enabled=self._doc is not None or tool is Tool.SELECT,
+                )
+            )
+        entries.extend(self._recent_file_entries())
+        return entries
+
+    def _recent_file_entries(self) -> list[CommandEntry]:
+        """Recent files as palette entries (Lot H): searchable by name
+        and folder. Files that are gone and the open document are left
+        out -- neither is something to open from here."""
+        current = ""
+        if self._doc is not None and not self._is_untitled:
+            current = str(Path(self._doc.path).resolve())
+        icon = line_icon("file", self._gdt_icon_color())
+        out: list[CommandEntry] = []
+        for path in self._recent.list():
+            p = Path(path)
+            if path == current or not p.is_file():
+                continue
+            out.append(
+                CommandEntry(
+                    label=p.name,
+                    group=FILES_GROUP,
+                    run=lambda f=path: self._open_path(f),
+                    icon=icon,
+                    detail=str(p.parent),
+                )
+            )
+        return out
+
+    def _open_command_palette(self) -> None:
+        if self._command_palette is None:
+            self._command_palette = CommandPalette(
+                self, usage=self._command_usage
+            )
+            self._command_palette.set_colors(tokens_for(self._theme))
+        self._command_palette.open_with(
+            self._command_entries(), anchor=self
+        )
+
     def _build_toolbar(self) -> None:
-        tb = QToolBar("Quick Access", self)
-        tb.setObjectName("MainToolBar")
-        tb.setMovable(False)
-        tb.setIconSize(QSize(20, 20))
-        self.addToolBar(Qt.TopToolBarArea, tb)
-        self._toolbar = tb
-
-        tb.addAction(self.act_open)
-        tb.addAction(self.act_save)
-        tb.addSeparator()
-        tb.addAction(self.act_undo)
-        tb.addAction(self.act_redo)
-        tb.addSeparator()
-
-        # Office-style quick style controls, bound to the ToolController
-        # (the left Tools dock stays the single place to pick a tool).
-        self._toolbar_color_act = QAction("Color", self)
-        self._toolbar_color_act.setToolTip(
-            "Drawing color (applies to the next annotation)"
-        )
-        self._toolbar_color_act.triggered.connect(
-            self._pick_toolbar_color
-        )
-        tb.addAction(self._toolbar_color_act)
-
-        self._toolbar_stroke_spin = StrokeSpinBox()
-        self._toolbar_stroke_spin.setToolTip(
-            "Stroke width (type a value, arrows step through presets)"
-        )
-        self._toolbar_stroke_spin.valueChanged.connect(
-            lambda v: self._on_quick_stroke_picked(float(v))
-        )
-        tb.addWidget(self._toolbar_stroke_spin)
-
-        self._tool_controller.colorChanged.connect(
-            self._sync_toolbar_color
-        )
-        self._tool_controller.strokeChanged.connect(
-            self._sync_toolbar_stroke
-        )
-        self._sync_toolbar_color(self._tool_controller.color())
-        self._sync_toolbar_stroke(self._tool_controller.stroke())
-
-        tb.addSeparator()
-        tb.addAction(self.act_format_painter)
-
-        tb.addSeparator()
-        tb.addAction(self.act_zoom_out)
-        tb.addAction(self.act_zoom_in)
-        tb.addAction(self.act_zoom_fit)
-        tb.addAction(self.act_zoom_actual)
-
-        # Tooltips advertise the keyboard shortcut where one exists.
-        for act in tb.actions():
+        """No tool bar left (UI redesign): Open / Save / Undo / Redo live
+        in the top bar (Lot B), zoom in the canvas pill (Lot D), color /
+        stroke and Format Painter in the inspector (Lot F). What remains
+        is the per-action tooltip and icon setup."""
+        # Tooltips advertise the keyboard shortcut where one exists (the
+        # top bar and the canvas pill mirror these tooltips).
+        for name, act in vars(self).items():
+            if not name.startswith("act_") or not isinstance(act, QAction):
+                continue
             seq = act.shortcut()
             if not seq.isEmpty():
-                plain = act.text().replace("&", "")
+                plain = act.text().replace("&", "").rstrip(".")
                 act.setToolTip(f"{plain} ({seq.toString()})")
 
         self._apply_icon_theme()
 
+    def _build_canvas_overlays(self) -> None:
+        """Hint chip, page / zoom pill and toast over the view (Lot D)."""
+        vp = self._view.viewport()
+        self._tool_hint = ToolHintChip(vp)
+        self._nav_pill = CanvasNavPill(
+            vp,
+            prev_page=self.act_prev,
+            next_page=self.act_next,
+            zoom_out=self.act_zoom_out,
+            zoom_in=self.act_zoom_in,
+            zoom_fit=self.act_zoom_fit,
+            zoom_actual=self.act_zoom_actual,
+            zoom_window=self.act_zoom_window,
+            rotate=self.act_rotate_cw,
+        )
+        self._nav_pill.pageRequested.connect(self._show_page)
+        self._nav_pill.zoomRequested.connect(self._view.set_zoom)
+        self._toast = CanvasToast(vp)
+        tc = self._tool_controller
+        tc.toolChanged.connect(self._refresh_tool_hint)
+        tc.lineKindChanged.connect(self._refresh_tool_hint)
+        tc.stampPresetChanged.connect(self._refresh_tool_hint)
+        self._refresh_tool_hint()
+
+    def _refresh_tool_hint(self, *_args) -> None:
+        tc = self._tool_controller
+        self._tool_hint.set_hint(
+            hint_for(tc.tool(), tc.line_kind(), tc.stamp_preset()[0])
+        )
+
+    def _set_tool_hints_enabled(self, on: bool) -> None:
+        self._tool_hint.set_hints_enabled(on)
+        if hasattr(self, "_settings"):
+            self._settings.setValue("ui/show_tool_hints", bool(on))
+
+    def _show_message(self, text: str, msec: int = 4000) -> None:
+        """Transient message over the canvas (formerly the status bar)."""
+        self._toast.show_message(text, msec)
+
     def _apply_icon_theme(self) -> None:
         """Repaint code-drawn toolbar icons in the theme's glyph color."""
         c = self._gdt_icon_color()
-        self.act_open.setIcon(action_icon("open", color=c))
-        self.act_save.setIcon(action_icon("save", color=c))
-        self.act_undo.setIcon(action_icon("undo", color=c))
-        self.act_redo.setIcon(action_icon("redo", color=c))
-        self.act_zoom_in.setIcon(action_icon("zoom-in", color=c))
-        self.act_zoom_out.setIcon(action_icon("zoom-out", color=c))
-        self.act_zoom_fit.setIcon(action_icon("zoom-fit", color=c))
-        self.act_zoom_actual.setIcon(action_icon("zoom-actual", color=c))
+        tokens = tokens_for(self._theme)
+        self.act_open.setIcon(line_icon("open", c))
+        self.act_save.setIcon(line_icon("save", c))
+        self.act_undo.setIcon(line_icon("undo", c))
+        self.act_redo.setIcon(line_icon("redo", c))
+        self.act_export_images.setIcon(line_icon("export-image", c))
+        self.act_insert_pdf.setIcon(line_icon("insert-pages", c))
+        self.act_resize_doc.setIcon(line_icon("resize", c))
+        self.act_command_palette.setIcon(line_icon("search", c))
+        self.act_close.setIcon(line_icon("close-doc", c))
+        self.act_prev.setIcon(line_icon("chevron-left", c))
+        self.act_next.setIcon(line_icon("chevron-right", c))
+        self.act_zoom_in.setIcon(line_icon("zoom-in", c))
+        self.act_zoom_out.setIcon(line_icon("zoom-out", c))
+        self.act_zoom_fit.setIcon(line_icon("fit", c))
+        self.act_zoom_window.setIcon(line_icon("zoom-area", c))
+        self.act_rotate_cw.setIcon(line_icon("rotate-cw", c))
+        self._menu_recent.setIcon(line_icon("recent", c))
+        # The theme button shows where a click takes you.
+        self.act_toggle_theme.setIcon(
+            line_icon("sun" if self._theme is Theme.DARK else "moon", c)
+        )
+        self.act_toggle_theme.setToolTip(
+            "Switch to light theme (Ctrl+Shift+L)"
+            if self._theme is Theme.DARK
+            else "Switch to dark theme (Ctrl+Shift+L)"
+        )
+        self._top_bar.set_icon_color(c, QColor(tokens.on_accent))
         self.act_format_painter.setIcon(action_icon("format-painter", color=c))
 
     # ------------------------------------------------------------------
     # toolbar quick style controls
     # ------------------------------------------------------------------
-    def _pick_toolbar_color(self) -> None:
-        # Anchor the popup under the toolbar button, like Office.
-        widget = self._toolbar.widgetForAction(self._toolbar_color_act)
-        pos = (
-            widget.mapToGlobal(widget.rect().bottomLeft())
-            if widget is not None
-            else None
-        )
-        popup_color_picker(
-            self,
-            self._tool_controller.color(),
-            self._on_quick_color_picked,
-            global_pos=pos,
+    def _sync_inspector_defaults(self, *_args) -> None:
+        self._properties_dock.set_defaults(
+            self._tool_controller.color(), self._tool_controller.stroke()
         )
 
+    def _edit_palette(self) -> None:
+        dlg = PaletteEditor(
+            self._palette, self, icon_color=self._gdt_icon_color()
+        )
+        dlg.exec()
+
     def _on_quick_color_picked(self, color: QColor) -> None:
-        """Toolbar color choice: sets the drawing color for future
-        annotations AND recolors the current selection (undoably), like
-        Office's color controls."""
+        """Inspector color choice (formerly the toolbar's): sets the
+        drawing color for future annotations AND recolors the current
+        selection (undoably), like Office's color controls."""
         self._tool_controller.set_color(color)
         items = self._selected_annotations()
         if not items:
@@ -730,7 +939,7 @@ class MainWindow(QMainWindow):
             cmd.redo()
 
     def _on_quick_stroke_picked(self, width: float) -> None:
-        """Toolbar stroke choice: same dual behavior as the color."""
+        """Inspector stroke preset: same dual behavior as the color."""
         self._tool_controller.set_stroke(width)
         items = self._selected_annotations()
         if not items:
@@ -741,32 +950,6 @@ class MainWindow(QMainWindow):
             stack.push(cmd)
         else:
             cmd.redo()
-
-    def _sync_toolbar_color(self, color: QColor) -> None:
-        self._toolbar_color_act.setIcon(color_swatch_icon(color))
-
-    def _sync_toolbar_stroke(self, width: float) -> None:
-        spin = self._toolbar_stroke_spin
-        # Programmatic sync must not loop back into the quick-stroke
-        # handler (which would restyle the selection as a side effect).
-        spin.blockSignals(True)
-        spin.setValue(max(spin.minimum(), int(round(width))))
-        spin.blockSignals(False)
-
-    def _build_status_bar(self) -> None:
-        self._lbl_path = QLabel("")
-        # Flat button, not a label: one click opens Go to Page, making
-        # the page indicator an obvious navigation affordance.
-        self._lbl_page = QPushButton("-")
-        self._lbl_page.setFlat(True)
-        self._lbl_page.setCursor(Qt.PointingHandCursor)
-        self._lbl_page.setToolTip("Go to page... (Ctrl+Alt+G)")
-        self._lbl_page.clicked.connect(self._goto_page_dialog)
-        self._lbl_zoom = QLabel("100 %")
-        sb = self.statusBar()
-        sb.addWidget(self._lbl_path, 1)
-        sb.addPermanentWidget(self._lbl_page)
-        sb.addPermanentWidget(self._lbl_zoom)
 
     def _refresh_recent_menu(self) -> None:
         self._menu_recent.clear()
@@ -829,8 +1012,11 @@ class MainWindow(QMainWindow):
             self.act_send_back,
         ):
             a.setEnabled(has_doc)
-        if hasattr(self, "_lbl_page"):
-            self._lbl_page.setEnabled(has_doc)
+        # Drawing tools mean nothing without a page to draw on.
+        if hasattr(self, "_tool_rail"):
+            self._tool_rail.setEnabled(has_doc)
+            if not has_doc:
+                self._tool_flyout.dismiss()
 
     # ------------------------------------------------------------------
     # file ops
@@ -862,6 +1048,43 @@ class MainWindow(QMainWindow):
 
     def _recent_remove(self, path: str) -> None:
         self._recent.remove(path)
+
+    def _clear_recent(self) -> None:
+        self._recent.clear()
+
+    # ------------------------------------------------------------------
+    # start page vs document view
+    # ------------------------------------------------------------------
+    def _chrome_panels(self) -> tuple[QWidget, ...]:
+        return (self._tool_rail, self._sidebar, self._properties_dock)
+
+    def _set_welcome_mode(self, on: bool) -> None:
+        """Give the start page the full width.
+
+        The tool rail, the sidebar and the inspector mean nothing
+        without a document, so they are hidden while the start page
+        shows and restored exactly as the user left them (a panel they
+        had closed stays closed). Their View > Panels toggles are
+        disabled meanwhile so the two states cannot get crossed.
+        """
+        if on == self._welcome_mode:
+            return
+        self._welcome_mode = on
+        panels = self._chrome_panels()
+        if on:
+            if self.isVisible():
+                self._layout_state = self.saveState(_WINDOW_STATE_VERSION)
+            self._panel_visibility = {p: not p.isHidden() for p in panels}
+            for p in panels:
+                p.hide()
+        else:
+            for p in panels:
+                p.setVisible(self._panel_visibility.get(p, True))
+        for p in panels:
+            p.toggleViewAction().setEnabled(not on)
+
+    def is_welcome_mode(self) -> bool:
+        return self._welcome_mode
 
     @staticmethod
     def _image_to_scratch_pdf(path: str) -> Path | None:
@@ -966,8 +1189,9 @@ class MainWindow(QMainWindow):
         if add_to_recent:
             self._recent.add(path)
         self._refresh_window_title()
-        self._thumbnail_dock.set_document(self._renderer, doc.page_count)
+        self._page_list.set_document(self._renderer, doc.page_count)
         self._central.setCurrentWidget(self._view)
+        self._set_welcome_mode(False)
         self._show_page(0, _is_initial=True)
         # Defer fit to let the layout settle when called during startup.
         QTimer.singleShot(0, self._view.zoom_to_fit)
@@ -1131,7 +1355,9 @@ class MainWindow(QMainWindow):
         # placeholder set in _refresh_window_title). `_clean` absorbs the
         # cleanChanged(bool) signal argument; the flag is recomputed over
         # every page stack, not just the emitting one.
-        self.setWindowModified(self._has_unsaved_changes())
+        unsaved = self._has_unsaved_changes()
+        self.setWindowModified(unsaved)
+        self._top_bar.set_unsaved(unsaved)
 
     def _confirm_discard_changes(self) -> bool:
         """Prompt to save when the document has unsaved changes.
@@ -1182,14 +1408,18 @@ class MainWindow(QMainWindow):
             self._undo_group.removeStack(stack)
         self._page_stacks = {}
         self._page_items = {}
+        # Before clear_page deletes the items: the tree must not keep
+        # rows pointing at them.
+        self._annotation_tree.clear_all()
         self._scene.clear_page()
         self._page_index = 0
         self._is_untitled = False
-        self._annotation_list.set_page_item(None)
-        self._thumbnail_dock.set_document(None)
+        self._page_list.set_document(None)
+        self._sidebar.set_counts(0, 0)
         self._refresh_window_title()
-        self._lbl_page.setText("-")
+        self._nav_pill.set_page(0, 0)
         self._central.setCurrentWidget(self._welcome)
+        self._set_welcome_mode(True)
         self._welcome.set_recent(self._recent.list())
         self._update_actions_enabled()
 
@@ -1208,7 +1438,7 @@ class MainWindow(QMainWindow):
     def _refresh_after_structure_change(self, show_index: int) -> None:
         self._renderer.clear_cache()
         self._mark_structure_dirty()
-        self._thumbnail_dock.set_document(
+        self._page_list.set_document(
             self._renderer, self._doc.page_count
         )
         self._show_page(show_index, _is_initial=True)
@@ -1420,7 +1650,7 @@ class MainWindow(QMainWindow):
         finally:
             # Put the on-screen page's items back.
             self._show_page(self._page_index, _is_initial=True)
-        self.statusBar().showMessage(
+        self._show_message(
             f"Exported {len(written)} file(s)", 5000
         )
 
@@ -1428,7 +1658,7 @@ class MainWindow(QMainWindow):
         if self._renderer is not None:
             self._renderer.set_grayscale(checked)
             self._stash_current_page_items()
-            self._thumbnail_dock.set_document(
+            self._page_list.set_document(
                 self._renderer, self._doc.page_count
             )
             self._show_page(self._page_index, _is_initial=True)
@@ -1438,11 +1668,14 @@ class MainWindow(QMainWindow):
         # setWindowModified(True) and disappears otherwise.
         if self._doc is None:
             self.setWindowTitle("Annoter")
-            self._lbl_path.setText("")
+            self._top_bar.set_document_name(None)
             self.setWindowModified(False)
+            self._top_bar.set_unsaved(False)
         else:
             self.setWindowTitle(f"{self._doc.path.name}[*] - Annoter")
-            self._lbl_path.setText(str(self._doc.path))
+            self._top_bar.set_document_name(
+                self._doc.path.name, tooltip=str(self._doc.path)
+            )
             self._update_modified_flag()
 
     # ------------------------------------------------------------------
@@ -1484,12 +1717,10 @@ class MainWindow(QMainWindow):
 
         # Restore this page's annotations.
         self._scene.attach_children(self._page_items.get(index, []))
-        self._annotation_list.set_page_item(self._scene.page_item())
+        self._refresh_sidebar()
 
-        self._lbl_page.setText(
-            f"Page {index + 1} / {self._doc.page_count}"
-        )
-        self._thumbnail_dock.set_current_page(index)
+        self._nav_pill.set_page(index, self._doc.page_count)
+        self._page_list.set_current_page(index)
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
 
@@ -1531,7 +1762,7 @@ class MainWindow(QMainWindow):
     # zoom display
     # ------------------------------------------------------------------
     def _on_zoom_changed(self, factor: float) -> None:
-        self._lbl_zoom.setText(f"{factor * 100:.0f} %")
+        self._nav_pill.set_zoom(factor)
         self._maybe_rerender_for_zoom(factor)
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
@@ -1696,7 +1927,7 @@ class MainWindow(QMainWindow):
             # bounce the toggle back off instead of entering a mode with
             # no captured style.
             self.act_format_painter.setChecked(False)
-            self.statusBar().showMessage(
+            self._show_message(
                 "Select exactly one annotation to copy its style, "
                 "then turn on Format Painter.",
                 4000,
@@ -1709,7 +1940,7 @@ class MainWindow(QMainWindow):
             if hasattr(source, name)
         }
         self._tool_controller.set_tool(Tool.FORMAT_PAINTER)
-        self.statusBar().showMessage(
+        self._show_message(
             "Format Painter: click annotations to apply the copied "
             "style. Esc or toggle off to stop.",
             4000,
@@ -1737,10 +1968,69 @@ class MainWindow(QMainWindow):
         self._on_annotations_changed()
 
     def _on_annotations_changed(self) -> None:
-        self._annotation_list.refresh()
+        self._refresh_sidebar()
+
+    # ------------------------------------------------------------------
+    # left sidebar (Lot E)
+    # ------------------------------------------------------------------
+    def _annotations_by_page(self) -> dict[int, list[AnnotationItem]]:
+        """Live annotations of every page: the stashed buckets for the
+        other pages, the scene's children for the page on screen (its
+        bucket may be stale once items were added or deleted)."""
+        if self._doc is None:
+            return {}
+        pages = {
+            p: list(items)
+            for p, items in self._page_items.items()
+            if p != self._page_index
+        }
+        page_item = self._scene.page_item()
+        if page_item is not None:
+            pages[self._page_index] = [
+                c
+                for c in page_item.childItems()
+                if isinstance(c, AnnotationItem)
+            ]
+        return pages
+
+    def _refresh_sidebar(self) -> None:
+        if not hasattr(self, "_annotation_tree"):
+            return
+        pages = self._annotations_by_page()
+        self._annotation_tree.set_annotations(pages, self._page_index)
+        self._annotation_tree.sync_selection(self._scene.selectedItems())
+        self._page_list.set_annotation_counts(
+            {p: len(v) for p, v in pages.items()}
+        )
+        self._sidebar.set_counts(
+            self._doc.page_count if self._doc is not None else 0,
+            sum(len(v) for v in pages.values()),
+        )
+
+    def _on_sidebar_selection(self, items: list) -> None:
+        """Rows picked in the Annotations tab (current page only)."""
+        wanted = {id(it) for it in items}
+        for it in self._scene.selectedItems():
+            if id(it) not in wanted:
+                it.setSelected(False)
+        for it in items:
+            if it.scene() is self._scene:
+                it.setSelected(True)
+        if len(items) == 1 and items[0].scene() is self._scene:
+            self._view.ensureVisible(items[0], 40, 40)
+
+    def _on_sidebar_jump(self, page: int, item: AnnotationItem) -> None:
+        """A row on another page: go there, then select the annotation."""
+        self._show_page(page)
+        if item.scene() is self._scene:
+            self._on_sidebar_selection([item])
+
+    def show_annotations_tab(self) -> None:
+        self._sidebar.show()
+        self._sidebar.show_tab(TAB_ANNOTATIONS)
 
     def _on_scene_selection_changed(self) -> None:
-        self._annotation_list.sync_selection_from_scene()
+        self._annotation_tree.sync_selection(self._scene.selectedItems())
         items = self._selected_annotations()
         self._properties_dock.set_items(items)
         self._update_selection_toolbar(items)
@@ -2341,11 +2631,51 @@ class MainWindow(QMainWindow):
     def _on_tool_changed(self, tool: Tool) -> None:
         # Keep the viewport cursor in sync with the active tool.
         self._view.set_tool_cursor_for(tool)
+        self._sync_tool_flyout(tool)
         # Leaving Format Painter through any other path (Escape, picking
         # a drawing tool) must also un-toggle its button and drop the
         # captured style.
         if tool is not Tool.FORMAT_PAINTER and self.act_format_painter.isChecked():
             self.act_format_painter.setChecked(False)
+
+    def _sync_tool_flyout(self, tool: Tool | None = None) -> None:
+        """Show the variant flyout next to the active tool's rail button
+        (Line / arrow, Stamp); hide it for every other tool."""
+        fly = getattr(self, "_tool_flyout", None)
+        if fly is None:
+            return
+        tool = tool if tool is not None else self._tool_controller.tool()
+        anchor = self._tool_rail.button(tool)
+        if (
+            tool in (Tool.ARROW, Tool.STAMP)
+            and anchor is not None
+            and self._doc is not None
+        ):
+            fly.show_for(
+                tool,
+                self._tool_controller.line_kind(),
+                self._tool_controller.stamp_preset(),
+                anchor,
+            )
+        else:
+            fly.dismiss()
+
+    def _ask_custom_stamp(self) -> None:
+        current, _color = self._tool_controller.stamp_preset()
+        text, ok = QInputDialog.getText(
+            self, "Custom stamp", "Stamp text:", text=current
+        )
+        text = text.strip()
+        if ok and text:
+            self._tool_controller.set_stamp_preset(
+                text, self._tool_controller.color()
+            )
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        super().resizeEvent(event)
+        if getattr(self, "_tool_flyout", None) is not None:
+            if self._tool_flyout.isVisible():
+                self._sync_tool_flyout()
 
     def _on_gdt_placement(self, scene_pos) -> None:
         page = self._scene.page_item()
@@ -2357,7 +2687,10 @@ class MainWindow(QMainWindow):
         # Draft item: parented directly, no undo entry yet. The commit
         # pushes the AddAnnotationCommand; cancel simply removes it
         # (same rollback contract as empty text annotations).
-        item = GdtAnnotationItem(GdtState(), scene_pos)
+        item = GdtAnnotationItem(
+            GdtState(characteristic=self._last_gdt_characteristic),
+            scene_pos,
+        )
         item.set_color(self._tool_controller.color())
         item.set_stroke(self._tool_controller.stroke())
         item.set_edit_callback(self._open_gdt_editor)
@@ -2376,10 +2709,13 @@ class MainWindow(QMainWindow):
         self._gdt_edit_item = item
         self._gdt_edit_is_new = is_new
         self._gdt_old_state = None if is_new else item.state()
-        editor = GdtInlineEditor(
+        self._gdt_initial_state = item.state()
+        editor = GdtFrameBuilder(
             item.state(),
             self._view.viewport(),
-            icon_color=self._gdt_icon_color(),
+            tokens=tokens_for(self._theme),
+            frame_color=item.color(),
+            is_new=is_new,
         )
         editor.stateEdited.connect(self._on_gdt_state_edited)
         editor.committed.connect(self._commit_gdt_editor)
@@ -2390,10 +2726,11 @@ class MainWindow(QMainWindow):
         editor.open()
 
     def _on_gdt_state_edited(self, state: GdtState) -> None:
-        # Live preview: the scene item itself shows every keystroke.
+        # Live preview: the scene item itself shows every keystroke. The
+        # builder only moves if the growing frame runs under it.
         if self._gdt_edit_item is not None:
             self._gdt_edit_item.set_state(state)
-            self._position_gdt_editor()
+            self._position_gdt_editor(only_if_covering=True)
 
     def _commit_gdt_editor_if_open(self) -> None:
         if self._gdt_editor is not None:
@@ -2414,11 +2751,13 @@ class MainWindow(QMainWindow):
         if editor is None or item is None:
             return
         new_state = editor.current_state()
+        initial_state = self._gdt_initial_state
         self._close_gdt_editor()
+        self._last_gdt_characteristic = new_state.characteristic
 
         if is_new:
             # Untouched frame -> rollback, like an empty text annotation.
-            if new_state == GdtState() and not keep_empty:
+            if new_state == initial_state and not keep_empty:
                 if item.scene() is not None:
                     self._scene.removeItem(item)
                 return
@@ -2457,28 +2796,50 @@ class MainWindow(QMainWindow):
         self._gdt_edit_item = None
         self._gdt_edit_is_new = False
         self._gdt_old_state = None
+        self._gdt_initial_state = None
         if editor is not None:
             editor.hide()
             editor.deleteLater()
         self._view.setFocus()
 
-    def _position_gdt_editor(self) -> None:
-        """Anchor the editor under the frame, clamped to the viewport."""
+    def _position_gdt_editor(self, *, only_if_covering: bool = False) -> None:
+        """Put the builder beside the frame, clamped to the viewport.
+
+        Left of the frame first (frames grow to the right as they are
+        typed), then right, then below / above; the body scrolls when the
+        viewport is shorter than the builder. With `only_if_covering`
+        the builder stays put unless the frame now runs under it.
+        """
         editor = self._gdt_editor
         item = self._gdt_edit_item
         if editor is None or item is None:
             return
-        editor.adjustSize()
-        rect = item.mapToScene(item.content_rect()).boundingRect()
         vp = self._view.viewport()
-        below = self._view.mapFromScene(rect.bottomLeft())
-        x = below.x()
-        y = below.y() + 8
-        if y + editor.height() > vp.height() - 4:
-            above = self._view.mapFromScene(rect.topLeft())
-            y = above.y() - editor.height() - 8
-        x = max(4, min(x, vp.width() - editor.width() - 4))
-        y = max(4, min(y, vp.height() - editor.height() - 4))
+        rect = item.mapToScene(item.content_rect()).boundingRect()
+        frame = self._view.mapFromScene(rect).boundingRect()
+        if only_if_covering and not editor.geometry().intersects(frame):
+            return
+        editor.set_max_height(vp.height() - 16)
+        w, h = editor.width(), editor.height()
+        gap = 16
+        y = frame.top() - 24
+        if frame.left() - gap - w >= 8:
+            x = frame.left() - gap - w
+        elif frame.right() + gap + w <= vp.width() - 8:
+            x = frame.right() + gap
+        else:
+            # No room beside it: hug the viewport edge that hides the
+            # least of the frame (the card at the top shows it anyway).
+            left, right = 8, vp.width() - w - 8
+
+            def covered(x0: int) -> int:
+                return max(
+                    0, min(x0 + w, frame.right()) - max(x0, frame.left())
+                )
+
+            x = left if covered(left) <= covered(right) else right
+        x = max(8, min(x, vp.width() - w - 8))
+        y = max(8, min(y, vp.height() - h - 8))
         editor.move(int(x), int(y))
 
     # ------------------------------------------------------------------
@@ -2731,10 +3092,17 @@ class MainWindow(QMainWindow):
             for u in event.mimeData().urls()
         ):
             event.acceptProposedAction()
+            if self._central.currentWidget() is self._welcome:
+                self._welcome.set_drag_active(True)
             return
         event.ignore()
 
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self._welcome.set_drag_active(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event: QDropEvent) -> None:
+        self._welcome.set_drag_active(False)
         for url in event.mimeData().urls():
             local = url.toLocalFile()
             if self._is_openable_file(local):
@@ -2763,16 +3131,28 @@ class MainWindow(QMainWindow):
         self.act_theme_dark.setChecked(theme is Theme.DARK)
         # Code-drawn icons are pre-rasterized, so they need an explicit
         # repaint when the theme changes (light glyph on dark, vice versa).
-        self._tool_palette.set_icon_color(self._gdt_icon_color())
+        tokens = tokens_for(theme)
+        self._tool_rail.set_colors(
+            QColor(tokens.icon),
+            QColor(tokens.soft_text),
+            mark=QColor(tokens.text_muted),
+        )
+        self._tool_flyout.set_colors(
+            QColor(tokens.icon), QColor(tokens.accent)
+        )
         self._apply_icon_theme()
-        self._properties_dock.set_icon_color(self._gdt_icon_color())
+        self._properties_dock.set_icon_color(
+            self._gdt_icon_color(), QColor(tokens.text)
+        )
+        self._welcome.set_colors(tokens)
+        if self._gdt_editor is not None:
+            self._gdt_editor.set_colors(tokens)
+        if self._command_palette is not None:
+            self._command_palette.set_colors(tokens)
 
     def _gdt_icon_color(self) -> QColor:
-        return (
-            QColor("#e0e0e0")
-            if self._theme is Theme.DARK
-            else QColor("#212121")
-        )
+        """Glyph color for code-drawn icons, from the theme tokens."""
+        return QColor(tokens_for(self._theme).icon)
 
     def _restore_settings(self) -> None:
         geom = self._settings.value("window/geometry")
@@ -2780,17 +3160,27 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geom)
         state = self._settings.value("window/state")
         if state is not None:
-            self.restoreState(state)
+            self.restoreState(state, _WINDOW_STATE_VERSION)
+            self._layout_state = QByteArray(state)
         theme_name = str(self._settings.value("ui/theme", Theme.LIGHT.value))
         try:
             theme = Theme(theme_name)
         except ValueError:
             theme = Theme.LIGHT
         self._set_theme(theme)
+        hints = self._settings.value("ui/show_tool_hints", True, type=bool)
+        self.act_show_hints.setChecked(bool(hints))
 
     def _save_settings(self) -> None:
         self._settings.setValue("window/geometry", self.saveGeometry())
-        self._settings.setValue("window/state", self.saveState())
+        if not self._welcome_mode:
+            state = self.saveState(_WINDOW_STATE_VERSION)
+        else:
+            # The start page hides the panels; save the layout the user
+            # works in instead (or nothing, if there never was one).
+            state = self._layout_state
+        if state is not None:
+            self._settings.setValue("window/state", state)
         self._settings.setValue("ui/theme", self._theme.value)
 
     def closeEvent(self, event) -> None:  # noqa: ANN001

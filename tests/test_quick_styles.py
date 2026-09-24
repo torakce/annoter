@@ -205,26 +205,18 @@ def test_stroke_spin_zero_minimum_for_properties_dock(qapp) -> None:
     assert spin.value() == 1
 
 
-def test_dock_palette_is_tools_only(qapp) -> None:
-    """Color and stroke controls live in the top toolbar only; the
-    Tools dock must not duplicate them (user follow-up)."""
+def test_tool_rail_is_tools_only(qapp) -> None:
+    """Color and stroke controls live outside the tool picker; the tool
+    rail (formerly the Tools dock) must not duplicate them."""
     from annoter.controllers.tools import ToolController
-    from annoter.views.tool_palette import ToolPalette
-
-    from PySide6.QtWidgets import QLabel
+    from annoter.views.stroke_spin import StrokeSpinBox
+    from annoter.views.tool_rail import ToolRail
 
     tc = ToolController()
-    palette = ToolPalette(tc)
-    assert not hasattr(palette, "_stroke_spin")
-    assert not hasattr(palette, "_color_buttons")
-    section_titles = [
-        lbl.text() for lbl in palette.findChildren(QLabel)
-    ]
-    assert "Tool" in section_titles
-    assert "Color" not in section_titles
-    assert "Stroke" not in section_titles
-    # The tool grid itself is intact (10 classic tools + Dimension).
-    assert len(palette._tool_buttons) == 11
+    rail = ToolRail(tc)
+    assert rail.findChildren(StrokeSpinBox) == []
+    # 10 classic tools + Dimension, one button each.
+    assert len(rail.tools()) == 11
 
 
 # ----------------------------------------------------------------------

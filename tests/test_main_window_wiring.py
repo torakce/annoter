@@ -15,7 +15,7 @@ pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
 
 from PySide6.QtCore import QCoreApplication, QPointF, QRectF  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QToolBar  # noqa: E402
 
 from annoter.controllers.commands import AddAnnotationCommand  # noqa: E402
 from annoter.controllers.tools import Tool  # noqa: E402
@@ -177,48 +177,48 @@ def _push_rect(win: MainWindow, rect: QRectF) -> RectangleItem:
     return item
 
 
-def test_tool_palette_and_annotation_list_present(qapp) -> None:
+def test_tool_rail_and_annotation_list_present(qapp) -> None:
     win = MainWindow()
     try:
-        assert win._tool_palette is not None
-        assert win._annotation_list is not None
+        assert win._tool_rail is not None
+        assert win._annotation_tree is not None
     finally:
         win.close()
 
 
-def test_tools_live_only_in_the_dock_palette(qapp) -> None:
-    """Discussion #1, items 1-2: the toolbar no longer duplicates the
-    drawing tools; the left dock is the single place to pick one (and
-    now includes GD&T, which used to be toolbar-only)."""
+def test_tools_live_only_in_the_tool_rail(qapp) -> None:
+    """Discussion #1, items 1-2: no other bar duplicates the drawing
+    tools; the left tool rail (formerly the Tools dock) is the single
+    place to pick one, GD&T included. Since Lot F it is also the only
+    tool bar left."""
     win = MainWindow()
     try:
         assert not hasattr(win, "_tool_actions")
-        texts = [a.text() for a in win._toolbar.actions()]
-        for label in ("Rectangle", "Arrow", "Freehand", "GD&T frame"):
-            assert label not in texts
-        assert Tool.GDT in win._tool_palette._tool_buttons
+        assert win.findChildren(QToolBar) == [win._tool_rail]
+        assert Tool.GDT in win._tool_rail.tools()
     finally:
         win.close()
 
 
-def test_toolbar_quick_style_controls_follow_controller(qapp) -> None:
+def test_inspector_next_annotation_controls_follow_controller(qapp) -> None:
+    """The toolbar quick styles moved into the inspector's empty state
+    (UI redesign, Lot F): it shows the drawing defaults and edits them."""
     win = MainWindow()
     try:
-        # Controller -> toolbar (rounded into the integer spin).
+        dock = win._properties_dock
         win._tool_controller.set_stroke(4.0)
-        spin = win._toolbar_stroke_spin
-        assert spin.value() == 4
+        assert dock.field("Stroke").value() == 4
         win._tool_controller.set_color(QColor("#00AA00"))
-        assert not win._toolbar_color_act.icon().isNull()
-        # Toolbar -> controller: typing/setting a value pushes through.
-        spin.setValue(7)
+        assert dock.field("Color").current() == QColor("#00AA00")
+        # Inspector -> controller.
+        dock.field("Stroke").setValue(7)
         assert win._tool_controller.stroke() == pytest.approx(7.0)
-        # Arrows step along the ladder, not linearly: 7 -> 8 -> 10.
-        spin.stepBy(1)
-        assert spin.value() == 8
-        spin.stepBy(1)
-        assert spin.value() == 10
-        assert win._tool_controller.stroke() == pytest.approx(10.0)
+        # Arrows still step along the ladder: 7 -> 8 -> 10.
+        dock.field("Stroke").stepBy(1)
+        assert win._tool_controller.stroke() == pytest.approx(8.0)
+        swatch = dock.field("Color").swatches()[1]
+        swatch.click()
+        assert win._tool_controller.color() == swatch.color()
     finally:
         win.close()
 

@@ -39,3 +39,6 @@ htmlcov/
 # Dev screenshots / scratch images (root)
 /*.png
 build_*.log
+
+# Cowork session outputs
+Claude outputs/

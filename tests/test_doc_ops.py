@@ -106,7 +106,7 @@ def test_insert_pdf_appends_pages_and_reads_their_annots(
         # The inserted page's annotation is editable.
         items = win._page_items.get(1, [])
         assert any(isinstance(it, RectangleItem) for it in items)
-        assert win._thumbnail_dock._list.count() == 2
+        assert win._page_list._list.count() == 2
     finally:
         win._on_close()
         win.close()
@@ -147,9 +147,9 @@ def test_page_reorder_moves_page_and_remaps_items(
 
 
 def test_rows_moved_mapping_emits_final_index(qapp) -> None:
-    from annoter.views.page_thumbnails import PageThumbnailDock
+    from annoter.views.page_thumbnails import PageThumbnailList
 
-    dock = PageThumbnailDock()
+    dock = PageThumbnailList()
     got: list[tuple[int, int]] = []
     dock.pageMoved.connect(lambda f, t: got.append((f, t)))
     # Qt reports destination in pre-removal indexing: moving row 0

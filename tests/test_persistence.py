@@ -316,6 +316,32 @@ def test_foreign_multistroke_ink_reads_one_item_per_stroke(
     assert len(items[1].points()) == 2
 
 
+def test_foreign_shapes_without_interior_color_stay_unfilled(
+    qapp, blank_doc
+) -> None:
+    """A Square / Circle with no /IC (Acrobat's unfilled rectangle) must
+    not come back filled with black; one with /IC keeps its fill."""
+    page = blank_doc[0]
+    for add in (page.add_rect_annot, page.add_circle_annot):
+        annot = add(fitz.Rect(10, 10, 60, 60))
+        annot.set_colors(stroke=(0.85, 0.27, 0.2))
+        annot.update()
+    filled = page.add_rect_annot(fitz.Rect(100, 10, 150, 60))
+    filled.set_colors(stroke=(0, 0, 1), fill=(1, 1, 0))
+    filled.update()
+
+    reopened = _save_then_reopen(blank_doc)
+    out = read_annotations(reopened, dpi=150)
+    reopened.close()
+    rect, ellipse, yellow = out[0]
+    assert isinstance(rect, RectangleItem)
+    assert isinstance(ellipse, EllipseItem)
+    assert not rect.fill_enabled()
+    assert not ellipse.fill_enabled()
+    assert yellow.fill_enabled()
+    assert yellow.fill_color().name() == "#ffff00"
+
+
 def test_text_roundtrip(qapp, blank_doc) -> None:
     item = TextAnnotationItem(QPointF(50, 50), "Hello world")
     write_annotations(blank_doc, {0: [item]}, dpi=150)

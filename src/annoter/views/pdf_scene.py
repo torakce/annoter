@@ -28,8 +28,8 @@ from annoter.controllers.commands import (
     ResizeCommand,
 )
 from annoter.controllers.geometry import item_local_rect, item_scene_rect
-from annoter.model.styles import HandleRole
-from annoter.controllers.tools import Tool, ToolController
+from annoter.model.styles import EndStyle, HandleRole
+from annoter.controllers.tools import LineKind, Tool, ToolController
 from annoter.views.items import (
     ArrowItem,
     CalloutItem,
@@ -561,9 +561,13 @@ class PdfScene(QGraphicsScene):
             return
 
         if tool is Tool.STAMP:
-            # One-click placement of a default stamp; the user re-types
-            # the label / recolors it in the Properties dock.
+            # One-click placement of the stamp picked beforehand in the
+            # tool flyout (Lot C); still editable in the Properties dock.
             item = StampItem(pos)
+            if self._tool_controller is not None:
+                text, color = self._tool_controller.stamp_preset()
+                item.set_text(text)
+                item.set_color(color)
             item.setParentItem(self._page_item)
             self._push_add(item)
             event.accept()
@@ -823,7 +827,17 @@ class PdfScene(QGraphicsScene):
         if tool is Tool.LINE:
             return LineItem(pos, pos)
         if tool is Tool.ARROW:
-            return ArrowItem(pos, pos)
+            arrow = ArrowItem(pos, pos)
+            kind = (
+                self._tool_controller.line_kind()
+                if self._tool_controller is not None
+                else LineKind.ARROW
+            )
+            if kind is LineKind.LINE:
+                arrow.set_end_end(EndStyle.NONE)
+            elif kind is LineKind.DOUBLE:
+                arrow.set_start_end(EndStyle.OPEN_ARROW)
+            return arrow
         if tool is Tool.FREEHAND:
             return FreehandItem([pos])
         if tool is Tool.CALLOUT:

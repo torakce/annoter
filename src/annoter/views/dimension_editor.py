@@ -2,7 +2,7 @@
 
 A single-row floating panel shown over the page near the item being
 edited, following the exact same interaction contract as
-`GdtInlineEditor` (see `annoter.views.gdt_editor`): the scene item is
+`GdtFrameBuilder` (see `annoter.views.gdt_editor`): the scene item is
 its own live preview, and the editor only closes when the user
 explicitly commits or cancels.
 
@@ -41,32 +41,8 @@ _NONE_LABEL = "—"  # em dash, shown when a slot has no value
 _ARROW = "▾"  # explicit drop-down affordance appended to menu buttons
 _ACTION_ICON_SIZE = 16
 
-_ACCENT = "#1E88E5"
-_FIELD_BORDER = "#9aa0a6"
-
-_PANEL_QSS = f"""
-#DimensionInlineEditor {{
-    border: 2px solid {_ACCENT};
-    border-radius: 6px;
-}}
-#DimensionInlineEditor QLineEdit {{
-    border: 1px solid {_FIELD_BORDER};
-    border-radius: 3px;
-    padding: 1px 3px;
-}}
-#DimensionInlineEditor QToolButton {{
-    border: 1px solid {_FIELD_BORDER};
-    border-radius: 3px;
-    padding: 1px 4px;
-}}
-#DimensionInlineEditor QToolButton:hover {{
-    border: 1px solid {_ACCENT};
-}}
-#DimensionInlineEditor QToolButton::menu-indicator {{
-    image: none;
-    width: 0;
-}}
-"""
+# Styling lives in the app-wide theme template, resources/themes/app.qss
+# (the QFrame#<objectName> rules), so it follows the light/dark tokens.
 
 _MODE_LABELS: dict[ToleranceMode, str] = {
     ToleranceMode.NONE: "No tolerance",
@@ -99,7 +75,6 @@ class DimensionInlineEditor(QFrame):
         self.setObjectName("DimensionInlineEditor")
         self.setFrameShape(QFrame.StyledPanel)
         self.setAutoFillBackground(True)
-        self.setStyleSheet(_PANEL_QSS)
         self._icon_color = (
             QColor(icon_color) if icon_color is not None else QColor("#212121")
         )

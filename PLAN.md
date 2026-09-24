@@ -108,7 +108,7 @@ Standalone, install-free, single-user PDF annotator for **mechanical engineering
 ## M5 deviations / notes
 
 - `build.py` drives PyInstaller in both modes via a single command (`python build.py`). Outputs are split into `dist-onefile/` and `dist-onedir/` so the two builds don't share state, and each mode gets its own `build-*/` work directory.
-- Resources are embedded via `--add-data` for `resources/{themes,icons,fonts}` directories that exist; missing directories are skipped silently.
+- Resources are embedded via `--add-data` for `resources/{themes,icons,fonts}` directories that exist; missing directories are skipped silently. *(2026-09-24: now through a generated `.spec`, see "Start-up time" below.)*
 - `services/theme.py` resolves `resources/themes/` via `sys._MEIPASS` when frozen, falling back to the dev-tree path otherwise. Apply the same pattern to any future resource-loading service.
 - `--zip-onedir` packages the portable folder as `Annoter-portable.zip` for USB distribution.
 - The build itself (running PyInstaller) was **not executed** in this session for time/output reasons; the script has been validated via `--help` and the test suite. End-to-end clean-VM verification is the M5 acceptance step.
@@ -880,6 +880,614 @@ entry, `views/items/dimension.py`, `views/dimension_editor.py`,
 `model/dimension.py` and its persistence branch) is the intended
 follow-up; `model/tolerance.py` deliberately duplicates the three-state
 mode enum so that removal is a clean delete.
+
+### UI redesign (2026-09) -- plan and lots
+
+The user asked for a friendlier, more intuitive interface. A clickable
+mock-up (Design canvas "Annoter -- refonte UI": workspace light/dark,
+start screen, GD&T frame builder, command palette) was reviewed and
+amended through comments: explicit Line / Arrow / Double arrow choice,
+an exact stroke-width field next to the presets, a user-editable color
+palette. It is implemented in ordered lots, each validated before the
+next, like the Discussion #1 backlog. UI strings stay English.
+
+Target layout: slim top bar (menu button, file name + unsaved chip,
+command search, undo/redo, theme, Save) replacing the menu bar and
+toolbar; vertical icon tool rail with single-key shortcuts; one left
+dock with Pages / Annotations tabs; floating canvas overlays (tool hint
+chip, page + zoom pill); a context-aware inspector on the right.
+
+| Lot | Scope | Main files |
+| --- | --- | --- |
+| A | Design tokens, one QSS template for both themes, QPalette from tokens, bundled UI fonts | `services/tokens.py`, `services/theme.py`, `services/fonts.py`, `resources/themes/app.qss` |
+| B | Top bar via `QMainWindow.setMenuWidget()`, hamburger `QMenu` reusing the `act_*` actions (actions also added to the window so shortcuts survive), unsaved chip | new `views/top_bar.py`, `main_window.py` |
+| C | Vertical tool rail (`QToolBar`, icon-only checkable buttons), variant flyouts (line kind, stamp preset chosen before placement), thin-stroke icons. No single-key tool shortcuts (user decision, see Lot C) | `views/tool_palette.py` -> `views/tool_rail.py`, `controllers/tools.py`, `views/line_icons.py` |
+| D | Canvas overlays: tool hint chip, page / zoom pill (viewport children, like `SelectionToolbar`); status bar retired | `views/pdf_view.py`, new `views/canvas_overlays.py` |
+| E | Left dock merging thumbnails and annotation list (tabs), per-page annotation count, grouped / filterable list | `views/page_thumbnails.py`, `views/annotation_list.py` |
+| F | Inspector rebuilt from reusable widgets: `SegmentedControl`, `ColorSwatchRow` + palette editor (QSettings), `StrokeField` (presets + exact value), mm / pt switch and an empty state; toolbar removed | `views/properties_dock.py`, new `views/inspector_widgets.py`, `services/palette.py` |
+| G | Start screen restyle (drop zone, recent-file cards, full-width start page) | `views/welcome_screen.py`, `main_window.py` |
+| H | Command palette (Ctrl+K) over every `QAction`; polish: groups, highlights, key caps, recent files, ranking by usage | `views/command_palette.py`, new `services/command_usage.py` |
+| I | GD&T frame builder (symbol grid, live preview, plain-language read-back, datums skipped for form tolerances); replaces the inline editor for creating and editing | `views/gdt_editor.py`, new `model/gdt_readback.py` |
+
+Decision taken in Lot F (user's go-ahead): with the top toolbar gone,
+color and stroke move to the inspector -- for the selection, and in the
+empty state for the next annotation. The floating selection pill stays
+free of them (per the earlier feedback that removed them from it). The
+Lot 8 behavior is kept: a color or stroke preset picked for a selection
+also becomes the drawing default.
+
+#### Lot A -- design tokens, QSS template, palette, fonts (2026-09-23)
+
+- **`services/tokens.py`**: a frozen `Tokens` dataclass (surfaces
+  `canvas / app / panel / field / pill`, `line / line_strong`, text
+  levels, interaction states `hover / pressed / soft / soft_text`,
+  `accent / accent_bg / on_accent`, `danger`, `icon`, scrollbar and
+  tooltip colors, radii, font stacks) with `LIGHT` and `DARK`
+  instances. `Theme` moved here (still re-exported by
+  `services.theme`). WCAG contrast helpers back a test.
+- **One QSS template** `resources/themes/app.qss` with `@token`
+  placeholders replaces `light.qss` / `dark.qss`, which were the same
+  rules with different hex values. `render_qss` raises `KeyError` on
+  an unknown placeholder so a typo fails in the tests instead of
+  shipping a sheet Qt would half-apply.
+- **QPalette built from the same tokens** (`build_palette`) and applied
+  before the stylesheet: widgets that paint with palette roles or use
+  `palette(...)` in QSS now follow the theme.
+- **Floating widgets themed centrally**: `SelectionToolbar`,
+  `EditToolbar`, `GdtInlineEditor` and `DimensionInlineEditor` lost
+  their per-widget `setStyleSheet` (hard-coded `#1E88E5` accent);
+  their `QFrame#<objectName>` rules live in the template and switch
+  with the theme.
+- **Icon glyph color** (`MainWindow._gdt_icon_color`) now reads
+  `tokens_for(theme).icon` instead of two hard-coded greys.
+- **UI font**: IBM Plex Sans (Regular, Bold) and Plex Mono (Regular)
+  (OFL, license in `resources/fonts/IBMPlex-OFL.txt`) registered at
+  startup by
+  `services/fonts.register_ui_fonts()` (bundled by build.py, which
+  already ships `resources/fonts/`). Applied through QSS only, never
+  `QApplication.setFont`, so annotation items keep Helvetica / OSIFont
+  (see "Fonts"). Fallback stack: Segoe UI, then sans-serif.
+- New check-box / radio indicators (the dark theme's were invisible)
+  and tab-bar rules ready for Lot E.
+- Tests: `tests/test_theme.py` rewritten (15 cases): every placeholder
+  resolves in both themes, no hex literal left in the template,
+  unknown placeholder raises, text / icon / accent contrast (AA),
+  palette roles, apply(), font registration, UI font not leaking into
+  the application font, and the stylesheet parsing without Qt warnings
+  (Qt otherwise drops an unparsable sheet silently).
+- Pre-existing, unrelated: on Linux offscreen with PySide6 6.11,
+  `test_main_window_wiring.py::test_selection_toolbar_is_contextual`
+  and `::test_align_selection_via_action` segfault (crash in
+  `AnnotationList.sync_selection_from_scene` during `_on_close`). Same
+  result before Lot A. Root cause found and fixed in Lot E.
+
+#### Lot B -- top bar, main menu, command palette (2026-09-23)
+
+- **`views/top_bar.py` (`TopBar`)**, installed with
+  `QMainWindow.setMenuWidget()`: menu button, brand mark, document name
+  (full path as tooltip), "Unsaved changes" chip, command search field,
+  Undo / Redo, light/dark switch and a primary Save button. Dumb widget:
+  its buttons use `setDefaultAction` on the existing actions (enabled
+  state, icon and tooltip follow them) and Save triggers `act_save`.
+- **No more QMenuBar.** `_build_menus` builds one `QMenu`
+  (`_main_menu`) behind the menu button: file commands at the root
+  (Open, Open Recent, Save, Save As, Export as Images, Insert Pages,
+  Resize Document, Search Commands, Close, Quit) and the former Edit /
+  View / Page menus unchanged as submenus. Every `act_*` is also added
+  to the window (`self.addActions`): an action that only lives in a
+  popup menu has a dead shortcut otherwise. A test enforces it.
+- The old toolbar lost Open / Save / Undo / Redo; its quick styles,
+  Format Painter and zoom stay until Lots D and F.
+- `act_toggle_theme` (Ctrl+Shift+L) backs the top-bar theme button; its
+  icon shows the target theme (moon in light, sun in dark).
+- **Command palette pulled forward from Lot H** (a search field that
+  did nothing would have looked broken): `views/command_palette.py`,
+  Ctrl+K or the top-bar field. Entries come from walking `_main_menu`
+  (so any future menu command is searchable for free; nested submenus
+  keep their top-level group name) plus one "<label> tool" entry per
+  drawing tool. Only enabled commands are listed; every search term
+  must match the label or group; label-prefix matches rank first.
+  Keyboard stays in the search field (Up / Down / Enter forwarded).
+  Lot H is reduced to polish (recent files, ranking by usage).
+- **`views/line_icons.py`**: thin-stroke glyphs rendered from the
+  mock-up's SVG path data with `QSvgRenderer` (QtSvg is already
+  collected by build.py's `--collect-all PySide6`). Used by the top bar
+  and the menu; Lot C will move the tool rail onto it.
+- Tokens gained `accent_hover` and `warning`; the template gained the
+  top bar and palette rules. The Plex Medium / SemiBold files were
+  dropped: Qt files them under separate legacy families ("IBM Plex
+  Sans Medm"), so `font-weight: 600` never reached them.
+- Tests: `tests/test_top_bar.py` (15 cases): menu widget and no menu
+  bar, main-menu content, shortcut actions on the window, toolbar
+  content, title / unsaved chip / Save button state, theme toggle, menu
+  walk grouping and de-duplication, palette filtering / ranking /
+  disabled entries / keyboard run, tool entries, Ctrl+K, every glyph
+  renders.
+
+#### Lot C -- vertical tool rail and variant flyout (2026-09-23)
+
+- **`views/tool_rail.py` replaces `views/tool_palette.py`** (deleted).
+  `ToolRail(QToolBar)`, vertical, fixed in the left tool-bar area:
+  one 44 px icon-only checkable button per tool in four groups
+  (Select | Rectangle, Ellipse, Line / arrow, Polyline, Freehand |
+  Text, Sticky note, Stamp | GD&T frame, Dimension). Names in tooltips
+  and accessible names. Same contract as the old dock: buttons push
+  `ToolController.set_tool`, `toolChanged` checks the button; an
+  action mode without a button (Format Painter) unchecks them all.
+  Idle / checked glyph colors come from the tokens (`icon`,
+  `soft_text`) via `set_colors`, repainted on theme change.
+  `TOOL_LABELS` moved here (command palette entries).
+- **Choose the variant before drawing.** `ToolController` gained
+  `LineKind` (LINE / ARROW / DOUBLE, `lineKindChanged`) and a stamp
+  preset (`stamp_preset`, `stampPresetChanged`). `PdfScene` applies
+  them: the Line / arrow tool still creates an `ArrowItem` (ends stay
+  editable afterwards, persistence unchanged) with end styles set from
+  the kind -- none for a plain line, both heads for a double arrow; the
+  Stamp tool places the chosen text and color instead of always
+  "APPROVED".
+- **`ToolFlyout`**: shown to the right of the active tool's button for
+  Line / arrow ("What do you want to draw?": Line, Arrow, Double arrow
+  with one-line descriptions) and Stamp (the three presets drawn as
+  colored stamp chips, plus "Custom stamp...", which asks for the text
+  with a `QInputDialog` and uses the current drawing color). A plain
+  child frame of the main window, not a popup: it grabs no input, the
+  user draws right away with the current choice; it hides when the tool
+  changes (one-shot tools return to Select after placing). The Line /
+  arrow button's glyph shows the current kind; variant tools carry a
+  small corner mark.
+- **No single-letter tool shortcuts.** Asked on 2026-09-23: typing a
+  letter on a selected shape or text starts its label (existing
+  type-to-edit behavior in `PdfView._maybe_start_typing`), which
+  single-key tool shortcuts would break. The user chose to keep
+  type-to-edit and add no letter shortcuts; tools stay reachable from
+  the keyboard through Ctrl+K.
+- The rail is disabled while no document is open (nothing to draw on);
+  the flyout is dismissed with it.
+- The Quick Access toolbar (quick styles, zoom) still spans the top
+  above the rail; it goes away in Lots D and F.
+- Tests: `tests/test_tool_rail.py` (13 cases: controller variants,
+  button order / tooltips / sync, glyph follows line kind, Tools dock
+  gone, disabled without document, flyout visibility and choices,
+  custom stamp, drawing each line kind, stamp preset placement);
+  `test_quick_styles` and `test_main_window_wiring` updated from the
+  dock to the rail.
+
+#### Lot D -- canvas overlays, status bar retired (2026-09-23)
+
+- **`views/canvas_overlays.py`**, three widgets parented to the view's
+  viewport (same approach as `SelectionToolbar`), each re-anchoring
+  itself on viewport resize through an event filter:
+  - `ToolHintChip` (top center, mouse-transparent): active tool name +
+    one-line usage hint (`TOOL_HINTS`; Line / arrow hints follow the
+    line kind, the Stamp hint names the chosen stamp, Format Painter
+    has its own). Updated on `toolChanged`, `lineKindChanged`,
+    `stampPresetChanged`. View > Show Tool Hints turns it off
+    (persisted as `ui/show_tool_hints`).
+  - `CanvasNavPill` (bottom center): previous / editable page number
+    ("of N", Enter jumps, out-of-range ignored) / next | zoom out,
+    zoom preset menu (25-400 %, Fit, Actual size), zoom in | Fit, 1:1,
+    zoom to area | rotate right. Its buttons mirror the existing
+    actions (enabled state, tooltip, icon) and trigger them; new
+    `PdfView.set_zoom(factor)` backs the presets.
+  - `CanvasToast`: transient message above the pill; replaces every
+    `statusBar().showMessage` (export count, Format Painter guidance).
+- **Status bar removed** (`_build_status_bar`, `_lbl_path`,
+  `_lbl_page`, `_lbl_zoom` gone; the file path is the top bar title's
+  tooltip). The Quick Access toolbar lost its zoom buttons; it now only
+  holds the quick styles and Format Painter until Lot F.
+- Every `act_*` with a shortcut gets a "Name (shortcut)" tooltip, so
+  top-bar and pill buttons advertise their keys. Page / zoom / rotate
+  actions use the thin-stroke glyphs (new: chevron-left, zoom-in,
+  zoom-out, fit, zoom-area, rotate-cw).
+- `PropertiesDock._clear_body` hides old form widgets before
+  `deleteLater` (they showed through the new form until the next
+  event-loop pass).
+- **Regression from Lot A fixed**: removing `GdtInlineEditor`'s own
+  stylesheet changed when a newly added composite row became visible,
+  so `test_gdt_editor::test_adding_a_row_grows_the_panel` failed (the
+  panel's size hint ignored the not-yet-shown row). `_add_row_editor`
+  now shows the row immediately. It went unnoticed in Lots A-C because
+  the per-file test loop's summary filter hid "1 failed, N passed"
+  lines; the same filter hid a stale tool label in
+  `test_top_bar::test_palette_lists_tools_and_runs_them` after Lot C
+  (fixed). The loop now reports any file whose summary is not
+  all-passed.
+- Tests: `tests/test_canvas_overlays.py` (13 cases: hint for every
+  rail tool, variant-aware hints, chip follows the tool, View-menu
+  toggle, chip / pill / toast placement, no status bar, page
+  navigation and typed page, zoom buttons and presets, buttons mirror
+  actions, toast replaces status messages, overlays do not take canvas
+  clicks); `test_page_thumbnails` and `test_top_bar` updated. Full run:
+  443 passed (the two Linux-offscreen crashes noted in Lot A still
+  deselected).
+
+#### Lot E -- one left sidebar: Pages / Annotations (2026-09-23)
+
+- **`views/document_sidebar.py` (`DocumentSidebar`)**: a single left
+  dock replacing the Pages dock (left) and the Annotations dock (right,
+  tabbed with Properties). Its title bar is hidden; a two-segment
+  control ("Pages 4" / "Annotations 9", live counts) switches a
+  `QStackedWidget`. Still listed in View > Panels. The Properties dock
+  is now alone on the right (Lot F turns it into the inspector).
+- **Pages tab** (`views/page_thumbnails.py`, `PageThumbnailDock` ->
+  `PageThumbnailList`, same API): vertical list with a delegate drawing
+  each page framed (blank pages were invisible on the white panel), the
+  current page with an accent ring, and the page number plus "N
+  annotations" underneath. Thumbnails render at 180 px (was 140).
+  Drag-to-reorder and lazy rendering unchanged.
+- **Annotations tab** (`views/annotation_list.py`,
+  `AnnotationListDock` -> `AnnotationTree`): every page, not only the
+  one on screen, grouped by page (current page expanded). Rows are
+  named by content when there is some (note / text / label text, stamp
+  label, GD&T characteristic, dimension value) with the type as a
+  second line, and a glyph in the annotation's color (`describe()`;
+  arrows are reported as Line / Arrow / Double arrow from their ends).
+  Filter field + type chips (All, Shapes, Lines, Text, GD&T, Stamps).
+  Clicking a row selects the annotation and scrolls it into view; a row
+  on another page jumps there first; a page header opens that page.
+  Empty states explain what to do.
+- MainWindow feeds it from `_annotations_by_page()` (stashed buckets
+  for other pages, live scene children for the page on screen) in
+  `_refresh_sidebar()`, called on page change, add / delete, and now
+  also on every undo-stack index change (the old list went stale after
+  Undo, which does not emit `annotationsChanged`).
+- **Crash fixed**: the two `test_main_window_wiring` tests that
+  segfaulted since before Lot A (`test_selection_toolbar_is_contextual`,
+  `test_align_selection_via_action`) were a real bug: the old list kept
+  rows pointing at annotation items and called `isSelected()` on them
+  during `_on_close`, after `clear_page` had deleted the C++ objects.
+  The tree compares identities only, and `_on_close` clears it before
+  `clear_page`. Both tests pass; the whole suite now runs in a single
+  pytest process.
+- Saved window layouts are versioned (`_WINDOW_STATE_VERSION = 2`): a
+  layout saved before the redesign is ignored instead of restoring
+  docks that no longer exist.
+- Tests: `tests/test_document_sidebar.py` (12 cases: one left dock,
+  tab switching and counts, per-page counts on thumbnails, grouping and
+  content-based names, line-kind naming, filter text and chips, empty
+  state, two-way selection, jump to another page, refresh on undo,
+  close with a selection, standalone defaults); `test_page_thumbnails`,
+  `test_doc_ops`, `test_main_window_wiring` moved to the new names.
+  Full run, one process, nothing deselected: 457 passed.
+
+#### Lot F -- inspector, editable palette, no more toolbar (2026-09-23)
+
+- **`PropertiesDock` rebuilt as an inspector** (same class, same
+  live-preview-then-commit machinery and geometry helpers, which were
+  kept verbatim). Title bar hidden; a header names the selection (kind
+  glyph in the item's color, "Revision cloud", "2 x Rectangle", "3
+  annotations -- mixed types: common settings only"); titled sections:
+  Style (color, stroke, line style) / Shape (outline straight-cloud,
+  fill + fill color, fill opacity, corners, open-closed path) / Label /
+  Ends / Text (font, size, bold-italic toggles, alignment, border) /
+  Stamp / GD&T frame (size + "Edit frame") / Position & size (mm or pt,
+  switchable; X, Y, W, H or length and angle) / Arrange (to front, to
+  back, copy style = Format Painter); Duplicate / Delete at the bottom.
+  Scrolls (sideways too) instead of clipping when squeezed. Minimum
+  width 300, default 320.
+- **Empty state = next annotation**: color and stroke of the next
+  annotation (replacing the toolbar quick styles) plus five keyboard
+  tips.
+- `field(label)` returns a row's input widget (tests used to walk the
+  QFormLayout; `test_live_properties` / `test_change_kind` now use it).
+  Position fields are now "X", "Y", "Width", "Height", "Length",
+  "Angle" (unit in the suffix); internally everything stays in points.
+- **New controls** (`views/inspector_widgets.py`): `SegmentedControl`
+  (all options visible, emits on click only), `ColorSwatchRow`
+  (palette swatches with a ring on the current color, "more colors"
+  = the Office-style picker, "edit palette"), `StrokeField` (presets
+  1 / 2 / 3 / 5 px plus the exact `StrokeSpinBox`, from the mock-up
+  review), `PaletteEditor` dialog.
+- **Editable palette** (mock-up review): `services/palette.py`,
+  `PaletteStore` in QSettings (`ui/palette`, JSON [name, hex]); up to
+  10 colors; rename, retype hex or pick, reorder with up / down
+  buttons (drag-and-drop was left out: buttons are easier to hit and to
+  test), add, remove (at least one kept), reset to defaults. Invalid or
+  corrupt settings fall back to the defaults (the former
+  `DEFAULT_PALETTE`, now named Red, Blue, Green, Yellow, Black).
+- **Wiring**: swatch / preset choices are emitted (`colorPicked`,
+  `strokePicked`) and handled by MainWindow's existing
+  `_on_quick_color_picked` / `_on_quick_stroke_picked` (apply to the
+  selection as one undo step AND set the default, Lot 8); the exact
+  stroke field keeps the dock's live preview and, on commit, also sets
+  the default (`strokeCommitted`). `set_defaults` follows the
+  ToolController. `editRequested` -> `_edit_selected`,
+  `duplicateRequested` / `deleteRequested` -> the existing handlers.
+- **Quick Access toolbar removed** (`_build_toolbar` now only sets
+  tooltips and icons; `_pick_toolbar_color`, `_sync_toolbar_*` gone).
+  The tool rail is the only tool bar left. Format Painter: Edit menu +
+  inspector "Copy style".
+- Tests: `tests/test_inspector.py` (19 cases: palette defaults /
+  persistence / cleaning / corrupt settings, palette editor edit /
+  reorder / limit / reset, segmented control, swatch row, stroke
+  field, empty state, rectangle sections, multi-selection header,
+  line-style undo, outline conversion, text align / bold, mm / pt,
+  footer and GD&T signals, arrange actions, main-window color and
+  stroke wiring, palette editor from the window);
+  `test_main_window_wiring` / `test_top_bar` moved from the toolbar to
+  the inspector and "no toolbar left".
+
+#### Lot G -- start page (2026-09-24)
+
+- **Layout from the mock-up**: heading "Open a drawing to start
+  annotating" + one-line explanation; a dashed **drop zone** with the
+  two start actions (Open PDF... primary, shortcut shown inside the
+  button; New blank document secondary) that lights up ("Release to
+  open") while an openable file is dragged over the window
+  (`MainWindow.dragEnterEvent` / new `dragLeaveEvent` drive
+  `WelcomeScreen.set_drag_active`; the drop itself is unchanged);
+  **recent files as cards** (`RecentCard`, a real `QPushButton`: Tab /
+  Space work) -- first-page thumbnail on a canvas-colored well, file
+  name and folder (middle-elided, so "..._revB.pdf" stays readable),
+  "modified / pages / size" line, "N annotations" badge; "Recent files
+  N" header with **Clear list**; a **Handy shortcuts** row (Space +
+  drag, Ctrl + wheel, Ctrl 0, Ctrl K).
+- Deviations from the mock-up: the date is the file's modification time
+  (the recent list stores paths only); the size is always shown; the
+  annotation count is a badge on the thumbnail rather than text in the
+  meta line (it did not fit at narrow widths); the "? all shortcuts"
+  hint became "Ctrl 0 fit the page" (there is no shortcuts dialog; the
+  command palette lists every shortcut). The mock-up's own header is
+  the app's top bar.
+- **Start page gets the full width**: the tool rail, sidebar and
+  inspector are hidden while it shows and restored as the user left
+  them (a panel they had closed stays closed); their View > Panels
+  toggles are disabled meanwhile. The saved window layout is always the
+  document layout (captured when the start page takes over, or the one
+  loaded at startup), so quitting from the start page does not save
+  hidden panels.
+- **Responsive**: the page scrolls vertically (never sideways); cards
+  reflow from four columns down to one (`CARD_MIN_W` 220); the
+  shortcuts row wraps (small flow layout); the decorative drop icon
+  goes below 720 px.
+- **Lazy, cached reading**: `read_recent_info` opens each PDF once per
+  event-loop tick, only while the page is visible (paused on hide,
+  resumed on show), and returns thumbnail + page count + annotation
+  count (links, widgets and popups not counted; skipped above 300
+  pages). Results are cached per (path, mtime, size), so returning to
+  the page does not reopen unchanged files. Missing / unreadable /
+  password-protected files keep a dashed placeholder and say why ("File
+  not found", "Can't read this file", "Password protected").
+- Card context menu: Open, Show in Folder, Remove from List.
+- **Settings isolation (pre-existing test leak fixed)**: MainWindow and
+  the palette used `QSettings("Annoter", "Annoter")`, which always
+  means the native store -- test runs wrote window state, theme and
+  palette into the developer's registry and later tests restored them.
+  Both now use `QSettings()` (same store in production: app.py sets
+  those names) and `tests/conftest.py` gives every test a fresh INI
+  store.
+- Tests: `tests/test_welcome_screen.py` rewritten for the cards and
+  extended (27 cases: formatting helpers, page / annotation counts,
+  problem files, meta line and badge, cache, paused reading, column
+  reflow, wrapping shortcuts, empty section, Clear list, context menu,
+  start buttons, shortcut hints match the real actions, panels hidden
+  and restored, saved layout from the start page, drag highlight,
+  non-openable drags, theme re-tint, keyboard-reachable cards).
+- **Bug found while testing (fixed)**: a Square / Circle written by
+  another tool without an interior color (/IC) -- Acrobat's plain
+  rectangle -- opened filled with black: PyMuPDF reports "no fill" as
+  an empty list, which `_annot_to_items` took for a color. Regression
+  test `test_foreign_shapes_without_interior_color_stay_unfilled`.
+- Full run (three parallel parts, every file's summary checked): 496
+  passed.
+
+#### Lot H -- command palette polish (2026-09-24)
+
+- **Look of the mock-up**: rounded card (the popup window is
+  translucent, a `CommandPaletteCard` frame carries background, border
+  and radius), search glyph and an Esc key cap in the search row,
+  results under uppercase **group headers** (the menu names), the
+  typed text in **bold** inside each label (`match_spans`: per term,
+  its first word-start occurrence, else its first occurrence), the
+  shortcut drawn as **key caps** (`shortcut_keys`, "Ctrl++" keeps its
+  plus), selected row in the accent tint, footer "Up Down Navigate /
+  Enter Run". Width 620; the list scrolls past 360 px.
+- **Ranking**: text-match tier first (label prefix, then word start,
+  then every term at a word start, then substring, then group / detail
+  only), then **usage** (`services/command_usage.py`: run count decayed
+  with a 14-day half-life, recorded when an entry is run from the
+  palette -- menus, shortcuts and the rail are not counted), then menu
+  order (the menus already put related commands in sequence; this also
+  replaces the alphabetical tie-break). Groups are ordered by their
+  best entry, so Enter always runs the overall best match. Usage lives
+  in QSettings (`ui/command_usage`, JSON, 100 most recent keys,
+  corrupt data ignored). A heavily used word match never outranks a
+  prefix match: habits break ties, they do not override the text.
+- **Before typing**: "Recently used" (last 5 commands run from the
+  palette, with their menu name on the right when they have no
+  shortcut), "Recent files" (5), then every command by menu, without
+  repeating the recent ones.
+- **Recent files** are palette entries (group "Recent files", folder on
+  the right, searchable by name and folder, file glyph): missing files
+  and the open document are left out. The Open Recent menu's path
+  entries are skipped (`entries_from_menu(..., skip=...)`); its Clear
+  Recent Files command is listed under File.
+- Keyboard: Up / Down skip headers and wrap; Page Up / Page Down jump
+  a page and stop at the ends. Clicking a header does nothing.
+- **Bug found (Lot B, fixed)**: `entries_from_menu` found submenus with
+  `QAction.menu()`, which in PySide6 leaves the Python wrapper the
+  window keeps for a menu made by `addMenu(title)` dead once the walk's
+  references go away. After the first Ctrl+K, the next refresh of Open
+  Recent (e.g. opening a file) and the theme switch (which re-icons
+  that menu) raised "Internal C++ object already deleted". Submenus
+  are now matched through `QMenu.menuAction()`; `test_top_bar` stopped
+  using `QAction.menu()` too.
+- Deviation from the mock-up: its "Help" group (plain-language answers
+  such as "page rotation is view-only") is not built -- there is no
+  help content to index yet.
+- Tests: `tests/test_command_palette.py` (21 cases: key caps, bold
+  spans, usage store counts / order / persistence / decay / corrupt
+  data / cap, grouped results and group order, usage vs match quality,
+  folder search, empty state, browse view with and without history,
+  header skipping and wrap / page stop, run records usage, header
+  click, bounded height, theme tokens, window recent-file entries
+  (missing and open files left out, runs open), no duplicated Open
+  Recent paths, menus stay alive after Ctrl+K, theme follow-up, usage
+  recorded from the window).
+- Full run (three parallel parts, every file's summary checked): 517
+  passed.
+
+#### Lot I -- GD&T frame builder (2026-09-24)
+
+- **User decision**: the builder replaces `GdtInlineEditor` everywhere
+  -- placing a new frame and editing one (double-click). The class is
+  now `views/gdt_editor.py::GdtFrameBuilder` (same module, same
+  signals `stateEdited` / `committed` / `cancelled` /
+  `noteEditRequested`, same commit-or-cancel-only contract), so the
+  MainWindow flow (draft item, live preview on the page, `push_add` or
+  `ChangeGdtCommand` on commit, rollback on cancel, note hand-over) is
+  unchanged.
+- **Layout from the mock-up**: header ("Feature control frame" / "Edit
+  feature control frame", close button), a preview card -- the frame
+  drawn by the real `GdtAnnotationItem` (`render_frame_preview`,
+  enlarged, on a white "paper" chip in both themes, new `paper` token)
+  with the **plain-language read-back** under it and ISO warnings in
+  red; then 1 - CHARACTERISTIC (the 14 symbols as a grid grouped by
+  family, current name next to the title), 2 - TOLERANCE (zone:
+  Width / Ø / SØ / R / SR as a segmented control, value field with
+  "mm", modifier: None / Ⓜ MMC / Ⓛ LMC / Ⓟ / Ⓔ), 3 - DATUMS (three
+  fields, "A-B" for a common datum, a modifier menu per datum), Notes
+  (buttons into the in-place note editor, with a preview of an
+  existing note); footer "+ Add composite row", Cancel, "Place frame" /
+  "Apply".
+- **Everything the old editor did is kept**: composite rows each with
+  their own characteristic (row chips "Row 1 / Row 2 ..." appear when
+  there are two or more, "Remove row"; a new row repeats the
+  characteristic and the primary datum), the four prefixes, tolerance
+  and datum modifiers, common datums, notes above / below, the
+  auxiliary frame (passed through).
+- **Read-back and rules** (`model/gdt_readback.py`, pure functions):
+  `describe_row` ("Position within a Ø0.1 mm cylindrical zone at
+  maximum material (MMC), relative to datums A, B at MMC, C."), one
+  line per row for composite frames; `row_warning` -- orientation,
+  runout, concentricity and symmetry need at least one datum; form
+  tolerances take none, so the datum step is replaced by an
+  explanation. Datums typed before switching to a form characteristic
+  stay in the row (they come back if the user switches back) but never
+  reach the frame (`frame_rows`).
+- **New frames start from the last characteristic placed** (a drawing
+  repeats the same control). The "untouched frame is dropped" rule now
+  compares with the state the builder opened with, not `GdtState()`.
+- **Placement**: a viewport child like before, beside the frame -- left
+  of it first (frames grow to the right while typed), then right; when
+  neither fits, against the viewport edge that hides the least of the
+  frame. It no longer jumps on every keystroke: it only moves if the
+  growing frame runs under it. The body scrolls when the viewport is
+  shorter than the builder (`set_max_height`).
+- Deviations from the mock-up: the dashed placement box and leader on
+  the page are not drawn (the draft frame itself is on the page and
+  updates live); "Width" stands for "no prefix", and the three other
+  prefixes the model supports (SØ, R, SR) sit next to Ø.
+- Theme: `QSS` section "GD&T frame builder"; the old `GdtInlineEditor`
+  / `GdtDatumGroup` rules were removed (the dimension strip keeps its
+  own). Symbol icons have an "on" variant in the accent tint and are
+  re-tinted on theme change (`set_colors`).
+- Tests: `tests/test_gdt_editor.py` rewritten (27 cases: read-back
+  sentences and datum rules, state round-trip with every feature,
+  fields, datum modifier menu, live emission, symbol grid, form skip
+  and datum restore, read-back / warning, real-frame preview and its
+  width cap, composite rows add / select / remove, chips not stacked,
+  Enter commits once, the three cancel paths, click outside, notes,
+  new / edit wording, scrolling, theme, and through MainWindow:
+  placing, untouched frame dropped, last characteristic, double-click
+  edit with undo, position beside the frame, theme switch);
+  `test_theme` now checks `#GdtFrameBuilder`.
+- Full run (three parallel parts, every file's summary checked): 528
+  passed.
+
+### Start-up time (2026-09-24)
+
+User report: launching was slow, above all the first launch of the
+packaged build.
+
+- **Cause**: `build.py` passed `--collect-all PySide6` (plus
+  `shiboken6`, `pymupdf`), so the bundle carried the whole of Qt --
+  WebEngine, Qt Quick / QML, 3D, Multimedia, Charts, Designer... -- for
+  an app that imports QtCore / QtGui / QtWidgets / QtSvg. Measured on
+  the Linux build machine: onedir 786 MB, onefile 314 MB. A onefile
+  .exe unpacks everything to a temp folder at **every** launch, and on
+  Windows Defender scans each new DLL, hence the long first start. The
+  app itself starts in about 0.4 s (imports 0.28 s, window 0.09 s), so
+  it was not the bottleneck.
+- **build.py now writes a `.spec`** (`make_spec`) instead of CLI flags:
+  PyInstaller's own hooks collect what the code imports; `excludes`
+  drops unused Qt add-on modules and tkinter; after the analysis,
+  `DROPPED_PATTERNS` removes what only plugins pulled in: QML / Quick
+  (via the virtual-keyboard input context), Qt PDF (via its
+  image-format plugin), networking (TLS / network-information plugins),
+  the software OpenGL renderer and the D3D shader compiler (widgets
+  paint with the raster engine), Qt's translation catalogs (English UI,
+  no `QTranslator`). Input-context plugins other than the virtual
+  keyboard (compose / IBus: dead keys on Linux) are kept. UPX is off.
+  Result on the same machine: onedir 209 MB, **onefile 89 MB**;
+  onefile launch (window shown, `--smoke-test`) **5.0-5.4 s -> 1.75 s**,
+  onedir 0.5 s. Windows sizes will differ (no ICU / GTK there) but the
+  ratio holds; the Windows numbers still have to be measured on the
+  clean VM (`python build.py --smoke`).
+- **Splash screen**: PyInstaller's (`resources/splash.png`, 480 x 260,
+  brand mark + "Starting..."), shown by the bootloader before Python
+  starts, so it covers the unpacking; `app.close_splash()` closes it
+  once the window is up (a no-op outside a build, and quiet when the
+  bootloader could not show it). It needs Tcl/Tk in the building Python
+  (the python.org installer has it); without it build.py says so and
+  builds without a splash. `--no-splash` turns it off.
+- **`--smoke-test`** (app flag) starts normally and quits once the
+  window is shown; `python build.py --smoke` runs each fresh build with
+  it and prints the start-up time -- the check to run on the clean
+  Windows VM.
+- **Start page thumbnails cached on disk** (`services/thumbnail_cache.py`):
+  the thumbnails, page counts and annotation counts of recent files
+  used to be recomputed at every launch (opening each PDF; up to a
+  second or more for a large drawing). They are now stored in the
+  user cache folder (`QStandardPaths.CacheLocation/thumbnails`, or
+  `$ANNOTER_CACHE_DIR`), keyed by path + mtime + size, 64 newest
+  entries kept; unchanged files show at once, without being opened.
+  `tests/conftest.py` points `ANNOTER_CACHE_DIR` at a temp folder.
+- Advice for users: the portable **folder** (onedir) starts fastest --
+  it does not unpack anything at launch; the single .exe always does.
+- Tests: `tests/test_startup.py` (46 cases: dropped / kept bundle
+  entries with Windows and Linux names, generated spec for the four
+  onefile / onedir x splash variants, no `--collect-all` left, splash
+  asset, `close_splash` no-op, `--smoke-test` in a subprocess, cache
+  round trip / misses / damaged entries / pruning / write failure /
+  location, start page reusing the cache after a "restart", MainWindow
+  wiring).
+- Full run (three parallel parts, every file's summary checked): 574
+  passed.
+
+### Releases on GitHub (2026-09-25)
+
+Releases v0.1.0 to v0.1.5 were built by hand and uploaded manually.
+From v0.2.0 a GitHub Actions workflow does it
+(`.github/workflows/release.yml`):
+
+- Trigger: pushing a tag `v*`. On `windows-latest`, Python 3.12, it
+  installs the pinned build dependencies
+  (`.github/requirements-release.txt`: the versions of the validated
+  local venv -- PySide6 6.11.0, PyMuPDF 1.27.2.3, Pillow 11.3.0,
+  PyInstaller 6.20.0; build.py filters Qt files by name, so bump these
+  deliberately), runs `python build.py --onefile --zip-onedir --smoke`
+  (each build is launched once and must exit 0) and attaches
+  `Annoter-portable.zip` and `Annoter.exe` to a release named
+  "Annoter vX.Y.Z" whose text is `.github/release-notes/vX.Y.Z.md`
+  (same asset names and note style as the manual releases).
+- Guard: the tag must equal `v` + `project.version` + `__version__`,
+  and the notes file must exist, or the run stops before building
+  (`tests/test_startup.py` keeps the two versions equal and checks the
+  notes of the current version exist).
+- "Run workflow" by hand builds without publishing (files in the run's
+  artifacts).
+- To release: bump both versions, add the notes file, commit, then
+  `git tag -a vX.Y.Z -m "Annoter vX.Y.Z"` and
+  `git push origin master vX.Y.Z`.
+- The builds are not code-signed: on a new PC, SmartScreen asks once
+  per downloaded file ("More info", "Run anyway"). The notes say so.
+- v0.2.0 = everything since v0.1.5: Dimension annotation, inline text
+  editing fixes, tolerances inside text + contextual edit toolbar,
+  editable GD&T notes, the UI redesign (lots A-I), faster start-up.
+  Windows sizes measured on the dev PC after the start-up work: zip
+  283.6 MB -> 54.8 MB, .exe 281.8 MB -> 54.8 MB, folder 720 MB ->
+  119 MB.
 
 ### Known remaining issues
 

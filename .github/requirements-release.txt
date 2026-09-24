@@ -1,0 +1,9 @@
+# Exact versions used for the published Windows builds (CI, release.yml).
+# They match the development venv the builds were validated with; bump
+# them deliberately and re-run `python build.py --smoke` locally first:
+# build.py filters Qt files by name, so a new PySide6 can need an update.
+PySide6==6.11.0
+PyMuPDF==1.27.2.3
+Pillow==11.3.0
+pyinstaller==6.20.0
+pyinstaller-hooks-contrib==2026.4

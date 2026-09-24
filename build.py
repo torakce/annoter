@@ -5,76 +5,177 @@ Usage:
     python build.py --onefile      # build only the single .exe
     python build.py --onedir       # build only the portable folder
     python build.py --zip-onedir   # also zip the onedir output
+    python build.py --no-splash    # skip the launch splash screen
+    python build.py --smoke        # after building, launch each build
+                                   # once and report its start-up time
 
 Outputs land in `dist-onefile/` and `dist-onedir/` respectively. Each
-build keeps its own `build/` work directory under `build-onefile/` /
+build keeps its own work directory under `build-onefile/` /
 `build-onedir/` so the two modes don't trample on each other.
+
+Start-up time (2026-09): the bundle used to be built with
+`--collect-all PySide6`, which copied the whole of Qt -- WebEngine,
+Qt Quick / QML, 3D, Multimedia, Designer... -- about 790 MB for an app
+that only uses QtCore / QtGui / QtWidgets / QtSvg. A one-file .exe
+unpacks everything into a temp folder on *every* launch, and Windows
+Defender scans each new DLL, so the first launch took very long.
+The build now goes through a generated .spec: PyInstaller's own hooks
+collect what the code imports, and the Qt pieces that only come in
+through plugins nobody here uses (QML / Quick via the virtual keyboard,
+Qt PDF via its image-format plugin, networking, the software OpenGL
+renderer, Qt's own translations) are filtered out. UPX is off: packed
+DLLs are slower to load and trip antivirus heuristics. A splash screen
+(PyInstaller's, shown by the bootloader before Python starts) covers
+the remaining unpacking time; the app closes it once its window is up.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 ENTRY = ROOT / "src" / "annoter" / "__main__.py"
 RESOURCES = ROOT / "resources"
+SPLASH_IMAGE = RESOURCES / "splash.png"
 
 APP_NAME = "Annoter"
 
+# Python modules never needed at run time. The PySide6 ones are Qt
+# add-ons the app does not import; listing them keeps PyInstaller from
+# following optional imports into them.
+EXCLUDED_MODULES: tuple[str, ...] = (
+    "tkinter",
+    "PySide6.QtNetwork",
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
+    "PySide6.QtQuickWidgets",
+    "PySide6.QtPdf",
+    "PySide6.QtPdfWidgets",
+    "PySide6.QtOpenGL",
+    "PySide6.QtOpenGLWidgets",
+    "PySide6.QtVirtualKeyboard",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.QtMultimedia",
+)
 
-def _resource_args() -> list[str]:
-    """Return PyInstaller --add-data arguments for bundled resources.
+# Bundle entries (destination paths, "/"-separated) dropped after the
+# analysis: Qt libraries and plugins pulled in only by plugins the app
+# never loads, plus Qt's translation catalogs (the UI is English only
+# and no QTranslator is installed). Matching is case-insensitive and
+# covers the Windows (Qt6Quick.dll) and Linux (libQt6Quick.so.6)
+# spellings.
+DROPPED_PATTERNS: tuple[str, ...] = (
+    r"(^|/)(lib)?Qt6(Qml|Quick|VirtualKeyboard|Pdf|Network|WebEngine|"
+    r"Multimedia|3D|Charts|DataVisualization|Graphs|Designer|Test|"
+    r"Location|Positioning|Sensors|SerialPort|Bluetooth|Nfc|WebSockets|"
+    r"WebChannel|RemoteObjects|Scxml|StateMachine|TextToSpeech|"
+    r"SpatialAudio|HttpServer|ShaderTools|Lottie)[^/]*$",
+    r"(^|/)plugins/(tls|networkinformation|qmltooling|scenegraph|"
+    r"position|multimedia|sqldrivers|canbus|sensors|texttospeech|"
+    r"webview)/",
+    # The virtual keyboard input context drags in QML / Quick; the
+    # others (compose, ibus: dead keys and IMEs on Linux) stay.
+    r"(^|/)plugins/platforminputcontexts/[^/]*virtualkeyboard[^/]*$",
+    r"(^|/)plugins/imageformats/[^/]*pdf[^/]*$",
+    r"(^|/)opengl32sw\.dll$",
+    r"(^|/)d3dcompiler_\d+\.dll$",
+    r"(^|/)PySide6/Qt/translations/",
+    r"(^|/)PySide6/translations/",
+)
 
-    PyInstaller takes "<src><pathsep><dest>"; on Windows the separator
-    is `;`, on POSIX it's `:`. Each entry maps a host directory into
-    the bundle root.
-    """
-    sep = ";" if sys.platform.startswith("win") else ":"
-    bundles: list[tuple[Path, str]] = []
+
+def dropped(dest: str) -> bool:
+    """True when a bundle entry (destination path) is filtered out."""
+    path = dest.replace("\\", "/")
+    return any(re.search(p, path, re.IGNORECASE) for p in DROPPED_PATTERNS)
+
+
+def _datas() -> list[tuple[str, str]]:
+    """Resource folders copied into the bundle as (source, dest dir)."""
+    out: list[tuple[str, str]] = []
     for sub in ("themes", "icons", "fonts"):
         d = RESOURCES / sub
         if d.is_dir() and any(d.iterdir()):
-            bundles.append((d, f"resources/{sub}"))
-    args: list[str] = []
-    for src, dest in bundles:
-        args.extend(["--add-data", f"{src}{sep}{dest}"])
-    return args
+            out.append((str(d), f"resources/{sub}"))
+    return out
 
 
-def _icon_args() -> list[str]:
-    """--icon for the .exe itself (Explorer/taskbar), separate from the
-    app.setWindowIcon() call at runtime which uses the bundled copy under
-    resources/icons/ (see _resource_args)."""
+def splash_available() -> bool:
+    """PyInstaller's splash needs Tcl/Tk in the building Python."""
+    if not SPLASH_IMAGE.is_file():
+        return False
+    try:
+        import _tkinter  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def make_spec(onefile: bool, splash: bool) -> str:
+    """The .spec PyInstaller runs (see the module docstring)."""
     icon = RESOURCES / "icons" / "app.ico"
-    return ["--icon", str(icon)] if icon.is_file() else []
-
-
-def _common_args(name: str) -> list[str]:
-    return [
-        "--name",
-        name,
-        "--noconfirm",
-        "--clean",
-        "--windowed",
-        "--paths",
-        str(ROOT / "src"),
-        # PySide6 + PyMuPDF ship as C extensions; --collect-all is the
-        # only flag that pulls submodules + binaries + data together.
-        # Without it the bundle silently drops the .pyd files.
-        "--collect-all",
-        "PySide6",
-        "--collect-all",
-        "shiboken6",
-        "--collect-all",
-        "pymupdf",
-        *_icon_args(),
-        *_resource_args(),
+    icon_arg = repr(str(icon)) if icon.is_file() else "None"
+    lines = [
+        "# Generated by build.py -- edit build.py, not this file.",
+        "import re",
+        "",
+        f"DROPPED = {list(DROPPED_PATTERNS)!r}",
+        "",
+        "def _keep(entry):",
+        "    path = entry[0].replace('\\\\', '/')",
+        "    return not any(",
+        "        re.search(p, path, re.IGNORECASE) for p in DROPPED",
+        "    )",
+        "",
+        "a = Analysis(",
+        f"    [{str(ENTRY)!r}],",
+        f"    pathex=[{str(ROOT / 'src')!r}],",
+        f"    datas={_datas()!r},",
+        f"    excludes={list(EXCLUDED_MODULES)!r},",
+        ")",
+        "a.binaries = [e for e in a.binaries if _keep(e)]",
+        "a.datas = [e for e in a.datas if _keep(e)]",
+        "pyz = PYZ(a.pure)",
     ]
+    splash_parts = ""
+    if splash:
+        lines += [
+            "splash = Splash(",
+            f"    {str(SPLASH_IMAGE)!r},",
+            "    binaries=a.binaries,",
+            "    datas=a.datas,",
+            "    text_pos=None,",
+            "    always_on_top=False,",
+            ")",
+        ]
+        splash_parts = "splash, "
+    common = (
+        f"name={APP_NAME!r}, console=False, upx=False, "
+        f"icon={icon_arg}, debug=False, strip=False"
+    )
+    if onefile:
+        extra = "splash.binaries, " if splash else ""
+        lines += [
+            f"exe = EXE(pyz, a.scripts, {splash_parts}{extra}"
+            f"a.binaries, a.datas, [], {common}, runtime_tmpdir=None)",
+        ]
+    else:
+        extra = "splash.binaries, " if splash else ""
+        lines += [
+            f"exe = EXE(pyz, a.scripts, {splash_parts}[], "
+            f"exclude_binaries=True, {common})",
+            f"coll = COLLECT(exe, {extra}a.binaries, a.datas, "
+            f"upx=False, strip=False, name={APP_NAME!r})",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def _run(cmd: list[str]) -> int:
@@ -82,48 +183,67 @@ def _run(cmd: list[str]) -> int:
     return subprocess.call(cmd)
 
 
-def build_onefile() -> int:
-    out = ROOT / "dist-onefile"
-    work = ROOT / "build-onefile"
+def _build(onefile: bool, splash: bool) -> int:
+    kind = "onefile" if onefile else "onedir"
+    out = ROOT / f"dist-{kind}"
+    work = ROOT / f"build-{kind}"
     if out.exists():
         shutil.rmtree(out)
-    cmd = [
-        sys.executable,
-        "-m",
-        "PyInstaller",
-        "--onefile",
-        "--distpath",
-        str(out),
-        "--workpath",
-        str(work),
-        "--specpath",
-        str(work),
-        *_common_args(APP_NAME),
-        str(ENTRY),
-    ]
-    return _run(cmd)
+    work.mkdir(parents=True, exist_ok=True)
+    spec = work / f"{APP_NAME}.spec"
+    spec.write_text(make_spec(onefile, splash), encoding="utf-8")
+    rc = _run(
+        [
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            "--noconfirm",
+            "--clean",
+            "--distpath",
+            str(out),
+            "--workpath",
+            str(work),
+            str(spec),
+        ]
+    )
+    if rc == 0:
+        size = sum(
+            p.stat().st_size
+            for p in out.rglob("*")
+            if p.is_file() and not p.is_symlink()
+        )
+        print(f">> {kind}: {size / 1e6:.0f} MB in {out}")
+    return rc
 
 
-def build_onedir() -> int:
-    out = ROOT / "dist-onedir"
-    work = ROOT / "build-onedir"
-    if out.exists():
-        shutil.rmtree(out)
-    cmd = [
-        sys.executable,
-        "-m",
-        "PyInstaller",
-        "--onedir",
-        "--distpath",
-        str(out),
-        "--workpath",
-        str(work),
-        "--specpath",
-        str(work),
-        *_common_args(APP_NAME),
-        str(ENTRY),
-    ]
-    return _run(cmd)
+def build_onefile(splash: bool = True) -> int:
+    return _build(True, splash)
+
+
+def build_onedir(splash: bool = True) -> int:
+    return _build(False, splash)
+
+
+def executable(onefile: bool) -> Path:
+    suffix = ".exe" if sys.platform.startswith("win") else ""
+    if onefile:
+        return ROOT / "dist-onefile" / f"{APP_NAME}{suffix}"
+    return ROOT / "dist-onedir" / APP_NAME / f"{APP_NAME}{suffix}"
+
+
+def smoke(onefile: bool) -> int:
+    """Launch a build with --smoke-test (it quits once its window is
+    shown) and report the wall-clock start-up time."""
+    exe = executable(onefile)
+    if not exe.is_file():
+        print(f"!! {exe} not found")
+        return 1
+    start = time.perf_counter()
+    rc = subprocess.call([str(exe), "--smoke-test"], timeout=300)
+    took = time.perf_counter() - start
+    kind = "onefile" if onefile else "onedir"
+    print(f">> {kind} start-up: {took:.1f} s (exit code {rc})")
+    return rc
 
 
 def zip_onedir() -> int:
@@ -174,6 +294,16 @@ def main() -> int:
         action="store_true",
         help="Zip the onedir output (implies --onedir if neither selected).",
     )
+    ap.add_argument(
+        "--no-splash",
+        action="store_true",
+        help="Build without the launch splash screen.",
+    )
+    ap.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Launch each build once and report its start-up time.",
+    )
     args = ap.parse_args()
 
     do_one = args.onefile
@@ -181,14 +311,26 @@ def main() -> int:
     if not (do_one or do_dir):
         do_one = do_dir = True
 
+    splash = not args.no_splash and splash_available()
+    if not args.no_splash and not splash:
+        print(
+            "!! no splash screen: PyInstaller's needs Tcl/Tk in this "
+            "Python (install it with the python.org installer) and "
+            f"{SPLASH_IMAGE.relative_to(ROOT)}."
+        )
+
     if do_one:
-        rc = build_onefile()
+        rc = build_onefile(splash)
         if rc != 0:
             return rc
+        if args.smoke and smoke(True) != 0:
+            return 1
     if do_dir:
-        rc = build_onedir()
+        rc = build_onedir(splash)
         if rc != 0:
             return rc
+        if args.smoke and smoke(False) != 0:
+            return 1
     if args.zip_onedir:
         rc = zip_onedir()
         if rc != 0:

@@ -1,7 +1,7 @@
 """Floating overlays drawn over the PDF view (UI redesign, Lot D).
 
-Three small widgets parented to the view's viewport, like the existing
-`SelectionToolbar`, each keeping itself anchored when the viewport is
+Three small widgets parented to the view's viewport, like the
+`EditToolbar`, each keeping itself anchored when the viewport is
 resized:
 
 - `ToolHintChip` (top center): the active tool's name and a one-line
@@ -14,6 +14,9 @@ resized:
 - `CanvasToast` (bottom center, above the pill): transient messages
   ("Exported 3 files", Format Painter usage) that used to go to the
   status bar.
+- `DraftBar` (top center, under the hint): Finish / Remove last point /
+  Cancel while a polyline or polygon is being drawn (2026-09-28: the
+  keyboard ways to end one were not discoverable).
 
 The widgets stay dumb: the pill triggers the QActions it is given and
 emits `pageRequested` / `zoomRequested`; MainWindow owns the behavior.
@@ -24,7 +27,7 @@ from __future__ import annotations
 from enum import Enum
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIntValidator
+from PySide6.QtGui import QAction, QFontMetrics, QIntValidator
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -34,6 +37,8 @@ from PySide6.QtWidgets import (
     QToolButton,
     QWidget,
 )
+
+from annoter.views.line_icons import line_icon
 
 from annoter.controllers.tools import LineKind, Tool
 
@@ -45,7 +50,7 @@ TOOL_HINTS: dict[Tool, tuple[str, str]] = {
     Tool.SELECT: (
         "Select",
         "Click to select · Shift+click to add · "
-        "Drag on empty space to select an area",
+        "Alt+click on a pile to choose · Drag to select an area",
     ),
     Tool.RECTANGLE: (
         "Rectangle",
@@ -55,8 +60,13 @@ TOOL_HINTS: dict[Tool, tuple[str, str]] = {
     Tool.ELLIPSE: ("Ellipse", "Drag to draw · Shift keeps a circle"),
     Tool.POLYLINE: (
         "Polyline",
-        "Click to add points · Double-click or Enter to finish "
-        "· Esc cancels",
+        "Click to add points · Double-click, Enter or Esc to finish "
+        "· Backspace removes the last point",
+    ),
+    Tool.POLYGON: (
+        "Polygon",
+        "Click to add points · Click the first point, double-click, "
+        "Enter or Esc to close it",
     ),
     Tool.FREEHAND: (
         "Freehand",
@@ -68,7 +78,8 @@ TOOL_HINTS: dict[Tool, tuple[str, str]] = {
     Tool.GDT: ("GD&T frame", "Click to place a feature control frame"),
     Tool.DIMENSION: (
         "Dimension",
-        "Click where the dimension goes, then type its value",
+        "Click two points, then click where the dimension line goes "
+        "· Shift: horizontal / vertical · Esc cancels",
     ),
     Tool.FORMAT_PAINTER: (
         "Format Painter",
@@ -170,21 +181,46 @@ class ToolHintChip(_AnchoredOverlay):
         row.addWidget(self.hint_label)
         self._enabled = True
         self._has_content = False
+        self._full_hint = ""
         self.hide()
 
     def set_hint(self, hint: tuple[str, str] | None) -> None:
         self._has_content = hint is not None
         if hint is not None:
             self.name_label.setText(hint[0])
+            self._full_hint = hint[1]
             self.hint_label.setText(hint[1])
         self._refresh_visibility()
+
+    def reposition(self) -> None:
+        # On a narrow canvas the hint is cut short ("...") rather than
+        # pushing the chip past the edges.
+        host = self.parentWidget()
+        if host is not None and self._full_hint:
+            # Measure with the themed fonts (QSS applies them on polish).
+            self.name_label.ensurePolished()
+            self.hint_label.ensurePolished()
+            margins = self.layout().contentsMargins()
+            room = (
+                host.width()
+                - 2 * _MARGIN
+                - margins.left()
+                - margins.right()
+                - self.layout().spacing()
+                - self.name_label.sizeHint().width()
+            )
+            fm = QFontMetrics(self.hint_label.font())
+            self.hint_label.setText(
+                fm.elidedText(self._full_hint, Qt.ElideRight, max(0, room))
+            )
+        super().reposition()
 
     def set_hints_enabled(self, on: bool) -> None:
         self._enabled = bool(on)
         self._refresh_visibility()
 
     def text(self) -> str:
-        return f"{self.name_label.text()}: {self.hint_label.text()}"
+        return f"{self.name_label.text()}: {self._full_hint}"
 
     def _refresh_visibility(self) -> None:
         visible = self._enabled and self._has_content
@@ -372,3 +408,82 @@ class CanvasToast(_AnchoredOverlay):
 
     def text(self) -> str:
         return self.label.text()
+
+
+# Below the tool hint chip.
+_DRAFT_BAR_LIFT = 44
+
+
+class DraftBar(_AnchoredOverlay):
+    """Top-center bar shown while a polyline / polygon is drawn.
+
+    The keyboard and mouse ways to end one (double-click, Enter, Esc,
+    right-click) stay; this makes them visible and clickable. Dumb:
+    MainWindow feeds `set_point_count` from the scene and connects the
+    three signals.
+    """
+
+    finishClicked = Signal()
+    removePointClicked = Signal()
+    cancelClicked = Signal()
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent, _Anchor.TOP_CENTER, lift=_DRAFT_BAR_LIFT)
+        self.setObjectName("DraftBar")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 4, 6, 4)
+        row.setSpacing(4)
+        self.count_label = QLabel("", self)
+        self.count_label.setObjectName("PillMuted")
+        row.addWidget(self.count_label)
+        self.remove_button = self._button(
+            "Remove last point", "undo", "Remove the last point (Backspace)"
+        )
+        self.remove_button.clicked.connect(self.removePointClicked)
+        row.addWidget(self.remove_button)
+        self.cancel_button = self._button(
+            "Cancel", "close-doc", "Drop this shape"
+        )
+        self.cancel_button.clicked.connect(self.cancelClicked)
+        row.addWidget(self.cancel_button)
+        self.finish_button = self._button(
+            "Finish", "check", "Finish the shape (Enter, Esc, double-click "
+            "or right-click)",
+        )
+        self.finish_button.setObjectName("DraftFinish")
+        self.finish_button.clicked.connect(self.finishClicked)
+        row.addWidget(self.finish_button)
+        self._glyphs = {
+            self.remove_button: "undo",
+            self.cancel_button: "close-doc",
+            self.finish_button: "check",
+        }
+        self.hide()
+
+    def _button(self, text: str, glyph: str, tip: str) -> QToolButton:
+        btn = _PillButton(self)
+        btn.setText(text)
+        btn.setToolTip(tip)
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        return btn
+
+    def set_icon_color(self, color, on_accent=None) -> None:  # noqa: ANN001
+        """Glyph color; `on_accent` for the Finish button's (it sits on
+        the accent fill)."""
+        for btn, glyph in self._glyphs.items():
+            c = on_accent if btn is self.finish_button and on_accent else color
+            btn.setIcon(line_icon(glyph, c))
+
+    def set_point_count(self, count: int, minimum: int) -> None:
+        """Show for a draft of `count` points (hide at 0); Finish needs
+        `minimum` of them."""
+        if count <= 0:
+            self.hide()
+            return
+        self.count_label.setText(
+            f"{count} point" + ("" if count == 1 else "s")
+        )
+        self.finish_button.setEnabled(count >= minimum)
+        self.reposition()
+        self.show()
+        self.raise_()

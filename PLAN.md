@@ -1488,6 +1488,400 @@ From v0.2.0 a GitHub Actions workflow does it
   Windows sizes measured on the dev PC after the start-up work: zip
   283.6 MB -> 54.8 MB, .exe 281.8 MB -> 54.8 MB, folder 720 MB ->
   119 MB.
+- v0.3.0 (2026-09-28) = everything since v0.2.0: lots J to M (icon
+  context menu, one-step stacking order saved to the PDF, constant-size
+  handles, line direction marks, Alt+Click picker, Add Leader; the
+  v0.2.0 Dimension value box retired), the follow-up fixes (drag /
+  right-click the hidden selection, polyline finishing bar, document
+  properties, right angles on leaders), bend radii, GD&T notes closer to
+  the frame and the linear Dimension tool. Committed from the Cowork VM
+  with `core.autocrlf=input` (five files had CRLF on disk, the
+  repository stores LF); the tag push is done from the Windows side
+  (GitHub credentials live there).
+
+### Canvas UX batch (2026-09-26) -- lots J to M
+
+User feedback after v0.2.0, split into four lots:
+
+- **J** -- simpler right-click menu (icons first, line ends as icons,
+  one-step raise / lower that keeps the menu open, no Change Color /
+  Change Stroke) and the floating selection bar that got in the way.
+- **K** -- on the canvas: handles of a constant on-screen size, the
+  start and the end of a line told apart, Alt+Click to pick one of
+  several overlapping annotations.
+- **L** -- retire the Dimension annotation (a text does everything it
+  does since tolerances live inside texts); PDFs that hold one reopen
+  with an equivalent text.
+- **M** -- "Add Leader" (CATIA-style) on texts and GD&T frames.
+
+#### Lot J -- context menu and stacking order (2026-09-26)
+
+- **`views/context_menu.py`** (`AnnotationContextMenu`, `IconRow`,
+  `IconCommand`): Windows 11-style menu, icon rows at the top
+  (`QWidgetAction` rows of `QToolButton`s with tooltips), ordinary
+  entries with icons below. MainWindow builds it in
+  `_build_context_menu(scene_pos)` (testable without `exec`):
+  - top row: Cut, Copy, Paste (disabled with an empty clipboard),
+    Duplicate, Delete (red trash);
+  - **Order**: To back, Backward, Forward, To front;
+  - **Start** / **End** for a line or arrow: the ten extremity shapes
+    as icons (the start row mirrored, the current one checked), no
+    submenu; picking one on a plain line still promotes it to an arrow;
+  - **Shape** (rectangle / cloud outline, fill toggle), **Path** (open /
+    closed), **Align** (align + distribute) for several annotations;
+  - entries: Edit Text / Frame / Note (double-click), Add / Remove Bend
+    Point, Group, Ungroup, Properties. Change Color... and Change
+    Stroke... are no longer in the right-click menu (the Inspector does
+    it; they stay in the Edit menu and the command palette).
+  - A row button closes the menu, except `keep_open` ones (Backward /
+    Forward): the menu stays up and re-reads every button's enabled /
+    checked state, so ten clicks go ten levels down.
+- **Stacking order** (`controllers/stacking.py`): annotations keep one
+  Z value and their order is their order among the page's children
+  (`childItems()`, bottom first -- also the order the save path writes
+  them, so the order now survives a save). Reordering uses
+  `stackBefore`, never `setZValue` (the old Bring to Front set Z values:
+  it was not undoable, and a new annotation drawn afterwards landed
+  *under* the raised one). One step = past the next annotation that
+  **overlaps** the selection (Inkscape's raise / lower): stepping past
+  one elsewhere on the sheet would change nothing on screen. New
+  actions Bring Forward (Ctrl+]) and Send Backward (Ctrl+[) in the Edit
+  menu and the command palette; the Inspector's Arrange row has the four
+  moves as icon buttons.
+- **`ReorderCommand`**: undoable; consecutive steps merge into one undo
+  entry (`id` / `mergeWith`), and a run that ends where it started
+  (`setObsolete`) leaves the history.
+- **Floating selection bar removed** (`views/selection_toolbar.py`):
+  it covered the selection and stayed pinned to the viewport edge when
+  the item was scrolled away. Everything it offered is in the context
+  menu (and the Inspector). The edit bar shown while typing a text is
+  unchanged.
+- Tests: `tests/test_context_menu.py` (20: stacking logic incl.
+  non-overlapping neighbours, blocks, a horizontal line; command
+  undo / merge / obsolete; a new item lands on top after a reorder;
+  order saved to the PDF; shortcuts; the menu widget closing or staying
+  open; shape / line / multi-selection / empty-area menus; the menu
+  walking down a pile in four clicks = one undo step). Selection-bar
+  tests removed; Inspector arrange test covers the four buttons.
+
+#### Lot K -- handles, line direction, Alt+Click (2026-09-28)
+
+- **Handles of a constant on-screen size.** `HANDLE_HALF` (4.5) and
+  `HANDLE_HIT_HALF` (7) are now screen pixels. `AnnotationItem.screen_px()`
+  asks the scene for scene units per screen pixel (`PdfScene.screen_px`,
+  1.0 outside a PdfScene, so standalone items and older tests behave as
+  before); `PdfView` pushes its scale to the scene on every zoom and on
+  `setScene` (`set_view_scale`, which also re-declares the bounds of the
+  selected items since their handle margin changed). Visual squares, hit
+  areas, the bounding-rect margin, the bend hit radius (`bend_at`) and
+  MainWindow's endpoint hit radius all scale with it. Before, a handle
+  was 8 scene units: about 4 screen pixels at 100 %, 1 pixel on a whole
+  A0 sheet.
+- **Start and end of a line told apart** (`LineItem._draw_handles`):
+  the start handle is a filled disc, the end handle a filled square
+  (both ringed in white), bends are small hollow discs, and a chevron in
+  the middle of the longest segment points from start to end (not on
+  lines shorter than 48 screen px). Hovering a handle names it ("Start
+  point" / "End point" / "Bend point"). The same disc / square marks
+  (`line-start` / `line-end` glyphs) label the Start / End rows of the
+  context menu and of the Inspector (whose Start previews are mirrored,
+  decoration on the left).
+- **Alt+Click** (Select tool): the press behaves as usual (so Alt+drag
+  still moves with snapping off); a release without movement makes the
+  scene emit `pickRequested`, and MainWindow opens `AnnotationPicker`
+  (`views/annotation_picker.py`) once the event has unwound: the
+  annotations stacked there (`PdfScene.annotations_at`, 3 screen px of
+  slack, topmost first), named and iconed like the Annotations panel,
+  the selected ones in bold. Hovering an entry outlines that annotation
+  (`PdfScene.set_pick_highlight`: a band along the stroke of a line /
+  polyline / freehand path, the true rectangle for the rest); picking
+  selects it alone. Nothing opens when fewer than two annotations are
+  under the cursor. The Select hint chip mentions it; on a narrow
+  canvas the chip now cuts its hint short ("...") instead of running
+  past the edges.
+- Tests: `tests/test_canvas_handles.py` (18: handle size at four zoom
+  levels, margin and hit area after zooming out, bend radius, unit scale
+  outside a view, chevron direction / bent path / short line, handle
+  tooltips, disc vs square rendering, `annotations_at` order, Alt+click
+  vs plain click vs Alt+drag through real mouse events, picker hover /
+  highlight / pick, highlight shapes, MainWindow wiring and zoom push,
+  Inspector marks). Full run: 610 passed.
+
+#### Lot L -- Dimension annotation retired (2026-09-28)
+
+User question: what does the Dimension tool do that a text does not?
+Nothing any more: since the contextual edit bar (2026-08-03) a text
+takes the same prefixes (diameter, R, SR...) and the same symmetric /
+bilateral tolerances, inline, and it can hold more (several values, a
+note, a frame). So the tool is gone:
+
+- Removed: `Tool.DIMENSION` (rail button, hint, icon, command palette
+  entry), `model/dimension.py`, `views/items/dimension.py`,
+  `views/dimension_editor.py`, `ChangeDimensionCommand`, the scene's
+  `dimensionPlacementRequested`, MainWindow's dimension editor block,
+  the Annotations panel's "dimension" kind and the
+  `DimensionInlineEditor` styles; `model/tolerance.py` is now the only
+  tolerance model.
+- **Old PDFs** (v0.2.0 is the only release that wrote dimensions): the
+  reader still recognises the marker (Square, `/T` "Annoter:dim", JSON
+  in `/Contents`) and rebuilds a **TextAnnotationItem** at the same
+  place, in the same color and font size, whose content is the prefix +
+  value as text followed by the tolerance as an inline run
+  (`pdf_export.legacy_dimension_runs`). The next save writes it as a
+  FreeText like any text (the old marker is an owned annot, so it is
+  wiped by the rewrite).
+- Tests: `test_dimension.py` and `test_dimension_editor.py` removed;
+  `test_persistence.py` covers the run conversion (symmetric, bilateral,
+  bare value, empty tolerance, empty dimension), a v0.2.0 marker
+  reopening as a text (content, tolerance, font size, position, color),
+  the marker being replaced by a FreeText after a save, and a foreign
+  square that merely reuses the title staying a rectangle. The rail now
+  has 10 tools. Full run: 580 passed (the 32 Dimension tests removed).
+
+#### Lot M -- Add Leader on texts and GD&T frames (2026-09-28)
+
+CATIA's "Add Leader": a text or a GD&T frame can carry any number of
+leaders, each ending in an extremity shape on the feature it designates.
+
+- **Model** (`views/items/leaders.py`): `Leader(target, bends, end)`,
+  frozen, with the target and bends in the item's **parent (page)
+  coordinates**. Moving the annotation leaves every leader pointing at
+  the same spot; only the start follows. The start is computed, not
+  stored (`anchor_on_rect`): middle of the left / right side of the
+  frame when the first point lies beyond it, of the top / bottom side
+  when it lies straight above / below. A text attaches at its outline
+  when it has one, a GD&T frame at its cells (not its notes). Default
+  end: filled arrow; any of the ten line-end shapes (`line_ends.py`,
+  the drawing code moved out of `ArrowItem` so both share it).
+- **`LeaderHost` mixin** (before AnnotationItem in the bases of
+  TextAnnotationItem and GdtAnnotationItem): bounding rect grows to the
+  leaders (`frame_bounding_rect()` is the old one, used for the PDF
+  FreeText rect, the frame picture and the dashed selection box);
+  `shape()` = frame + a band a few screen pixels wide along each leader
+  (so a click on a leader selects its owner, and only near the leader);
+  handles on each target (`("leader", i)`) and bend
+  (`("leader-bend", i, j)`), dragged through the usual resize path
+  (geometry snapshots now carry the leaders, so drags undo); `clone`
+  and document resize carry them; the item re-declares its bounds on
+  every move (`itemChange`), since its leaders stay put. The whole list
+  is one property (`leaders` / `set_leaders`) changed through
+  ChangePropsCommand: add / remove / restyle = one undo step.
+  Callouts (which have their own leader) and frame notes get none.
+- **Placing**: right-click on a text or frame > Add Leader, Edit > Add
+  Leader or the command palette. The scene enters a mode
+  (`begin_leader_placement`, `leaderPlacementChanged`): a dashed leader
+  follows the cursor, the hint chip says what to do, the next left click
+  fixes the target (nothing gets selected or moved); Esc, a right-click
+  or leaving the page cancel.
+- **Editing**: right-click ON a leader: a "Leader" row with the ten end
+  shapes, Add / Remove Bend Point (at the click), Remove Leader;
+  elsewhere on an annotation that has leaders: Remove Leaders.
+- **PDF**: the owner's `/Subject` JSON gets `"leaders"` (target and
+  bends in points, end style) -- the source of truth. For other viewers
+  each leader is also written as its own Line annot (PolyLine when bent)
+  with the end as `/LE`, tagged `"companion": "leader"` so the reader
+  skips it (and a save wipes and rewrites it with the other owned
+  annots). The frame picture of a GD&T frame / stacked-tolerance text is
+  rendered without its leaders.
+- Tests: `tests/test_leaders.py` (18: anchor rule, JSON round trip,
+  bounds / shape / frame rect, target fixed while the text moves, GD&T
+  attachment on the cells, undoable handle drags, leader hit / bend
+  insertion, clone and document resize, placement by a real click in
+  one undo step, Esc / page change cancel, refusal on other kinds,
+  text and GD&T PDF round trips with companions and a second save, frame
+  picture without leaders, context menu entries and leader row,
+  Add Leader command and hint). Full run: 598 passed.
+
+#### Follow-up fixes after lot M (2026-09-28)
+
+- **A drag moves the selection, even under another annotation.** With
+  an annotation selected, a press on a spot where an UNSELECTED one lies
+  on top of it used to select the top one and move it. The scene now
+  defers such a press (`_sel_pending_*`, like the Ctrl duplicate
+  press): moving past the drag threshold starts the manual group drag
+  of the current selection (one undoable move, the top annotation
+  untouched); releasing without moving selects the top one as before,
+  and Alt+click still opens the list. Presses on the selected item
+  itself, on an unselected one covering nothing selected, and the
+  Shift / Ctrl gestures are unchanged. Tests:
+  `tests/test_selection_priority.py` (6).
+- **Bring Forward / Send Backward repaint at once.** `stackBefore`
+  reorders the children without scheduling a repaint, so the new order
+  only showed once something else redrew the canvas. `apply_stack` now
+  updates every restacked item (test in `test_context_menu.py`).
+- Tests that Alt+click through QTest now end with a plain click: the
+  application keeps the modifiers of the last input event, and a stray
+  Alt turned off snapping in `test_smart_guides.py` when it ran after
+  them in the same process. Full run: 605 passed.
+
+#### User feedback batch (2026-09-28)
+
+- **Bend point added from an endpoint** (right-click on a line's end >
+  Add Bend Point) landed on the endpoint itself, hidden under its
+  handle. `line_ends.bend_point_on_segment`: the click's projection on
+  the nearest segment, unless it falls within ~9 screen px of either end
+  of that segment, then the segment's middle. Same rule for leaders.
+- **Freehand selection**: no more dashed box; a selected stroke is
+  highlighted by a translucent band in the selection color along the
+  stroke (4 screen px each side, bounds grow while selected). Hit
+  testing is unchanged (the bounding box).
+- **Ending a polyline / polygon**: Esc now FINISHES the shape (it used
+  to throw it away); right-click finishes too (no context menu);
+  Delete / Backspace takes back the last point; double-click and Enter
+  still finish. A **DraftBar** (top center, under the hint chip) shows
+  while drawing: point count, Remove last point, Cancel, and a primary
+  Finish button (disabled until the shape has enough points: 2 for a
+  polyline, 3 for a polygon). The scene reports the draft through
+  `polyDraftChanged(int)` (points placed, 0 at the end) and gained
+  `remove_last_poly_point`, `cancel_poly_draft`,
+  `poly_draft_min_points`. Hints updated (and a Polygon hint added).
+- **Document properties**: `services/doc_info.py` collects file (name,
+  folder, size, last saved), PDF version, pages grouped by size with
+  their paper format (ISO A0-A5, Letter, Legal, ANSI B-E, portrait /
+  landscape, 2 mm tolerance, else Custom) and rotation, and the PDF
+  metadata with readable dates. Shown in `DocumentPropertiesDialog`
+  (read-only, values selectable, Show in Folder), opened from the main
+  menu (Document Properties..., Alt+Enter, also in Ctrl+K), by clicking
+  the document name in the top bar, or from the Inspector: with nothing
+  selected it has a "Document" section (file, pages, this page's
+  format and size, size on disk) and a Document properties button.
+- **Right-click on a selected annotation hidden under another one**
+  now opens the menu for the selection (same rule as dragging): the
+  scene's `selected_annotation_at` wins over the topmost item; a
+  right-click elsewhere still selects what it lands on.
+- **Right angles on leaders**, like on bent lines: dragging a leader's
+  bend or tip with Shift makes its segment from the previous point (the
+  frame attachment or the bend before) horizontal or vertical; the tip,
+  like a line's free end, is also magnetic to 0/45/90 degrees with no
+  modifier and snaps onto other shapes (Alt turns both off).
+- Tests: `test_line_bends.py` (+3), `test_context_menu.py` (+4),
+  `test_leaders.py` (+2 for the right angles),
+  `test_leaders.py` (+1), `test_freehand_highlight.py` (3),
+  `test_poly.py` (Esc finishes, too-few points dropped, remove last /
+  cancel), `test_poly_finish.py` (5: bar states and buttons,
+  right-click, Backspace, real double-click), `test_document_properties.py`
+  (paper formats, PDF dates, grouping with a rotated page, metadata,
+  unsaved file, dialog, the three entry points, Inspector rows). Full
+  run: 641 passed.
+
+#### Bend radius, GD&T note gap (2026-09-28)
+
+- **GD&T notes closer to the frame**: the upper note floated a
+  row-third above the frame (the gap added the cell padding to the
+  note's own blank bands). `TextAnnotationItem.ink_margins()` gives the
+  blank bands inside a text's frame (document margin, half the room
+  above capitals, half the descent); the frame layout takes them out
+  and keeps `_NOTE_GAP` (1.5 px) between the frame and the notes' ink,
+  above and below.
+- **A corner radius on every bend** -- lines and arrows (at each bend),
+  polylines (inner vertices), polygons (every vertex) and the leaders
+  of texts and GD&T frames, each bend with its own radius (0 = sharp).
+  `views/items/rounding.py` turns sharp vertices + radii into a path
+  with circular fillets tangent to both segments (a radius too big for
+  the corner shrinks so a fillet never takes more than half of either
+  segment; ends of open paths are never rounded), or into sampled
+  vertices (15 degree steps) for the PDF. Items store the SHARP
+  vertices plus one radius per corner: `LineItem.bend_radii()`
+  (follows insert / remove bend), `_PolyItem.bend_radii()` (one per
+  vertex, kept while the vertex count is unchanged), `Leader.radii`.
+  Geometry snapshots carry them, so undo, scaling, clones and the
+  polyline / polygon conversion keep them.
+  `controllers/bend_radius.py` gives the three storages one vocabulary
+  (corners, corner_at, set_radius, set_all_radii, common_radius).
+  - UI: right-click on a bend (line bend, polyline / polygon vertex,
+    leader bend) adds a **Radius** row to the context menu: a spin box
+    in the Inspector's unit (live preview on that bend; Enter applies,
+    Esc restores) and a button giving every bend the same radius; the
+    edit is one undo step, pushed when the menu closes. The Inspector
+    has a **Bend radius** field (Position & size, single selection)
+    that sets every bend at once (shows the largest radius when they
+    differ, with a tooltip saying so); it appears / disappears when the
+    first bend is added / the last removed (`sync_structure` on undo
+    index changes, deferred rebuild).
+  - PDF: the native vertices are the SAMPLED rounded path, so other
+    viewers draw the arcs (leader companions too); the /Subject JSON
+    gains `vertices_pt` (sharp vertices, page coordinates, points) and
+    `radii_pt`, only when a corner is rounded, and the reader prefers
+    them. Leaders store `radii` in their "leaders" payload.
+- Tests: `test_bend_radius.py` (17: fillet geometry and clamping,
+  drawing, per-item storage / undo / scale / clone / conversion,
+  leaders, the shared helpers, round trip of every kind, context menu
+  row with undo / Esc / Enter / every bend, Inspector field and its
+  appearance with the first bend, GD&T note gaps measured on the
+  rendered ink). Full run: 658 passed.
+
+#### Linear dimension tool (2026-09-28)
+
+User request: pick two points, get a dimension as on a drawing -- two
+extension lines, an arrowed dimension line and the value, by default
+the measured length in mm. Decisions (asked): CATIA-like placement
+with a third click, aligned by default with horizontal / vertical as
+options, and the length measured ON THE SHEET (no drawing scale; the
+value stays editable). Not the value marker retired in Lot L: this one
+is geometry.
+
+- **Item** (`views/items/dimension.py`, `DimensionItem`, KIND
+  "dimension"): p1, p2 (measured points), `orientation`
+  (`model/styles.DimOrientation`: ALIGNED true length, HORIZONTAL /
+  VERTICAL projection), `offset` (dimension line = p1 + n * offset, n
+  the normal of the measured direction), `shift` (value along the
+  line), `end_style` (filled arrow 30 deg, open arrow, oblique stroke,
+  dot), `decimals` (0-3, rounded half up, trailing zeros dropped). ISO
+  129-1 look: extension lines start a small gap off the feature and
+  run a little past the dimension line; arrows go outside when they do
+  not fit; the value sits above the line, parallel to it, read from the
+  bottom or the right (lines falling steeply to the right read
+  upwards); the line runs on under a value moved past its ends. Sizes
+  are proportional to the value's text height. `end_primitives` gives
+  the ends as plain shapes, painted on screen and written to the PDF
+  from the same source.
+- **Value**: a `SubTextItem` child (symbols, Ø/R prefixes, inline
+  tolerances, the edit bar -- double-click, F2 or "Edit Value"). Its
+  runs are stored with a placeholder `{"value": 1}` for the measured
+  number, so the text follows the points. After an in-place edit
+  (`runs_from_label`), the measured number found in the text (whole
+  number, not inside "25" or "5.5") becomes the placeholder again
+  ("2x Ø50 ±0.1" stays live); a number changed by hand is an override
+  kept as typed; an emptied text shows the measured value again.
+  "Use measured value" (context menu, inspector) resets it. The text
+  re-centers while typing (document contentsChanged).
+- **Placement** (`PdfScene`, `Tool.DIMENSION`, rail next to GD&T,
+  crosshair, hint chip): click the first point, click the second (a
+  drag from the first also works; the draft measures live), then the
+  dimension line follows the cursor and a third click places it; Shift
+  during that step picks horizontal (cursor above / below the points)
+  or vertical (beside). Points snap onto other annotations' key points
+  (Alt: off). Esc or a right-click drops a half-placed dimension (the
+  tool stays armed), another tool or a page change too. One undo step;
+  back to Select with it selected.
+- **Editing**: handles on both points (snap onto shapes, Shift squares
+  the pair; a horizontal / vertical line stays where it is) and on the
+  dimension line under the value (moves the line and the value along
+  it, magnetic to the middle; Shift moves only the line). Context menu:
+  Measure row (aligned / horizontal / vertical, keeping the line
+  outside the points), Ends row, Edit Value, Use Measured Value.
+  Inspector "Dimension" section: Measured (mm), Measure, Rounding (the
+  value at 0-3 places), Ends, Text size, Offset; rebuilt when the value
+  or orientation changes (`sync_structure` key). Orientation changes
+  are geometry (the snapshot carries it) so undo is exact.
+  `_topmost_annotation_at` now returns the owner of a nested text (the
+  value, a GD&T note), so clicks and menus on the value act on the
+  dimension.
+- **PDF**: a Square annot around it (tagged owned, JSON "dimension":
+  points / offset / shift in page points, orientation, ends, decimals,
+  font size, runs) whose appearance stream DRAWS the dimension for
+  other viewers: lines and ends as vector paths, the value as an image
+  placed at its angle (it may hold any symbol or stacked tolerance).
+  The reader rebuilds the item from the JSON. `_image_xobject` is now
+  shared with the rasterized GD&T / stamp appearances.
+- Tests: `test_dimension.py` (29: value formatting and live number,
+  layout, projections, reading direction, outside arrows, ends,
+  handles, orientation switch with undo, clone / scale, shape,
+  annotation list, the three-click placement, Shift zones, drag,
+  cancel paths, snapping, PDF round trip with appearance, context
+  menu, in-place value edit, inspector); `test_tool_rail.py` and
+  `test_quick_styles.py` updated (the rail has 11 tools again). Full
+  run: 687 passed.
 
 ### Known remaining issues
 
@@ -1554,9 +1948,12 @@ Priority reflects value on mechanical drawings, not effort.
 - **Callout / sticky-note appearance for MuPDF viewers**: author the
   FreeText `/AP` so the leader is visible everywhere, not only in
   Acrobat (see Known issues).
-- **Dimension / measurement** (distance, with scale calibration): high
-  value in mechanical context but explicitly out of v1 scope; needs a
-  calibration UI. Native `Line`/`PolyLine` with a measure dictionary.
+- ~~**Dimension**~~ DONE as a drawing dimension measured on the sheet
+  (2026-09-28, see above). Open follow-ups: a drawing scale (1:2,
+  2:1...) applied to the measured value, snapping the points onto the
+  PDF's own vector geometry (line ends, circle centers) rather than
+  only onto annotations, radius / diameter / angle dimensions, and
+  chained / baseline dimensions.
 - **Weld symbols** (ISO 2553): same composite-item approach as GD&T.
 - **File attachment** (`FileAttachment`) and **image stamp**: lower
   priority for single-user plan review.

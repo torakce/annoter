@@ -503,20 +503,14 @@ QToolBar QToolButton:disabled {
 }
 
 /* ------------------------------------------ floating contextual pills */
-/* SelectionToolbar (what is selected) and EditToolbar (what is being
-   edited) float over the page next to their item. */
-QFrame#SelectionToolbar,
+/* EditToolbar (what is being edited) floats over the page next to its
+   item; the accent border marks the editing state. */
 QFrame#EditToolbar {
     background: @pill;
-    border: 1px solid @line;
+    border: 1px solid @accent;
     border-radius: @radius_lg;
 }
 
-QFrame#EditToolbar {
-    border: 1px solid @accent;
-}
-
-QFrame#SelectionToolbar QToolButton,
 QFrame#EditToolbar QToolButton {
     background: transparent;
     color: @text;
@@ -525,63 +519,54 @@ QFrame#EditToolbar QToolButton {
     padding: 4px 8px;
 }
 
-QFrame#SelectionToolbar QToolButton:hover,
 QFrame#EditToolbar QToolButton:hover {
     background: @hover;
 }
 
-QFrame#SelectionToolbar QToolButton:checked,
 QFrame#EditToolbar QToolButton:checked {
     background: @soft;
     color: @soft_text;
 }
 
+/* ------------------------------------------------- canvas context menu */
+/* Icon rows at the top of the right-click menu (Lot J). */
+QWidget#ContextIconRow,
+QWidget#ContextRowCaptionBox {
+    background: transparent;
+}
+
+QLabel#ContextRowCaption {
+    color: @text_muted;
+    font-size: 11px;
+}
+
+QToolButton#ContextIconButton {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: @radius_sm;
+    padding: 0px;
+}
+
+QToolButton#ContextIconButton:hover {
+    background: @hover;
+}
+
+QToolButton#ContextIconButton:pressed {
+    background: @pressed;
+}
+
+QToolButton#ContextIconButton:checked {
+    background: @soft;
+    border: 1px solid @accent;
+}
+
+QToolButton#ContextIconButton:disabled {
+    background: transparent;
+    border: 1px solid transparent;
+}
+
 QFrame#EditToolbar QLineEdit {
     padding: 2px 5px;
-}
-
-/* ------------------------------------------------ inline editors (dim) */
-/* The dimension strip shown over the page while an item is being
-   created or edited; the accent border marks the editing state. */
-QFrame#DimensionInlineEditor {
-    background: @pill;
-    border: 2px solid @accent;
-    border-radius: @radius_lg;
-}
-
-QFrame#DimensionInlineEditor QLineEdit {
-    background: @field;
-    border: 1px solid @line_strong;
-    border-radius: 4px;
-    padding: 1px 4px;
-}
-
-QFrame#DimensionInlineEditor QLineEdit:focus {
-    border: 1px solid @accent;
-}
-
-QFrame#DimensionInlineEditor QToolButton {
-    background: transparent;
-    color: @text;
-    border: 1px solid @line_strong;
-    border-radius: 4px;
-    padding: 1px 5px;
-}
-
-QFrame#DimensionInlineEditor QToolButton:hover {
-    background: @hover;
-    border: 1px solid @accent;
-}
-
-QFrame#DimensionInlineEditor QToolButton:checked {
-    background: @soft;
-    color: @soft_text;
-    border: 1px solid @accent;
-}
-
-QFrame#DimensionInlineEditor QToolButton::menu-indicator {
-    image: none;
-    width: 0;
 }
 
 /* ------------------------------------------------------------- top bar */
@@ -904,6 +889,45 @@ QFrame#CanvasToast {
     border-radius: @radius;
 }
 
+/* Finish / Remove last point / Cancel while a polyline is drawn. */
+QFrame#DraftBar {
+    background: @pill;
+    border: 1px solid @accent;
+    border-radius: @radius_lg;
+}
+
+QFrame#DraftBar QLabel {
+    background: transparent;
+    padding: 0px 6px;
+}
+
+QFrame#DraftBar QToolButton {
+    background: transparent;
+    color: @text;
+    border: none;
+    border-radius: @radius_sm;
+    padding: 5px 9px;
+}
+
+QFrame#DraftBar QToolButton:hover {
+    background: @hover;
+}
+
+QFrame#DraftBar QToolButton#DraftFinish {
+    background: @accent_bg;
+    color: @on_accent;
+    font-weight: 600;
+}
+
+QFrame#DraftBar QToolButton#DraftFinish:hover {
+    background: @accent_hover;
+}
+
+QFrame#DraftBar QToolButton#DraftFinish:disabled {
+    background: @hover;
+    color: @text_disabled;
+}
+
 /* ------------------------------------------------------------- sidebar */
 /* Left panel with Pages / Annotations tabs (Lot E). */
 QWidget#SidebarBody {
@@ -1029,6 +1053,10 @@ QLabel#InspectorSubtitle,
 QLabel#InspectorLabel,
 QLabel#InspectorTip {
     color: @text_muted;
+}
+
+QWidget#InspectorLabelBox {
+    background: transparent;
 }
 
 QLabel#InspectorSectionTitle {
@@ -1426,4 +1454,23 @@ QFrame#GdtBuilderFooter {
 
 QPushButton#GdtCancelButton {
     padding: 7px 16px;
+}
+
+/* ------------------------------------------------ document properties */
+QWidget#DocPropBody {
+    background: transparent;
+}
+
+QFrame#DocPropBlock {
+    background: @panel;
+    border: 1px solid @line;
+    border-radius: @radius;
+}
+
+QFrame#DocPropBlock QLabel {
+    background: transparent;
+}
+
+QLabel#DocPropEmpty {
+    color: @text_disabled;
 }

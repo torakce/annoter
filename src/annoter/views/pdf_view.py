@@ -131,6 +131,7 @@ class PdfView(QGraphicsView):
             Tool.STAMP,
             Tool.FREEHAND,
             Tool.GDT,
+            Tool.DIMENSION,
         ):
             cursor = Qt.CrossCursor
         elif tool is Tool.TEXT:
@@ -162,7 +163,20 @@ class PdfView(QGraphicsView):
         t = QTransform()
         t.scale(view_scale, view_scale)
         self.setTransform(t)
+        self._push_view_scale()
         self.zoomChanged.emit(self._zoom)
+
+    def setScene(self, scene) -> None:  # noqa: ANN001, N802
+        super().setScene(scene)
+        self._push_view_scale()
+
+    def _push_view_scale(self) -> None:
+        """Tell the scene how many screen pixels a scene unit covers, so
+        selection handles keep one on-screen size at every zoom."""
+        scene = self.scene()
+        if scene is not None and hasattr(scene, "set_view_scale"):
+            # Uniform scale, whatever rotation the transform may carry.
+            scene.set_view_scale(abs(self.transform().determinant()) ** 0.5)
 
     # ------------------------------------------------------------------
     # events

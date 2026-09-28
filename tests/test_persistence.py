@@ -18,11 +18,6 @@ from PySide6.QtCore import QPointF, QRectF  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from annoter.model.dimension import (  # noqa: E402
-    DimensionPrefix,
-    DimensionState,
-    ToleranceMode,
-)
 from annoter.model.gdt import (  # noqa: E402
     Characteristic,
     DatumRef,
@@ -36,16 +31,14 @@ from annoter.model.styles import (  # noqa: E402
 )
 from annoter.model.tolerance import Tolerance  # noqa: E402
 from annoter.model.tolerance import (  # noqa: E402
-    # Aliased: `model.dimension` exports a same-named enum for the
-    # standalone Dimension tool, already imported above.
     ToleranceMode as InlineToleranceMode,
 )
 from annoter.services.pdf_export import (  # noqa: E402
+    legacy_dimension_runs,
     read_annotations,
     write_annotations,
 )
 from annoter.views.items.callout import CalloutItem  # noqa: E402
-from annoter.views.items.dimension import DimensionAnnotationItem  # noqa: E402
 from annoter.views.items.freehand import FreehandItem  # noqa: E402
 from annoter.views.items.note import StickyNoteItem  # noqa: E402
 from annoter.views.items.stamp import StampItem  # noqa: E402
@@ -785,61 +778,120 @@ def test_gdt_font_size_roundtrip(qapp, blank_doc) -> None:
     assert g.font_size() == 20
 
 
-def test_dimension_symmetric_roundtrip_preserves_state(qapp, blank_doc) -> None:
-    state = DimensionState(
-        prefix=DimensionPrefix.DIAMETER,
-        nominal="45.00",
-        tolerance_mode=ToleranceMode.SYMMETRIC,
-        tol_value="0.05",
+# ----------------------------------------------------------------------
+# legacy Dimension markers (tool retired in Lot L): reopen as texts
+# ----------------------------------------------------------------------
+def _legacy_dimension(doc, data: dict, rect_pt, props: dict | None = None):
+    """Write a marker exactly as the v0.2.0 Dimension tool did."""
+    import json
+
+    annot = doc[0].add_rect_annot(fitz.Rect(*rect_pt))
+    annot.set_info(
+        title="Annoter:dim",
+        content="annoter.dim:" + json.dumps(data),
+        subject=json.dumps(props or {}),
     )
-    item = DimensionAnnotationItem(state, QPointF(120, 80))
-    write_annotations(blank_doc, {0: [item]}, dpi=150)
+    annot.set_colors(stroke=(0.1, 0.2, 0.7))
+    annot.update()
+
+
+def test_legacy_dimension_runs() -> None:
+    assert legacy_dimension_runs(
+        {
+            "prefix": "\u00d8",
+            "nominal": "45.00",
+            "tolerance_mode": "symmetric",
+            "tol_value": "0.05",
+        }
+    ) == [
+        {"t": "\u00d845.00"},
+        {"tol": Tolerance(InlineToleranceMode.SYMMETRIC, value="0.05").to_dict()},
+    ]
+    assert legacy_dimension_runs(
+        {
+            "nominal": "12.50",
+            "tolerance_mode": "bilateral",
+            "tol_upper": "0.10",
+            "tol_lower": "0.05",
+        }
+    ) == [
+        {"t": "12.50"},
+        {
+            "tol": Tolerance(
+                InlineToleranceMode.BILATERAL, upper="0.10", lower="0.05"
+            ).to_dict()
+        },
+    ]
+    assert legacy_dimension_runs({"nominal": "30"}) == [{"t": "30"}]
+    # An empty tolerance adds nothing; an empty dimension is nothing.
+    assert legacy_dimension_runs(
+        {"nominal": "8", "tolerance_mode": "symmetric"}
+    ) == [{"t": "8"}]
+    assert legacy_dimension_runs({"nominal": ""}) == []
+
+
+def test_legacy_dimension_reopens_as_text(qapp, blank_doc) -> None:
+    _legacy_dimension(
+        blank_doc,
+        {
+            "prefix": "R",
+            "nominal": "12.50",
+            "tolerance_mode": "bilateral",
+            "tol_upper": "0.10",
+            "tol_lower": "0.05",
+        },
+        (57.6, 38.4, 110.0, 60.0),
+        {"dash": "solid", "rect_pt": [57.6, 38.4, 52.4, 21.6], "font_size": 20},
+    )
     reopened = _save_then_reopen(blank_doc)
     out = read_annotations(reopened, dpi=150)
     reopened.close()
     assert len(out[0]) == 1
-    restored = out[0][0]
-    assert isinstance(restored, DimensionAnnotationItem)
-    assert restored.state() == state
-    # Position must not drift across save/reopen cycles (the writer
-    # stores the content rect, whose topleft is exactly item.pos()).
-    assert restored.pos().x() == pytest.approx(120, abs=0.5)
-    assert restored.pos().y() == pytest.approx(80, abs=0.5)
+    text = out[0][0]
+    assert type(text) is TextAnnotationItem
+    assert text.text().startswith("R12.50")
+    assert text.tolerances() == [
+        Tolerance(InlineToleranceMode.BILATERAL, upper="0.10", lower="0.05")
+    ]
+    assert text.font_size() == 20
+    # Where the dimension was (57.6 pt, 38.4 pt = 120 px, 80 px).
+    assert text.pos().x() == pytest.approx(120, abs=0.5)
+    assert text.pos().y() == pytest.approx(80, abs=0.5)
+    assert text.color().blue() > text.color().red()
 
 
-def test_dimension_bilateral_roundtrip_preserves_state(qapp, blank_doc) -> None:
-    state = DimensionState(
-        prefix=DimensionPrefix.NONE,
-        nominal="12.50",
-        tolerance_mode=ToleranceMode.BILATERAL,
-        tol_upper="0.10",
-        tol_lower="0.05",
+def test_legacy_dimension_is_rewritten_as_a_text_on_save(
+    qapp, blank_doc
+) -> None:
+    _legacy_dimension(
+        blank_doc,
+        {"nominal": "30.00", "tolerance_mode": "symmetric", "tol_value": "0.1"},
+        (40.0, 40.0, 90.0, 60.0),
     )
-    item = DimensionAnnotationItem(state, QPointF(100, 90))
-    write_annotations(blank_doc, {0: [item]}, dpi=150)
+    first = _save_then_reopen(blank_doc)
+    items = read_annotations(first, dpi=150)
+    write_annotations(first, items, dpi=150)
+    second = _save_then_reopen(first)
+    first.close()
+    kinds = [(a.type[1], (a.info or {}).get("title")) for a in second[0].annots()]
+    out = read_annotations(second, dpi=150)
+    second.close()
+    assert ("Square", "Annoter:dim") not in kinds
+    assert [k for k, _t in kinds] == ["FreeText"]
+    assert type(out[0][0]) is TextAnnotationItem
+    assert out[0][0].text().startswith("30.00")
+
+
+def test_foreign_square_with_a_dim_like_title_stays_a_rectangle(
+    qapp, blank_doc
+) -> None:
+    annot = blank_doc[0].add_rect_annot(fitz.Rect(10, 10, 50, 50))
+    annot.set_info(title="Annoter:dim", content="not a dimension")
+    annot.update()
     reopened = _save_then_reopen(blank_doc)
     out = read_annotations(reopened, dpi=150)
     reopened.close()
-    assert len(out[0]) == 1
-    restored = out[0][0]
-    assert isinstance(restored, DimensionAnnotationItem)
-    assert restored.state() == state
-    assert restored.pos().x() == pytest.approx(100, abs=0.5)
-    assert restored.pos().y() == pytest.approx(90, abs=0.5)
-
-
-def test_dimension_font_size_roundtrip(qapp, blank_doc) -> None:
-    state = DimensionState(nominal="30.00")
-    item = DimensionAnnotationItem(state, QPointF(120, 80))
-    item.set_font_size(20)
-    write_annotations(blank_doc, {0: [item]}, dpi=150)
-
-    reopened = _save_then_reopen(blank_doc)
-    out = read_annotations(reopened, dpi=150)
-    reopened.close()
-    d = out[0][0]
-    assert isinstance(d, DimensionAnnotationItem)
-    assert d.font_size() == 20
+    assert isinstance(out[0][0], RectangleItem)
 
 
 def test_color_roundtrip(qapp, blank_doc) -> None:

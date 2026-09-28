@@ -10,7 +10,7 @@ Commands:
     ChangeColorCommand
     ChangeStrokeCommand
     ChangeGdtCommand           (M3, defined here as a stub)
-    ChangeDimensionCommand
+    ReorderCommand             (stacking order, Lot J)
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor, QUndoCommand
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene
 
+from annoter.controllers.stacking import apply_stack
 from annoter.views.items.base import AnnotationItem
 
 
@@ -240,6 +241,59 @@ class ChangePropsCommand(QUndoCommand):
             self._apply(item, name, old)
 
 
+class ReorderCommand(QUndoCommand):
+    """Restack the annotations of one page (see controllers.stacking).
+
+    Stores the page's whole bottom-to-top order before and after. Clicks
+    in a row (Bring Forward x10 from the context menu, which stays open)
+    merge into one undo step; a run that ends where it started (up then
+    down) drops out of the stack altogether.
+    """
+
+    ID = 0x5A0D
+
+    def __init__(
+        self,
+        parent_item: QGraphicsItem,
+        old_order: Sequence[AnnotationItem],
+        new_order: Sequence[AnnotationItem],
+        label: str = "Change stacking order",
+        parent: QUndoCommand | None = None,
+    ) -> None:
+        super().__init__(label, parent)
+        self._parent_item = parent_item
+        self._old = list(old_order)
+        self._new = list(new_order)
+
+    def _apply(self, order: list[AnnotationItem]) -> None:
+        # Items removed from the page since (a later command undone
+        # first restores them) are skipped rather than re-parented.
+        apply_stack(
+            [it for it in order if it.parentItem() is self._parent_item]
+        )
+
+    def redo(self) -> None:
+        self._apply(self._new)
+
+    def undo(self) -> None:
+        self._apply(self._old)
+
+    def id(self) -> int:
+        return self.ID
+
+    def mergeWith(self, other: QUndoCommand) -> bool:
+        if (
+            not isinstance(other, ReorderCommand)
+            or other._parent_item is not self._parent_item
+            or set(other._old) != set(self._new)
+        ):
+            return False
+        self._new = list(other._new)
+        if self._new == self._old:
+            self.setObsolete(True)
+        return True
+
+
 class ResizeCommand(QUndoCommand):
     """Generic geometry-change command driven by `apply_geom` snapshots.
 
@@ -293,27 +347,3 @@ class ChangeGdtCommand(QUndoCommand):
         if hasattr(self._item, "apply_gdt_state"):
             self._item.apply_gdt_state(self._old)
 
-
-class ChangeDimensionCommand(QUndoCommand):
-    """Swap the DimensionState of a DimensionAnnotationItem (undo round-trip)."""
-
-    def __init__(
-        self,
-        item: AnnotationItem,
-        old_state,
-        new_state,
-        label: str = "Edit dimension",
-        parent: QUndoCommand | None = None,
-    ) -> None:
-        super().__init__(label, parent)
-        self._item = item
-        self._old = old_state
-        self._new = new_state
-
-    def redo(self) -> None:
-        if hasattr(self._item, "apply_dimension_state"):
-            self._item.apply_dimension_state(self._new)
-
-    def undo(self) -> None:
-        if hasattr(self._item, "apply_dimension_state"):
-            self._item.apply_dimension_state(self._old)

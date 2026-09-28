@@ -215,7 +215,7 @@ def test_tool_rail_is_tools_only(qapp) -> None:
     tc = ToolController()
     rail = ToolRail(tc)
     assert rail.findChildren(StrokeSpinBox) == []
-    # 10 classic tools + Dimension, one button each.
+    # 11 tools, one button each (the linear Dimension, 2026-09-28).
     assert len(rail.tools()) == 11
 
 

@@ -105,16 +105,60 @@ def test_polygon_double_click_finishes(scene) -> None:
     assert not sc.poly_draft_active()
 
 
-def test_escape_discards_poly_draft(scene) -> None:
+def test_escape_finishes_poly_draft(scene) -> None:
+    """Esc ENDS the shape and keeps it, like Enter (2026-09-28: it used
+    to throw the drawing away)."""
+    sc, tc, stack = scene
+    tc.set_tool(Tool.POLYLINE)
+    _click(sc, 30, 30)
+    _click(sc, 120, 40)
+    _click(sc, 150, 90)
+    assert sc.poly_draft_active()
+    sc.cancel_current_action()  # what the Escape key triggers
+    assert not sc.poly_draft_active()
+    items = _committed(sc)
+    assert len(items) == 1 and len(items[0].points()) == 3
+    assert stack.count() == 1
+    # Back to Select with the new shape selected, as after any drawing.
+    assert tc.tool() is Tool.SELECT
+    assert items[0].isSelected()
+
+
+def test_escape_drops_a_polygon_with_too_few_points(scene) -> None:
     sc, tc, stack = scene
     tc.set_tool(Tool.POLYGON)
     _click(sc, 30, 30)
     _click(sc, 120, 40)
-    assert sc.poly_draft_active()
-    sc.cancel_current_action()  # what the Escape key triggers
+    sc.cancel_current_action()
     assert not sc.poly_draft_active()
     assert _committed(sc) == []
     assert stack.count() == 0
+
+
+def test_remove_last_point_and_cancel(scene) -> None:
+    sc, tc, stack = scene
+    counts: list[int] = []
+    sc.polyDraftChanged.connect(counts.append)
+    tc.set_tool(Tool.POLYLINE)
+    _click(sc, 30, 30)
+    _click(sc, 120, 40)
+    _click(sc, 150, 90)
+    sc.remove_last_poly_point()
+    assert sc.poly_point_count() == 2
+    sc.finish_poly_draft()
+    items = _committed(sc)
+    assert [(p.x(), p.y()) for p in items[0].points()] == [(30, 30), (120, 40)]
+    tc.set_tool(Tool.POLYLINE)
+    _click(sc, 200, 200)
+    sc.remove_last_poly_point()  # the only point: drops the draft
+    assert not sc.poly_draft_active()
+    _click(sc, 200, 200)
+    _click(sc, 250, 220)
+    sc.cancel_poly_draft()
+    assert not sc.poly_draft_active()
+    assert len(_committed(sc)) == 1 and stack.count() == 1
+    assert counts == [1, 2, 3, 2, 0, 1, 0, 1, 2, 0]
+    assert sc.poly_draft_min_points() == 2
 
 
 def test_polygon_dropped_when_too_few_vertices(scene) -> None:

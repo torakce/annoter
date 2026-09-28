@@ -51,12 +51,14 @@ def cloud_to_rect(item: CloudItem) -> RectangleItem:
 
 def polyline_to_polygon(item: PolylineItem) -> PolygonItem:
     p = PolygonItem(item.points())
+    p.set_bend_radii(item.bend_radii())
     item._copy_base_style_into(p)
     return p
 
 
 def polygon_to_polyline(item: PolygonItem) -> PolylineItem:
     p = PolylineItem(item.points())
+    p.set_bend_radii(item.bend_radii())
     item._copy_base_style_into(p)
     # The fill has no open-path equivalent.
     return p

@@ -34,6 +34,7 @@ class Tool(Enum):
     STAMP = auto()
     FREEHAND = auto()
     GDT = auto()
+    # Linear dimension: two points, then where the dimension line goes.
     DIMENSION = auto()
     # Action mode (not shown in the drawing-tool palette): click an
     # annotation to copy a previously captured style onto it.

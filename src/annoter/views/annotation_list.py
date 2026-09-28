@@ -100,7 +100,7 @@ def describe(item: AnnotationItem) -> tuple[str, str, str]:
     """(title, subtitle, glyph) for a row.
 
     The title is what the user wrote or chose when there is such a thing
-    (note text, stamp label, GD&T characteristic, dimension value), else
+    (note text, stamp label, GD&T characteristic), else
     the type name; the subtitle is then the type name.
     """
     kind = item.KIND or ""
@@ -115,8 +115,6 @@ def describe(item: AnnotationItem) -> tuple[str, str, str]:
     content = ""
     if kind == "gdt":
         content = item.label().removeprefix("GD&T ").strip()
-    elif kind == "dimension":
-        content = item.label().removeprefix("Dimension").strip()
     else:
         getter = getattr(item, "text", None)
         if callable(getter):

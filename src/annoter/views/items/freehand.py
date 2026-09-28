@@ -1,12 +1,22 @@
-"""FreehandItem: freehand stroke stored as a polyline."""
+"""FreehandItem: freehand stroke stored as a polyline.
+
+Selected, it is highlighted -- a translucent band in the selection color
+along the stroke itself -- rather than framed in a dashed box: a scribble
+is a line, and a box around it mostly covers what is underneath (user
+feedback, 2026-09-28). It has no handles, so nothing else is drawn.
+"""
 
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsItem
 
-from annoter.views.items.base import AnnotationItem
+from annoter.views.items.base import HANDLE_COLOR, AnnotationItem
+
+# Selection highlight: this many screen pixels on each side of the stroke.
+HIGHLIGHT_PX = 4.0
+HIGHLIGHT_ALPHA = 90
 
 
 class FreehandItem(AnnotationItem):
@@ -44,10 +54,16 @@ class FreehandItem(AnnotationItem):
             path.lineTo(p)
         return path
 
+    def highlight_width(self) -> float:
+        """Width of the selection band, in item units."""
+        return self._stroke + 2 * HIGHLIGHT_PX * self.screen_px()
+
     def boundingRect(self) -> QRectF:
         if not self._points:
             return QRectF()
         m = self._stroke / 2.0 + 1.0
+        if self.isSelected():
+            m = max(m, self.highlight_width() / 2.0 + 1.0)
         xs = [p.x() for p in self._points]
         ys = [p.y() for p in self._points]
         return QRectF(
@@ -66,10 +82,17 @@ class FreehandItem(AnnotationItem):
         if self._stroke <= 0.0:
             # QPen(width=0) is a cosmetic hairline in Qt, not "no pen".
             pen.setStyle(Qt.NoPen)
-        painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
+        if self.isSelected():
+            band_color = QColor(HANDLE_COLOR)
+            band_color.setAlpha(HIGHLIGHT_ALPHA)
+            band = QPen(band_color, self.highlight_width())
+            band.setCapStyle(Qt.RoundCap)
+            band.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(band)
+            painter.drawPath(self._path())
+        painter.setPen(pen)
         painter.drawPath(self._path())
-        self._draw_selection_marker(painter, self.boundingRect())
 
     def scale_geometry(self, s: float) -> None:
         super().scale_geometry(s)

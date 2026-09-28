@@ -75,10 +75,9 @@ def test_unknown_placeholder_fails_loudly() -> None:
 def test_floating_widgets_are_themed_by_the_template() -> None:
     qss = load_qss(Theme.LIGHT)
     for name in (
-        "SelectionToolbar",
+        "ContextIconButton",
         "EditToolbar",
         "GdtFrameBuilder",
-        "DimensionInlineEditor",
     ):
         assert f"#{name}" in qss, name
 

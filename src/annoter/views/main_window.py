@@ -42,34 +42,51 @@ from annoter.config import (
     PIXMAP_CACHE_PAGES,
     UNDO_STACK_LIMIT,
 )
+from annoter.controllers import bend_radius
 from annoter.controllers.align import AlignMode, compute_align_moves
+from annoter.controllers.geometry import pt_to_px, px_to_pt
 from annoter.controllers.convert import (
     convert_poly_closed,
     convert_shape_outline,
     line_to_arrow,
 )
-from annoter.controllers.geometry import item_scene_rect
+from annoter.controllers.stacking import (
+    LOWER,
+    RAISE,
+    TO_BACK,
+    TO_FRONT,
+    can_restack,
+    page_stack,
+    restacked,
+)
 from annoter.controllers.commands import (
     AddAnnotationCommand,
     ChangeColorCommand,
-    ChangeDimensionCommand,
     ChangeGdtCommand,
     ChangePropsCommand,
     ChangeStrokeCommand,
     DeleteAnnotationsCommand,
     MoveAnnotationsCommand,
+    ReorderCommand,
     ReplaceAnnotationCommand,
     ResizeCommand,
 )
 from annoter.controllers.tools import Tool, ToolController
-from annoter.model.dimension import DimensionState
 from annoter.model.document import PdfDocument
 from annoter.model.gdt import GdtState
-from annoter.model.styles import END_STYLE_LABELS, EndStyle, HandleRole
+from annoter.model.styles import (
+    DIM_END_LABELS,
+    DIM_ORIENTATION_LABELS,
+    END_STYLE_LABELS,
+    DimOrientation,
+    EndStyle,
+    HandleRole,
+)
 from annoter.services.pdf_export import (
     read_annotations,
     write_annotations,
 )
+from annoter.services import doc_info
 from annoter.services.command_usage import CommandUsage
 from annoter.services.pdf_render import PageRenderer
 from annoter.services.recent_files import RecentFiles
@@ -80,10 +97,17 @@ from annoter.services.tokens import tokens_for
 from annoter.views.canvas_overlays import (
     CanvasNavPill,
     CanvasToast,
+    DraftBar,
     ToolHintChip,
     hint_for,
 )
 from annoter.views.inspector_widgets import PaletteEditor
+from annoter.views.annotation_picker import AnnotationPicker
+from annoter.views.context_menu import (
+    AnnotationContextMenu,
+    IconCommand,
+    MenuSpinBox,
+)
 from annoter.views.command_palette import (
     FILES_GROUP,
     CommandEntry,
@@ -93,15 +117,17 @@ from annoter.views.command_palette import (
 from annoter.views.line_icons import line_icon
 from annoter.views.top_bar import TopBar
 from annoter.views.color_picker import popup_color_picker
-from annoter.views.dimension_editor import DimensionInlineEditor
 from annoter.views.edit_toolbar import EditToolbar
 from annoter.views.gdt_editor import GdtFrameBuilder
 from annoter.views.icons import action_icon, end_icon
 from annoter.views.items.base import AnnotationItem
-from annoter.views.items.dimension import DimensionAnnotationItem
+from annoter.views.items.callout import CalloutItem
+from annoter.views.items.dimension import VALUE_RUN, DimensionItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.note import StickyNoteItem
+from annoter.views.items.poly import PolygonItem, PolylineItem
+from annoter.views.items.shapes import CloudItem, RectangleItem
 from annoter.views.items.stamp import STAMP_PRESETS
 from annoter.views.items.sub_text import SubTextItem
 from annoter.views.items.text import TextAnnotationItem
@@ -114,10 +140,10 @@ from annoter.views.document_sidebar import (
 from annoter.views.pdf_scene import PdfScene
 from annoter.views.pdf_view import PdfView
 from annoter.views.properties_dock import INSPECTOR_WIDTH, PropertiesDock
-from annoter.views.selection_toolbar import SelectionToolbar
 from annoter.views.stroke_spin import STROKE_LADDER
 from annoter.views.tool_rail import TOOL_LABELS, ToolFlyout, ToolRail
-from annoter.views.welcome_screen import WelcomeScreen
+from annoter.views.welcome_screen import WelcomeScreen, format_size
+from annoter.views.document_properties import DocumentPropertiesDialog
 
 
 # Style properties the Format Painter may copy. Captured from the source
@@ -200,12 +226,6 @@ class MainWindow(QMainWindow):
         # a drawing usually repeats the same control many times.
         self._last_gdt_characteristic = GdtState().characteristic
 
-        # In-place Dimension editing, same contract as GD&T above.
-        self._dimension_editor: DimensionInlineEditor | None = None
-        self._dimension_edit_item: DimensionAnnotationItem | None = None
-        self._dimension_edit_is_new: bool = False
-        self._dimension_old_state: DimensionState | None = None
-
         # Floating sticky-note editor (one at a time, like the GD&T one).
         self._note_editor: NoteEditor | None = None
         self._note_edit_item: StickyNoteItem | None = None
@@ -217,7 +237,6 @@ class MainWindow(QMainWindow):
         self._scene.annotationsChanged.connect(self._on_annotations_changed)
         self._scene.selectionChanged.connect(self._on_scene_selection_changed)
         self._scene.gdtPlacementRequested.connect(self._on_gdt_placement)
-        self._scene.dimensionPlacementRequested.connect(self._on_dimension_placement)
         self._scene.notePlacementRequested.connect(self._on_note_placement)
         self._scene.formatPaintRequested.connect(self._on_format_paint_requested)
 
@@ -239,24 +258,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._central)
         self._view.setFocus()
 
-        # Floating contextual action bar shown near the current selection.
-        st = SelectionToolbar(self._view.viewport())
-        self._selection_toolbar = st
-        st.editClicked.connect(self._edit_selected)
-        st.outlinePicked.connect(self._set_selected_outline)
-        st.fillToggled.connect(self._set_selected_fill)
-        st.endStylePicked.connect(self._on_pill_end_style)
-        st.addBendClicked.connect(self._add_bend_to_selected)
-        st.closedToggled.connect(self._set_selected_closed)
-        st.groupClicked.connect(self._group_selected)
-        st.ungroupClicked.connect(self._ungroup_selected)
-        st.duplicateClicked.connect(self._duplicate_selected)
-        st.deleteClicked.connect(self._delete_selected)
-
-        # Floating contextual bar for the item being EDITED (the pill
-        # above is for the item being SELECTED). Symbols and tolerances
-        # are inserted from here, so they are part of writing a text
-        # rather than tools of their own.
+        # Floating contextual bar for the item being EDITED. Symbols and
+        # tolerances are inserted from here, so they are part of writing
+        # a text rather than tools of their own. (The bar that used to
+        # float over a SELECTED item is gone since Lot J: its commands
+        # live in the right-click menu and the Inspector.)
         self._text_edit_item: TextAnnotationItem | None = None
         et = EditToolbar(self._view.viewport())
         self._edit_toolbar = et
@@ -280,14 +286,16 @@ class MainWindow(QMainWindow):
         et.refocusRequested.connect(self._refocus_text_edit)
         self._scene.textEditingStarted.connect(self._on_text_editing_started)
         self._scene.textEditingFinished.connect(self._on_text_editing_finished)
-
-        # Stability: hide the pill during interactive drags/resizes and
-        # re-show it (repositioned) on release; refresh it after every
-        # undo-stack change so its buttons track the item's real state.
-        self._scene.interactiveDragChanged.connect(self._on_drag_state)
-        self._undo_group.indexChanged.connect(
-            lambda _i: self._update_selection_toolbar()
+        # Alt+Click: choose among the annotations stacked at the click.
+        self._scene.pickRequested.connect(self._on_pick_requested)
+        # "Add Leader" mode: hint and cursor while the target is picked.
+        self._scene.leaderPlacementChanged.connect(
+            self._on_leader_placement_changed
         )
+
+        # The edit bar hides during interactive drags and resizes and
+        # comes back, repositioned, on release.
+        self._scene.interactiveDragChanged.connect(self._on_drag_state)
 
         # In-app clipboard: detached clones produced by Copy/Cut. Paste
         # re-clones from these so multiple pastes work and the clipboard
@@ -341,10 +349,16 @@ class MainWindow(QMainWindow):
         pd.colorPicked.connect(self._on_quick_color_picked)
         pd.strokePicked.connect(self._on_quick_stroke_picked)
         pd.strokeCommitted.connect(self._tool_controller.set_stroke)
+        pd.documentPropertiesRequested.connect(self._show_document_properties)
         pd.editPaletteRequested.connect(self._edit_palette)
         pd.editRequested.connect(self._edit_selected)
         pd.duplicateRequested.connect(self._duplicate_selected)
         pd.deleteRequested.connect(self._delete_selected)
+        # A first bend added (or the last removed) brings (drops) the
+        # inspector's Bend radius row without a selection change.
+        self._undo_group.indexChanged.connect(
+            lambda _i: pd.sync_structure()
+        )
         self._tool_controller.colorChanged.connect(self._sync_inspector_defaults)
         self._tool_controller.strokeChanged.connect(self._sync_inspector_defaults)
         self.addDockWidget(Qt.RightDockWidgetArea, pd)
@@ -362,6 +376,8 @@ class MainWindow(QMainWindow):
         self._build_canvas_overlays()
         self._properties_dock.set_actions(
             bring_front=self.act_bring_front,
+            raise_one=self.act_raise,
+            lower_one=self.act_lower,
             send_back=self.act_send_back,
             format_painter=self.act_format_painter,
         )
@@ -411,6 +427,12 @@ class MainWindow(QMainWindow):
 
         self.act_resize_doc = QAction("&Resize Document...", self)
         self.act_resize_doc.triggered.connect(self._on_resize_document)
+
+        self.act_doc_properties = QAction("Document &Properties...", self)
+        self.act_doc_properties.setShortcut(QKeySequence("Alt+Return"))
+        self.act_doc_properties.triggered.connect(
+            self._show_document_properties
+        )
 
         self.act_export_images = QAction("&Export as Images...", self)
         self.act_export_images.triggered.connect(self._on_export_images)
@@ -541,16 +563,35 @@ class MainWindow(QMainWindow):
         self.act_duplicate.setShortcut(QKeySequence("Ctrl+D"))
         self.act_duplicate.triggered.connect(self._duplicate_selected)
 
+        # ---- stacking order (Lot J: one step at a time, undoable) ----
         self.act_bring_front = QAction("Bring to &Front", self)
         self.act_bring_front.setShortcut(QKeySequence("Ctrl+Shift+]"))
         self.act_bring_front.triggered.connect(
-            lambda: self._reorder_selection(to_front=True)
+            lambda: self._restack_selection(TO_FRONT)
+        )
+
+        self.act_raise = QAction("Bring &Forward", self)
+        self.act_raise.setShortcut(QKeySequence("Ctrl+]"))
+        self.act_raise.setToolTip(
+            "Bring forward: above the next annotation it overlaps"
+        )
+        self.act_raise.triggered.connect(
+            lambda: self._restack_selection(RAISE)
+        )
+
+        self.act_lower = QAction("Send Back&ward", self)
+        self.act_lower.setShortcut(QKeySequence("Ctrl+["))
+        self.act_lower.setToolTip(
+            "Send backward: below the next annotation it overlaps"
+        )
+        self.act_lower.triggered.connect(
+            lambda: self._restack_selection(LOWER)
         )
 
         self.act_send_back = QAction("Send to &Back", self)
         self.act_send_back.setShortcut(QKeySequence("Ctrl+Shift+["))
         self.act_send_back.triggered.connect(
-            lambda: self._reorder_selection(to_front=False)
+            lambda: self._restack_selection(TO_BACK)
         )
 
         # ---- align & distribute (PowerPoint/Canva-style) ----
@@ -595,6 +636,14 @@ class MainWindow(QMainWindow):
         self.act_ungroup = QAction("&Ungroup", self)
         self.act_ungroup.setShortcut(QKeySequence("Ctrl+Shift+G"))
         self.act_ungroup.triggered.connect(self._ungroup_selected)
+
+        # ---- leaders (Lot M, CATIA's "Add Leader") ----
+        self.act_add_leader = QAction("Add &Leader", self)
+        self.act_add_leader.setToolTip(
+            "Add a leader to the selected text or GD&T frame, then click "
+            "the point it designates"
+        )
+        self.act_add_leader.triggered.connect(self._add_leader_to_selected)
 
         self.act_focus_properties = QAction("&Properties", self)
         self.act_focus_properties.triggered.connect(self._focus_properties)
@@ -669,10 +718,13 @@ class MainWindow(QMainWindow):
         m_edit.addAction(self.act_select_all)
         m_edit.addSeparator()
         m_edit.addAction(self.act_bring_front)
+        m_edit.addAction(self.act_raise)
+        m_edit.addAction(self.act_lower)
         m_edit.addAction(self.act_send_back)
         m_edit.addSeparator()
         m_edit.addAction(self.act_group)
         m_edit.addAction(self.act_ungroup)
+        m_edit.addAction(self.act_add_leader)
         m_edit.addSeparator()
         m_align = m_edit.addMenu("&Align")
         m_align.addAction(self.act_align_left)
@@ -727,6 +779,7 @@ class MainWindow(QMainWindow):
         mb.addSeparator()
         mb.addAction(self.act_insert_pdf)
         mb.addAction(self.act_resize_doc)
+        mb.addAction(self.act_doc_properties)
         mb.addSeparator()
         mb.addAction(self.act_command_palette)
         mb.addSeparator()
@@ -753,6 +806,7 @@ class MainWindow(QMainWindow):
             toggle_theme=self.act_toggle_theme,
         )
         bar.searchRequested.connect(self._open_command_palette)
+        bar.titleClicked.connect(self._show_document_properties)
         self.setMenuWidget(bar)
         self._top_bar = bar
         self._command_palette: CommandPalette | None = None
@@ -855,6 +909,21 @@ class MainWindow(QMainWindow):
         self._nav_pill.pageRequested.connect(self._show_page)
         self._nav_pill.zoomRequested.connect(self._view.set_zoom)
         self._toast = CanvasToast(vp)
+        # Finish / Remove last point / Cancel while a polyline is drawn.
+        self._draft_bar = DraftBar(vp)
+        self._draft_bar.finishClicked.connect(self._scene.finish_poly_draft)
+        self._draft_bar.removePointClicked.connect(
+            self._scene.remove_last_poly_point
+        )
+        self._draft_bar.cancelClicked.connect(self._scene.cancel_poly_draft)
+        self._draft_bar.set_icon_color(
+            self._gdt_icon_color(), QColor(tokens_for(self._theme).on_accent)
+        )
+        self._scene.polyDraftChanged.connect(
+            lambda n: self._draft_bar.set_point_count(
+                n, self._scene.poly_draft_min_points()
+            )
+        )
         tc = self._tool_controller
         tc.toolChanged.connect(self._refresh_tool_hint)
         tc.lineKindChanged.connect(self._refresh_tool_hint)
@@ -887,6 +956,7 @@ class MainWindow(QMainWindow):
         self.act_export_images.setIcon(line_icon("export-image", c))
         self.act_insert_pdf.setIcon(line_icon("insert-pages", c))
         self.act_resize_doc.setIcon(line_icon("resize", c))
+        self.act_doc_properties.setIcon(line_icon("file", c))
         self.act_command_palette.setIcon(line_icon("search", c))
         self.act_close.setIcon(line_icon("close-doc", c))
         self.act_prev.setIcon(line_icon("chevron-left", c))
@@ -908,6 +978,8 @@ class MainWindow(QMainWindow):
         )
         self._top_bar.set_icon_color(c, QColor(tokens.on_accent))
         self.act_format_painter.setIcon(action_icon("format-painter", color=c))
+        if hasattr(self, "_draft_bar"):  # built after the toolbar
+            self._draft_bar.set_icon_color(c, QColor(tokens.on_accent))
 
     # ------------------------------------------------------------------
     # toolbar quick style controls
@@ -975,6 +1047,7 @@ class MainWindow(QMainWindow):
             self.act_export_images,
             self.act_insert_pdf,
             self.act_resize_doc,
+            self.act_doc_properties,
             self.act_zoom_in,
             self.act_zoom_out,
             self.act_zoom_fit,
@@ -1004,11 +1077,14 @@ class MainWindow(QMainWindow):
             self.act_distribute_v,
             self.act_group,
             self.act_ungroup,
+            self.act_add_leader,
             self.act_cut,
             self.act_copy,
             self.act_paste,
             self.act_duplicate,
             self.act_bring_front,
+            self.act_raise,
+            self.act_lower,
             self.act_send_back,
         ):
             a.setEnabled(has_doc)
@@ -1202,8 +1278,8 @@ class MainWindow(QMainWindow):
 
         Every annotation that enters the window from somewhere other
         than its own tool -- PDF reopen, insert-PDF, paste/duplicate --
-        goes through here: the double-click editors for GD&T, Dimension
-        and sticky notes, and the edit-session relay that raises the
+        goes through here: the double-click editors for GD&T frames and
+        sticky notes, and the edit-session relay that raises the
         contextual edit bar over a text (callouts included, they derive
         from TextAnnotationItem).
         """
@@ -1212,12 +1288,13 @@ class MainWindow(QMainWindow):
             # Its notes are editable texts in their own right, so they
             # go through the same edit-session relay as any other text.
             item.set_sub_text_hook(self._scene.hook_text_item)
-        elif isinstance(item, DimensionAnnotationItem):
-            item.set_edit_callback(self._open_dimension_editor)
         elif isinstance(item, StickyNoteItem):
             item.set_edit_callback(self._open_note_editor)
         elif isinstance(item, TextAnnotationItem):
             self._scene.hook_text_item(item)
+        elif isinstance(item, DimensionItem):
+            # Its value is a text edited in place, with the edit bar.
+            self._scene.hook_text_item(item.label_item())
 
     # ------------------------------------------------------------------
     # save / save as
@@ -1243,7 +1320,6 @@ class MainWindow(QMainWindow):
             self._on_save_as()
             return
         self._commit_gdt_editor_if_open()
-        self._commit_dimension_editor_if_open()
         self._commit_note_editor_if_open()
         target = self._doc.path
         confirm = QMessageBox.question(
@@ -1262,7 +1338,6 @@ class MainWindow(QMainWindow):
         if self._doc is None:
             return False
         self._commit_gdt_editor_if_open()
-        self._commit_dimension_editor_if_open()
         self._commit_note_editor_if_open()
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -1368,7 +1443,6 @@ class MainWindow(QMainWindow):
         if not self._has_unsaved_changes():
             return True
         self._commit_gdt_editor_if_open()
-        self._commit_dimension_editor_if_open()
         self._commit_note_editor_if_open()
         choice = QMessageBox.warning(
             self,
@@ -1396,9 +1470,7 @@ class MainWindow(QMainWindow):
     def _on_close(self) -> None:
         # Drop any in-progress in-place edits with the document.
         self._cancel_gdt_editor()
-        self._cancel_dimension_editor()
         self._cancel_note_editor()
-        self._selection_toolbar.hide()
         self._close_edit_toolbar()
         if self._doc is not None:
             self._doc.close()
@@ -1418,6 +1490,7 @@ class MainWindow(QMainWindow):
         self._sidebar.set_counts(0, 0)
         self._refresh_window_title()
         self._nav_pill.set_page(0, 0)
+        self._refresh_document_summary()
         self._central.setCurrentWidget(self._welcome)
         self._set_welcome_mode(True)
         self._welcome.set_recent(self._recent.list())
@@ -1430,7 +1503,6 @@ class MainWindow(QMainWindow):
         """Park the on-screen page's items back into _page_items so a
         structural operation can touch every page uniformly."""
         self._commit_gdt_editor_if_open()
-        self._commit_dimension_editor_if_open()
         self._commit_note_editor_if_open()
         if self._scene.page_item() is not None:
             self._page_items[self._page_index] = self._scene.detach_children()
@@ -1663,6 +1735,55 @@ class MainWindow(QMainWindow):
             )
             self._show_page(self._page_index, _is_initial=True)
 
+    # ------------------------------------------------------------------
+    # document properties (2026-09-28)
+    # ------------------------------------------------------------------
+    def _annotation_count(self) -> int:
+        return sum(len(v) for v in self._collect_all_page_items().values())
+
+    def _build_document_properties(self) -> DocumentPropertiesDialog | None:
+        if self._doc is None:
+            return None
+        info = doc_info.collect(self._doc.raw, self._doc.path)
+        return DocumentPropertiesDialog(
+            info,
+            self._annotation_count(),
+            self,
+            saved=not self._has_unsaved_changes(),
+        )
+
+    def _show_document_properties(self) -> None:
+        dlg = self._build_document_properties()
+        if dlg is not None:
+            dlg.exec()
+
+    def _refresh_document_summary(self) -> None:
+        """The Inspector's "Document" rows (shown with nothing selected)."""
+        if self._doc is None:
+            self._properties_dock.set_document_summary(None)
+            return
+        raw = self._doc.raw
+        rows: list[tuple[str, str]] = [
+            ("File", self._doc.path.name),
+            ("Pages", str(raw.page_count)),
+        ]
+        if 0 <= self._page_index < raw.page_count:
+            rect = raw[self._page_index].rect
+            rows.append(
+                (
+                    "This page",
+                    f"{doc_info.paper_format(rect.width, rect.height)}, "
+                    f"{doc_info.size_mm_text(rect.width, rect.height)}",
+                )
+            )
+        try:
+            rows.append(
+                ("Size on disk", format_size(self._doc.path.stat().st_size))
+            )
+        except OSError:
+            pass
+        self._properties_dock.set_document_summary(rows)
+
     def _refresh_window_title(self) -> None:
         # [*] is Qt's windowModified placeholder: it renders as "*" while
         # setWindowModified(True) and disappears otherwise.
@@ -1687,7 +1808,6 @@ class MainWindow(QMainWindow):
         index = max(0, min(self._doc.page_count - 1, index))
         # An in-progress in-place edit belongs to the leaving page.
         self._commit_gdt_editor_if_open()
-        self._commit_dimension_editor_if_open()
         self._commit_note_editor_if_open()
         self._close_edit_toolbar()
 
@@ -1721,6 +1841,7 @@ class MainWindow(QMainWindow):
 
         self._nav_pill.set_page(index, self._doc.page_count)
         self._page_list.set_current_page(index)
+        self._refresh_document_summary()
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
 
@@ -1767,18 +1888,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
         self._position_gdt_editor()
-        self._position_dimension_editor()
         self._position_note_editor()
-        self._position_selection_toolbar()
         self._position_edit_toolbar()
 
     def _on_view_scrolled(self, _value: int) -> None:
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
         self._position_gdt_editor()
-        self._position_dimension_editor()
         self._position_note_editor()
-        self._position_selection_toolbar()
         self._position_edit_toolbar()
 
     def _maybe_rerender_for_zoom(self, factor: float) -> None:
@@ -1856,6 +1973,11 @@ class MainWindow(QMainWindow):
         ]
 
     def _delete_selected(self) -> None:
+        if self._scene.poly_draft_active():
+            # Delete / Backspace while drawing a polyline: take back the
+            # last point, not the selection.
+            self._scene.remove_last_poly_point()
+            return
         items = self._selected_annotations()
         if not items:
             return
@@ -2033,44 +2155,15 @@ class MainWindow(QMainWindow):
         self._annotation_tree.sync_selection(self._scene.selectedItems())
         items = self._selected_annotations()
         self._properties_dock.set_items(items)
-        self._update_selection_toolbar(items)
-
-    def _update_selection_toolbar(
-        self, items: list[AnnotationItem] | None = None
-    ) -> None:
-        if items is None:
-            items = self._selected_annotations()
-        if not items:
-            self._selection_toolbar.hide()
-            return
-        align_actions = [
-            self.act_align_left,
-            self.act_align_center_h,
-            self.act_align_right,
-            self.act_align_top,
-            self.act_align_middle_v,
-            self.act_align_bottom,
-        ]
-        if len(items) >= 3:
-            align_actions += [self.act_distribute_h, self.act_distribute_v]
-        self._selection_toolbar.set_context(
-            items,
-            align_actions=align_actions,
-            has_group=self._scene.has_group_in_selection(),
-            icon_color=self._gdt_icon_color(),
-        )
-        self._position_selection_toolbar(items)
 
     def _on_drag_state(self, active: bool) -> None:
         if active:
-            self._selection_toolbar.hide()
             self._edit_toolbar.hide()
         else:
-            self._update_selection_toolbar()
             self._position_edit_toolbar()
 
     # ------------------------------------------------------------------
-    # selection pill handlers
+    # selection commands (context menu, Inspector)
     # ------------------------------------------------------------------
     def _single_selected(self) -> AnnotationItem | None:
         items = self._selected_annotations()
@@ -2082,8 +2175,6 @@ class MainWindow(QMainWindow):
             return
         if isinstance(item, GdtAnnotationItem):
             self._open_gdt_editor(item)
-        elif isinstance(item, DimensionAnnotationItem):
-            self._open_dimension_editor(item)
         elif isinstance(item, StickyNoteItem):
             self._open_note_editor(item)
         else:
@@ -2133,11 +2224,6 @@ class MainWindow(QMainWindow):
         else:
             cmd.redo()
 
-    def _on_pill_end_style(self, role, style) -> None:  # noqa: ANN001
-        item = self._single_selected()
-        if isinstance(item, LineItem):
-            self._set_endpoint_style(item, role, style)
-
     def _add_bend_to_selected(self) -> None:
         """Insert a bend at the midpoint of the item's longest segment."""
         item = self._single_selected()
@@ -2154,33 +2240,6 @@ class MainWindow(QMainWindow):
             (pts[best].y() + pts[best + 1].y()) / 2.0,
         )
         self._add_bend_at(item, mid)
-
-    def _position_selection_toolbar(
-        self, items: list[AnnotationItem] | None = None
-    ) -> None:
-        if items is None:
-            items = self._selected_annotations()
-        if not items:
-            self._selection_toolbar.hide()
-            return
-        union = None
-        for it in items:
-            r = item_scene_rect(it)
-            union = r if union is None else union.united(r)
-        toolbar = self._selection_toolbar
-        toolbar.adjustSize()
-        vp = self._view.viewport()
-        above = self._view.mapFromScene(union.topLeft())
-        below = self._view.mapFromScene(union.bottomLeft())
-        x = above.x()
-        y = above.y() - toolbar.height() - 8
-        if y < 4:
-            y = below.y() + 8
-        x = max(4, min(x, vp.width() - toolbar.width() - 4))
-        y = max(4, min(y, vp.height() - toolbar.height() - 4))
-        toolbar.move(int(x), int(y))
-        toolbar.show()
-        toolbar.raise_()
 
     # ------------------------------------------------------------------
     # contextual edit bar (shown while an item is being edited)
@@ -2210,6 +2269,9 @@ class MainWindow(QMainWindow):
     def _commit_sub_text(self, sub: SubTextItem) -> None:
         """Fold a finished note back into its owner's state, undoably."""
         owner = sub.owner()
+        if isinstance(owner, DimensionItem):
+            self._commit_dimension_value(owner, sub)
+            return
         if not isinstance(owner, GdtAnnotationItem):
             return
         runs = [] if sub.is_blank() else sub.rich_runs()
@@ -2227,6 +2289,44 @@ class MainWindow(QMainWindow):
         else:
             cmd.redo()
         self._on_annotations_changed()
+
+    def _commit_dimension_value(self, owner: DimensionItem, sub) -> None:  # noqa: ANN001
+        """A dimension's value edited in place: stored with the measured
+        number as a placeholder when it is still in the text, so it keeps
+        following the points (see views/items/dimension.py)."""
+        old = owner.value_runs()
+        new = owner.runs_from_label(sub.rich_runs())
+        if new == old:
+            owner.set_value_runs(old)  # shows the stored text again
+            return
+        self._push_props([(owner, "value_runs", old, new)], "Edit dimension value")
+
+    def _push_props(self, changes: list, label: str) -> None:
+        if not changes:
+            return
+        cmd = ChangePropsCommand(changes, label=label)
+        stack = self._undo_group.activeStack()
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+        self._on_annotations_changed()
+
+    def _set_dimension_orientation(
+        self, item: DimensionItem, orientation: DimOrientation
+    ) -> None:
+        old = item.geom_snapshot()
+        item.switch_orientation(orientation)
+        new = item.geom_snapshot()
+        if new != old:
+            self._push_geom_change(item, old, new, "Dimension orientation")
+            self._on_annotations_changed()
+
+    def _use_measured_value(self, item: DimensionItem) -> None:
+        self._push_props(
+            [(item, "value_runs", item.value_runs(), [dict(VALUE_RUN)])],
+            "Use measured value",
+        )
 
     def _on_text_editing_finished(self, item: TextAnnotationItem) -> None:
         if isinstance(item, SubTextItem):
@@ -2381,27 +2481,30 @@ class MainWindow(QMainWindow):
         self._paste_from_clipboard()
         self._clipboard = saved
 
-    def _reorder_selection(self, to_front: bool) -> None:
+    def _restack_selection(self, move: str) -> bool:
+        """Move the selection in the page's stacking order (see
+        controllers.stacking). False when nothing changed."""
         items = self._selected_annotations()
         page = self._scene.page_item()
         if not items or page is None:
-            return
-        siblings = [
-            c
-            for c in page.childItems()
-            if isinstance(c, AnnotationItem)
-        ]
-        if not siblings:
-            return
-        z_values = [s.zValue() for s in siblings]
-        if to_front:
-            top = max(z_values) if z_values else 0.0
-            for i, it in enumerate(items):
-                it.setZValue(top + 1.0 + i)
+            return False
+        old = page_stack(page)
+        new = restacked(old, items, move)
+        if new == old:
+            return False
+        cmd = ReorderCommand(page, old, new)
+        stack = self._undo_group.activeStack()
+        if stack is not None:
+            stack.push(cmd)
         else:
-            bottom = min(z_values) if z_values else 0.0
-            for i, it in enumerate(items):
-                it.setZValue(bottom - 1.0 - i)
+            cmd.redo()
+        self._on_annotations_changed()
+        return True
+
+    def _can_restack(self, move: str) -> bool:
+        return can_restack(
+            self._scene.page_item(), self._selected_annotations(), move
+        )
 
     def _align_selection(self, mode: AlignMode) -> None:
         items = self._selected_annotations()
@@ -2438,109 +2541,502 @@ class MainWindow(QMainWindow):
         self._properties_dock.show()
         self._properties_dock.raise_()
 
-    def _show_context_menu(self, global_pos, scene_pos) -> None:
-        if self._doc is None:
-            return
-        # If the right-click landed on an annotation that wasn't part of
-        # the current selection, select it so the menu actions target it.
-        clicked = self._scene._topmost_annotation_at(scene_pos)
-        if clicked is not None and not clicked.isSelected():
-            for it in self._scene.selectedItems():
-                it.setSelected(False)
-            clicked.setSelected(True)
-
-        has_sel = bool(self._selected_annotations())
-        has_clip = bool(self._clipboard)
-        can_edit_text = has_sel and any(
-            hasattr(it, "begin_text_edit") or hasattr(it, "begin_edit")
-            for it in self._selected_annotations()
+    # ------------------------------------------------------------------
+    # Alt+Click picker (Lot K)
+    # ------------------------------------------------------------------
+    def _on_pick_requested(self, scene_pos: QPointF, screen_pos) -> None:  # noqa: ANN001
+        # Opened once the mouse release that asked for it has finished
+        # unwinding through the scene.
+        QTimer.singleShot(
+            0, lambda: self._show_picker(QPointF(scene_pos), screen_pos)
         )
 
-        menu = QMenu(self)
-        # Line/arrow point actions (Discussion #1, item 5 + follow-up):
-        # right-click on an ENDPOINT offers its extremity shape, on a
-        # BEND offers removal, anywhere else on the item offers
-        # inserting a bend at the click position.
-        if isinstance(clicked, LineItem):
-            local = clicked.mapFromScene(scene_pos)
-            endpoint = self._endpoint_at(clicked, local)
-            bend_idx = clicked.bend_at(local)
-            if endpoint is not None:
-                sub = menu.addMenu("Extremity shape")
-                current = self._endpoint_style(clicked, endpoint)
-                icon_color = self._gdt_icon_color()
-                for style, label in END_STYLE_LABELS:
-                    act = sub.addAction(end_icon(style, color=icon_color), label)
-                    act.setCheckable(True)
-                    act.setChecked(style is current)
-                    act.triggered.connect(
-                        lambda _c=False, it=clicked, ep=endpoint, st=style: (
-                            self._set_endpoint_style(it, ep, st)
-                        )
-                    )
-            elif bend_idx is not None:
-                act = menu.addAction("Remove bend point")
-                act.triggered.connect(
-                    lambda _c=False, it=clicked, i=bend_idx: (
-                        self._change_bends(
-                            it, [b for j, b in enumerate(it.bends()) if j != i]
-                        )
-                    )
+    def _show_picker(self, scene_pos: QPointF, screen_pos) -> None:  # noqa: ANN001
+        menu = self._build_picker(scene_pos)
+        if menu is not None:
+            menu.exec(screen_pos)
+
+    def _build_picker(self, scene_pos: QPointF) -> AnnotationPicker | None:
+        """The list of annotations stacked at `scene_pos`; None when there
+        is nothing to choose between (fewer than two)."""
+        if self._doc is None:
+            return None
+        items = self._scene.annotations_at(scene_pos)
+        if len(items) < 2:
+            return None
+        return AnnotationPicker(
+            items,
+            self._gdt_icon_color(),
+            self._scene.set_pick_highlight,
+            self._pick_annotation,
+            self,
+        )
+
+    def _pick_annotation(self, item: AnnotationItem) -> None:
+        self._scene.set_pick_highlight(None)
+        if item.scene() is not self._scene:
+            return
+        for it in self._scene.selectedItems():
+            it.setSelected(False)
+        item.setSelected(True)
+
+    # ------------------------------------------------------------------
+    # leaders on texts and GD&T frames (Lot M)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _leader_host(item: AnnotationItem | None) -> AnnotationItem | None:
+        """`item` when it can carry leaders: a text or a GD&T frame (a
+        callout already has its own leader; a frame's note belongs to
+        the frame)."""
+        if isinstance(item, GdtAnnotationItem):
+            return item
+        if isinstance(item, TextAnnotationItem) and not isinstance(
+            item, (CalloutItem, SubTextItem)
+        ):
+            return item
+        return None
+
+    def _add_leader_to_selected(self) -> None:
+        host = self._leader_host(self._single_selected())
+        if host is None:
+            self._show_message("Select one text or GD&T frame first")
+            return
+        self._scene.begin_leader_placement(host)
+
+    def _on_leader_placement_changed(self, active: bool) -> None:
+        if active:
+            self._tool_hint.set_hint(
+                (
+                    "Add leader",
+                    "Click the point the leader designates · Esc to cancel",
+                )
+            )
+            self._view.viewport().setCursor(Qt.CrossCursor)
+        else:
+            self._refresh_tool_hint()
+            self._view.set_tool_cursor_for(self._tool_controller.tool())
+
+    def _push_leaders(self, item, new: list, label: str) -> None:  # noqa: ANN001
+        old = item.leaders()
+        if new == old:
+            return
+        cmd = ChangePropsCommand([(item, "leaders", old, new)], label=label)
+        stack = self._undo_group.activeStack()
+        if stack is not None:
+            stack.push(cmd)
+        else:
+            cmd.redo()
+        self._on_annotations_changed()
+
+    def _set_leader_end(self, item, index: int, style: EndStyle) -> None:  # noqa: ANN001
+        from dataclasses import replace
+
+        leaders = item.leaders()
+        if 0 <= index < len(leaders):
+            leaders[index] = replace(leaders[index], end=style)
+            self._push_leaders(item, leaders, "Change leader end")
+
+    def _remove_leader(self, item, index: int | None) -> None:  # noqa: ANN001
+        """Remove leader `index`, or every leader when None."""
+        leaders = item.leaders()
+        if index is None:
+            self._push_leaders(item, [], "Remove leaders")
+        elif 0 <= index < len(leaders):
+            del leaders[index]
+            self._push_leaders(item, leaders, "Remove leader")
+
+    def _remove_leader_bend(self, item, index: int, bend: int) -> None:  # noqa: ANN001
+        leaders = item.leaders()
+        leaders[index] = leaders[index].without_bend(bend)
+        self._push_leaders(item, leaders, "Remove bend point")
+
+    def _show_context_menu(self, global_pos, scene_pos) -> None:
+        if self._scene.leader_placement_owner() is not None:
+            # A right-click while picking a leader's target cancels it.
+            self._scene.end_leader_placement()
+            return
+        if self._scene.poly_draft_active():
+            # ...and while drawing a polyline it finishes it (CAD habit).
+            self._scene.finish_poly_draft()
+            return
+        if self._scene.dimension_draft_active():
+            # A half-placed dimension is dropped.
+            self._scene.cancel_dimension_draft()
+            return
+        menu = self._build_context_menu(scene_pos)
+        if menu is not None and menu.actions():
+            menu.exec(global_pos)
+
+    def _build_context_menu(self, scene_pos) -> AnnotationContextMenu | None:
+        """The right-click menu for the click at `scene_pos` (Lot J):
+        icon rows for the frequent commands, entries for the rest. See
+        views/context_menu.py for the layout."""
+        if self._doc is None:
+            return None
+        # The menu acts on the selection when the click lands on a
+        # selected annotation -- even one hidden under an unselected one
+        # (2026-09-28, same rule as dragging). Otherwise a right-click on
+        # an annotation selects it, so the menu acts on what was clicked.
+        clicked = self._scene.selected_annotation_at(scene_pos)
+        if clicked is None:
+            clicked = self._scene._topmost_annotation_at(scene_pos)
+            if clicked is not None and not clicked.isSelected():
+                for it in self._scene.selectedItems():
+                    it.setSelected(False)
+                clicked.setSelected(True)
+
+        items = self._selected_annotations()
+        color = self._gdt_icon_color()
+
+        def icon(name: str):  # noqa: ANN202
+            return line_icon(name, color)
+
+        def tip(text: str, action=None) -> str:  # noqa: ANN001
+            keys = action.shortcut().toString(QKeySequence.NativeText) if action else ""
+            return f"{text} ({keys})" if keys else text
+
+        menu = AnnotationContextMenu(self)
+        has_clip = bool(self._clipboard)
+        if not items:
+            if has_clip:
+                menu.add_entry(
+                    icon("paste"), "Paste", self._paste_from_clipboard,
+                    self.act_paste.shortcut().toString(QKeySequence.NativeText),
+                )
+            menu.add_entry(
+                icon("select-all"), "Select All", self._select_all,
+                self.act_select_all.shortcut().toString(QKeySequence.NativeText),
+            )
+            return menu
+
+        menu.add_icon_row(
+            [
+                IconCommand("cut", icon("cut"), tip("Cut", self.act_cut),
+                            self._cut_selected),
+                IconCommand("copy", icon("copy"), tip("Copy", self.act_copy),
+                            self._copy_selected),
+                IconCommand("paste", icon("paste"),
+                            tip("Paste", self.act_paste),
+                            self._paste_from_clipboard, enabled=has_clip),
+                IconCommand("duplicate", icon("duplicate"),
+                            tip("Duplicate", self.act_duplicate),
+                            self._duplicate_selected),
+                IconCommand("delete", line_icon("trash", QColor(tokens_for(self._theme).danger)),
+                            tip("Delete", self.act_delete),
+                            self._delete_selected),
+            ]
+        )
+        menu.addSeparator()
+        menu.add_icon_row(
+            [
+                IconCommand("to_back", icon("to-back"),
+                            tip("Send to back", self.act_send_back),
+                            lambda: self._restack_selection(TO_BACK),
+                            enabled=lambda: self._can_restack(TO_BACK)),
+                IconCommand("lower", icon("lower"),
+                            tip("Send backward: below the next annotation "
+                                "it overlaps", self.act_lower),
+                            lambda: self._restack_selection(LOWER),
+                            enabled=lambda: self._can_restack(LOWER),
+                            keep_open=True),
+                IconCommand("raise", icon("raise"),
+                            tip("Bring forward: above the next annotation "
+                                "it overlaps", self.act_raise),
+                            lambda: self._restack_selection(RAISE),
+                            enabled=lambda: self._can_restack(RAISE),
+                            keep_open=True),
+                IconCommand("to_front", icon("to-front"),
+                            tip("Bring to front", self.act_bring_front),
+                            lambda: self._restack_selection(TO_FRONT),
+                            enabled=lambda: self._can_restack(TO_FRONT)),
+            ],
+            caption="Order",
+        )
+
+        single = items[0] if len(items) == 1 else None
+        host = self._leader_host(single)
+        leader = None
+        if host is not None and clicked is host:
+            leader = host.leader_at(host.mapFromScene(scene_pos))
+        rows_added = self._add_kind_rows(menu, single, color, leader)
+        corner = None
+        if single is not None and clicked is single:
+            corner = bend_radius.corner_at(
+                single, single.mapFromScene(scene_pos)
+            )
+        if corner is not None:
+            if not rows_added:
+                menu.addSeparator()
+            self._add_radius_row(menu, single, corner, icon)
+            rows_added = True
+        if len(items) >= 2:
+            if not rows_added:
+                menu.addSeparator()
+            self._add_align_row(menu, len(items), icon)
+        menu.addSeparator()
+
+        if single is not None and self._is_editable(single):
+            menu.add_entry(
+                icon("pencil"), self._edit_label(single), self._edit_selected,
+                "Double-click",
+            )
+        if isinstance(single, DimensionItem) and not single.is_measured():
+            menu.add_entry(
+                icon("dimension"), "Use Measured Value",
+                lambda it=single: self._use_measured_value(it),
+            )
+        if isinstance(single, LineItem):
+            local = single.mapFromScene(scene_pos)
+            bend = single.bend_at(local) if clicked is single else None
+            if bend is not None:
+                menu.add_entry(
+                    icon("bend-remove"), "Remove Bend Point",
+                    lambda it=single, i=bend: self._remove_bend(it, i),
+                )
+            elif clicked is single:
+                menu.add_entry(
+                    icon("bend-add"), "Add Bend Point",
+                    lambda it=single, lp=local: self._add_bend_at(it, lp),
                 )
             else:
-                act = menu.addAction("Add bend point")
-                act.triggered.connect(
-                    lambda _c=False, it=clicked, lp=local: (
-                        self._add_bend_at(it, lp)
-                    )
+                menu.add_entry(
+                    icon("bend-add"), "Add Bend Point",
+                    self._add_bend_to_selected,
                 )
-            menu.addSeparator()
-        if has_sel:
-            menu.addAction(self.act_cut)
-            menu.addAction(self.act_copy)
-        if has_clip:
-            menu.addAction(self.act_paste)
-        if has_sel:
-            menu.addAction(self.act_duplicate)
-            menu.addSeparator()
-            menu.addAction(self.act_delete)
-            menu.addSeparator()
-            menu.addAction(self.act_bring_front)
-            menu.addAction(self.act_send_back)
-            if len(self._selected_annotations()) >= 2:
-                menu.addSeparator()
-                menu.addAction(self.act_group)
-            if self._scene.has_group_in_selection():
-                menu.addAction(self.act_ungroup)
-            if len(self._selected_annotations()) >= 2:
-                menu.addSeparator()
-                m_align = menu.addMenu("Align")
-                m_align.addAction(self.act_align_left)
-                m_align.addAction(self.act_align_center_h)
-                m_align.addAction(self.act_align_right)
-                m_align.addSeparator()
-                m_align.addAction(self.act_align_top)
-                m_align.addAction(self.act_align_middle_v)
-                m_align.addAction(self.act_align_bottom)
-                if len(self._selected_annotations()) >= 3:
-                    m_align.addSeparator()
-                    m_align.addAction(self.act_distribute_h)
-                    m_align.addAction(self.act_distribute_v)
-            menu.addSeparator()
-            if can_edit_text:
-                menu.addAction(self.act_edit_text)
-            menu.addAction(self.act_change_color)
-            menu.addAction(self.act_change_stroke)
-            menu.addSeparator()
-            menu.addAction(self.act_focus_properties)
-        else:
-            menu.addAction(self.act_select_all)
-            if has_clip:
-                menu.addSeparator()
-                menu.addAction(self.act_paste)
+        if host is not None:
+            menu.add_entry(icon("leader"), "Add Leader", lambda it=host: (
+                self._scene.begin_leader_placement(it)
+            ))
+            if leader is not None:
+                local = host.mapFromScene(scene_pos)
+                bend = host.leader_bend_at(leader, local)
+                if bend is not None:
+                    menu.add_entry(
+                        icon("bend-remove"), "Remove Bend Point",
+                        lambda it=host, i=leader, j=bend: (
+                            self._remove_leader_bend(it, i, j)
+                        ),
+                    )
+                else:
+                    menu.add_entry(
+                        icon("bend-add"), "Add Bend Point",
+                        lambda it=host, i=leader, lp=local: self._push_leaders(
+                            it, it.leaders_with_bend_added(i, lp),
+                            "Add bend point",
+                        ),
+                    )
+                menu.add_entry(
+                    icon("trash"), "Remove Leader",
+                    lambda it=host, i=leader: self._remove_leader(it, i),
+                )
+            elif host.has_leaders():
+                menu.add_entry(
+                    icon("trash"), "Remove Leaders",
+                    lambda it=host: self._remove_leader(it, None),
+                )
+        if len(items) >= 2:
+            menu.add_entry(
+                icon("group"), "Group", self._group_selected,
+                self.act_group.shortcut().toString(QKeySequence.NativeText),
+            )
+        if self._scene.has_group_in_selection():
+            menu.add_entry(
+                icon("ungroup"), "Ungroup", self._ungroup_selected,
+                self.act_ungroup.shortcut().toString(QKeySequence.NativeText),
+            )
+        menu.add_entry(icon("sliders"), "Properties", self._focus_properties)
+        return menu
 
-        if menu.actions():
-            menu.exec(global_pos)
+    @staticmethod
+    def _is_editable(item: AnnotationItem) -> bool:
+        return isinstance(
+            item, (TextAnnotationItem, StickyNoteItem, GdtAnnotationItem)
+        ) or hasattr(item, "begin_text_edit") or hasattr(item, "begin_edit")
+
+    @staticmethod
+    def _edit_label(item: AnnotationItem) -> str:
+        if isinstance(item, GdtAnnotationItem):
+            return "Edit Frame"
+        if isinstance(item, DimensionItem):
+            return "Edit Value"
+        if isinstance(item, StickyNoteItem):
+            return "Edit Note"
+        return "Edit Text"
+
+    def _add_kind_rows(
+        self,
+        menu: AnnotationContextMenu,
+        item,  # noqa: ANN001
+        color: QColor,
+        leader: int | None = None,
+    ) -> bool:
+        """Rows specific to one selected annotation's kind. True when at
+        least one row was added (a separator precedes them). `leader`:
+        index of the leader under the click, whose end gets a row."""
+        if item is None:
+            return False
+        rows: list[tuple[list[IconCommand | None], str, object]] = []
+        if leader is not None:
+            current = item.leaders()[leader].end
+            rows.append(
+                (
+                    [
+                        IconCommand(
+                            f"leader:{style.value}",
+                            end_icon(style, size=36, color=color),
+                            f"Leader end: {label}",
+                            lambda it=item, i=leader, st=style: (
+                                self._set_leader_end(it, i, st)
+                            ),
+                            checked=style is current,
+                        )
+                        for style, label in END_STYLE_LABELS
+                    ],
+                    "Leader",
+                    line_icon("leader", color),
+                )
+            )
+        if isinstance(item, LineItem):
+            for role, caption, glyph in (
+                (HandleRole.P1, "Start", "line-start"),
+                (HandleRole.P2, "End", "line-end"),
+            ):
+                current = self._endpoint_style(item, role)
+                prefix = "start" if role is HandleRole.P1 else "end"
+                cmds: list[IconCommand | None] = []
+                for style, label in END_STYLE_LABELS:
+                    cmds.append(
+                        IconCommand(
+                            f"{prefix}:{style.value}",
+                            # Rendered at 2x the button's icon size (not
+                            # the 64 px default) so the 2 px stroke
+                            # stays legible once scaled down.
+                            end_icon(style, size=36, color=color,
+                                     mirrored=role is HandleRole.P1),
+                            f"{caption}: {label}",
+                            lambda it=item, r=role, st=style: (
+                                self._set_endpoint_style(it, r, st)
+                            ),
+                            checked=style is current,
+                        )
+                    )
+                rows.append((cmds, caption, line_icon(glyph, color)))
+        if isinstance(item, DimensionItem):
+            rows.append(
+                (
+                    [
+                        IconCommand(
+                            f"dim:{o.value}",
+                            line_icon(f"dim-{o.value}", color),
+                            f"{label} dimension",
+                            lambda it=item, v=o: (
+                                self._set_dimension_orientation(it, v)
+                            ),
+                            checked=o is item.orientation(),
+                        )
+                        for o, label in DIM_ORIENTATION_LABELS
+                    ],
+                    "Measure",
+                    None,
+                )
+            )
+            rows.append(
+                (
+                    [
+                        IconCommand(
+                            f"dim-end:{st.value}",
+                            end_icon(st, size=36, color=color),
+                            f"Ends: {label}",
+                            lambda it=item, v=st: self._push_props(
+                                [(it, "end_style", it.end_style(), v)],
+                                "Dimension ends",
+                            ),
+                            checked=st is item.end_style(),
+                        )
+                        for st, label in DIM_END_LABELS
+                    ],
+                    "Ends",
+                    None,
+                )
+            )
+        outline = isinstance(item, (RectangleItem, CloudItem))
+        fill = hasattr(item, "set_fill_enabled")
+        if outline or fill:
+            cmds = []
+            if outline:
+                cloudy = isinstance(item, CloudItem)
+                cmds += [
+                    IconCommand("outline:straight",
+                                line_icon("rectangle", color),
+                                "Straight outline",
+                                lambda: self._set_selected_outline(False),
+                                checked=not cloudy),
+                    IconCommand("outline:cloud", line_icon("cloud", color),
+                                "Revision cloud outline",
+                                lambda: self._set_selected_outline(True),
+                                checked=cloudy),
+                ]
+            if fill:
+                if cmds:
+                    cmds.append(None)
+                filled = bool(item.fill_enabled())
+                cmds.append(
+                    IconCommand("fill", line_icon("fill", color),
+                                "Remove fill" if filled else "Fill",
+                                lambda v=not filled: self._set_selected_fill(v),
+                                checked=filled)
+                )
+            rows.append((cmds, "Shape", None))
+        if isinstance(item, (PolylineItem, PolygonItem)):
+            closed = isinstance(item, PolygonItem)
+            rows.append(
+                (
+                    [
+                        IconCommand("path:open", line_icon("polyline", color),
+                                    "Open path",
+                                    lambda: self._set_selected_closed(False),
+                                    checked=not closed),
+                        IconCommand("path:closed",
+                                    line_icon("polygon", color),
+                                    "Closed shape",
+                                    lambda: self._set_selected_closed(True),
+                                    checked=closed),
+                    ],
+                    "Path",
+                    None,
+                )
+            )
+        if not rows:
+            return False
+        menu.addSeparator()
+        for cmds, caption, caption_icon in rows:
+            menu.add_icon_row(cmds, caption=caption, caption_icon=caption_icon)
+        return True
+
+    def _add_align_row(self, menu: AnnotationContextMenu, count: int, icon) -> None:  # noqa: ANN001
+        cmds: list[IconCommand | None] = [
+            IconCommand(f"align:{glyph}", icon(glyph), act.text().replace("&", ""),
+                        act.trigger)
+            for glyph, act in (
+                ("align-left", self.act_align_left),
+                ("align-center-h", self.act_align_center_h),
+                ("align-right", self.act_align_right),
+                ("align-top", self.act_align_top),
+                ("align-middle-v", self.act_align_middle_v),
+                ("align-bottom", self.act_align_bottom),
+            )
+        ]
+        if count >= 3:
+            cmds.append(None)
+            cmds += [
+                IconCommand("align:distribute-h", icon("distribute-h"),
+                            "Distribute horizontally",
+                            self.act_distribute_h.trigger),
+                IconCommand("align:distribute-v", icon("distribute-v"),
+                            "Distribute vertically",
+                            self.act_distribute_v.trigger),
+            ]
+        menu.add_icon_row(cmds, caption="Align")
 
     # ------------------------------------------------------------------
     # line/arrow bend points
@@ -2562,22 +3058,94 @@ class MainWindow(QMainWindow):
             item, old, item.geom_snapshot(), "Add bend point"
         )
 
-    def _change_bends(self, item: LineItem, bends: list) -> None:
+    def _remove_bend(self, item: LineItem, index: int) -> None:
         old = item.geom_snapshot()
-        item.set_bends(bends)
+        item.remove_bend(index)  # the other bends keep their radius
         self._push_geom_change(
             item, old, item.geom_snapshot(), "Remove bend point"
         )
 
     # ------------------------------------------------------------------
+    # corner radius on bends (2026-09-28)
+    # ------------------------------------------------------------------
+    def _add_radius_row(self, menu, item, corner, icon) -> None:  # noqa: ANN001
+        """The context menu's Radius row for the bend under the click: a
+        spin box (inspector unit) previewing live on that bend, and a
+        button giving every bend of the annotation the same radius. The
+        whole edit lands as one undo step when the menu closes; Escape
+        in the spin box restores the radii the menu opened with."""
+        unit = self._properties_dock.unit()
+        per_pt = doc_info.MM_PER_PT if unit == "mm" else 1.0
+
+        def to_px(value: float) -> float:
+            return pt_to_px(value / per_pt)
+
+        spin = MenuSpinBox()
+        spin.setObjectName("ContextRadiusSpin")
+        spin.setDecimals(2 if unit == "mm" else 1)
+        spin.setRange(0.0, 1000.0 * per_pt)
+        spin.setSingleStep(0.5 if unit == "mm" else 1.0)
+        spin.setSuffix(f" {unit}")
+        spin.setMinimumWidth(max(112, spin.sizeHint().width()))
+        spin.setValue(px_to_pt(bend_radius.radius(item, corner)) * per_pt)
+        spin.setToolTip(
+            "Corner radius of this bend (0: sharp corner). "
+            "Enter to apply, Esc to cancel"
+        )
+        spin.setAccessibleName("Bend radius")
+        state = {"original": item.geom_snapshot()}
+
+        def preview(_value: float) -> None:
+            bend_radius.set_radius(item, corner, to_px(spin.value()))
+
+        def commit() -> None:
+            old, new = state["original"], item.geom_snapshot()
+            if new == old:
+                return
+            state["original"] = new
+            self._push_geom_change(item, old, new, "Bend radius")
+            self._on_annotations_changed()
+
+        def cancel() -> None:
+            item.apply_geom(state["original"])
+            menu.close()
+
+        def apply_all() -> None:
+            bend_radius.set_all_radii(item, to_px(spin.value()))
+            commit()
+            menu.close()
+
+        def accept() -> None:
+            commit()
+            menu.close()
+
+        spin.valueChanged.connect(preview)
+        spin.accepted.connect(accept)
+        spin.cancelled.connect(cancel)
+        menu.aboutToHide.connect(commit)
+        count = len(bend_radius.corners(item))
+        menu.add_icon_row(
+            [
+                IconCommand(
+                    "radius_all", icon("bend-radius-all"),
+                    "Same radius on every bend", apply_all,
+                    enabled=count > 1, keep_open=True,
+                ),
+            ],
+            caption="Radius",
+            caption_icon=icon("bend-radius"),
+            leading=[spin],
+        )
+
+    # ------------------------------------------------------------------
     # line/arrow endpoint styles (context menu)
     # ------------------------------------------------------------------
-    _ENDPOINT_HIT_RADIUS = 9.0
+    _ENDPOINT_HIT_RADIUS = 9.0  # screen pixels
 
     def _endpoint_at(self, item: LineItem, local: QPointF):  # noqa: ANN201
         """HandleRole.P1/P2 when `local` lands on an endpoint, else None."""
         p1, p2 = item.line_points()
-        r2 = self._ENDPOINT_HIT_RADIUS**2
+        r2 = (self._ENDPOINT_HIT_RADIUS * item.screen_px()) ** 2
         for role, pt in ((HandleRole.P1, p1), (HandleRole.P2, p2)):
             dx, dy = local.x() - pt.x(), local.y() - pt.y()
             if dx * dx + dy * dy <= r2:
@@ -2840,135 +3408,6 @@ class MainWindow(QMainWindow):
             x = left if covered(left) <= covered(right) else right
         x = max(8, min(x, vp.width() - w - 8))
         y = max(8, min(y, vp.height() - h - 8))
-        editor.move(int(x), int(y))
-
-    # ------------------------------------------------------------------
-    # in-place Dimension editing (mirrors the GD&T block above exactly)
-    # ------------------------------------------------------------------
-    def _on_dimension_placement(self, scene_pos) -> None:
-        page = self._scene.page_item()
-        if page is None:
-            return
-        # Clicking elsewhere normally commits via the focus watcher, but
-        # be defensive against paths that bypass it.
-        self._commit_dimension_editor_if_open()
-        # Draft item: parented directly, no undo entry yet. The commit
-        # pushes the AddAnnotationCommand; cancel simply removes it
-        # (same rollback contract as empty text annotations).
-        item = DimensionAnnotationItem(DimensionState(), scene_pos)
-        item.set_color(self._tool_controller.color())
-        item.set_stroke(self._tool_controller.stroke())
-        item.set_edit_callback(self._open_dimension_editor)
-        item.setParentItem(page)
-        self._open_dimension_inline(item, is_new=True)
-
-    def _open_dimension_editor(self, item: DimensionAnnotationItem) -> None:
-        """Double-click entry point (edit callback on every Dimension item)."""
-        self._commit_dimension_editor_if_open()
-        self._open_dimension_inline(item, is_new=False)
-
-    def _open_dimension_inline(
-        self, item: DimensionAnnotationItem, *, is_new: bool
-    ) -> None:
-        self._dimension_edit_item = item
-        self._dimension_edit_is_new = is_new
-        self._dimension_old_state = None if is_new else item.state()
-        editor = DimensionInlineEditor(
-            item.state(),
-            self._view.viewport(),
-            icon_color=self._gdt_icon_color(),
-        )
-        editor.stateEdited.connect(self._on_dimension_state_edited)
-        editor.committed.connect(self._commit_dimension_editor)
-        editor.cancelled.connect(self._cancel_dimension_editor)
-        self._dimension_editor = editor
-        self._position_dimension_editor()
-        editor.open()
-
-    def _on_dimension_state_edited(self, state: DimensionState) -> None:
-        # Live preview: the scene item itself shows every keystroke.
-        if self._dimension_edit_item is not None:
-            self._dimension_edit_item.set_state(state)
-            self._position_dimension_editor()
-
-    def _commit_dimension_editor_if_open(self) -> None:
-        if self._dimension_editor is not None:
-            self._commit_dimension_editor()
-
-    def _commit_dimension_editor(self) -> None:
-        editor = self._dimension_editor
-        item = self._dimension_edit_item
-        is_new = self._dimension_edit_is_new
-        old_state = self._dimension_old_state
-        if editor is None or item is None:
-            return
-        new_state = editor.current_state()
-        self._close_dimension_editor()
-
-        if is_new:
-            # Untouched dimension -> rollback, like an empty text
-            # annotation.
-            if new_state == DimensionState():
-                if item.scene() is not None:
-                    self._scene.removeItem(item)
-                return
-            item.set_state(new_state)
-            if item.scene() is not None:
-                self._scene.removeItem(item)
-            self._scene.push_add(item)
-            return
-
-        if old_state is None or new_state == old_state:
-            return
-        stack = self._undo_group.activeStack()
-        cmd = ChangeDimensionCommand(item, old_state, new_state)
-        if stack is not None:
-            stack.push(cmd)
-        else:
-            cmd.redo()
-        self._on_annotations_changed()
-
-    def _cancel_dimension_editor(self) -> None:
-        item = self._dimension_edit_item
-        is_new = self._dimension_edit_is_new
-        old_state = self._dimension_old_state
-        self._close_dimension_editor()
-        if item is None:
-            return
-        if is_new:
-            if item.scene() is not None:
-                self._scene.removeItem(item)
-        elif old_state is not None:
-            item.set_state(old_state)
-
-    def _close_dimension_editor(self) -> None:
-        editor = self._dimension_editor
-        self._dimension_editor = None
-        self._dimension_edit_item = None
-        self._dimension_edit_is_new = False
-        self._dimension_old_state = None
-        if editor is not None:
-            editor.hide()
-            editor.deleteLater()
-        self._view.setFocus()
-
-    def _position_dimension_editor(self) -> None:
-        """Anchor the editor under the dimension, clamped to the viewport."""
-        editor = self._dimension_editor
-        item = self._dimension_edit_item
-        if editor is None or item is None:
-            return
-        editor.adjustSize()
-        rect = item.mapToScene(item.content_rect()).boundingRect()
-        vp = self._view.viewport()
-        below = self._view.mapFromScene(rect.bottomLeft())
-        x = below.x()
-        y = below.y() + 8
-        if y + editor.height() > vp.height() - 4:
-            above = self._view.mapFromScene(rect.topLeft())
-            y = above.y() - editor.height() - 8
-        x = max(4, min(x, vp.width() - editor.width() - 4))
-        y = max(4, min(y, vp.height() - editor.height() - 4))
         editor.move(int(x), int(y))
 
     # ------------------------------------------------------------------

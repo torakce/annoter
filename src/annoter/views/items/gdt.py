@@ -25,6 +25,7 @@ from PySide6.QtWidgets import QGraphicsItem, QGraphicsSceneMouseEvent
 from annoter.model.gdt import Characteristic, GdtState
 from annoter.model.styles import HandleRole
 from annoter.views.items.base import AnnotationItem
+from annoter.views.items.leaders import LeaderHost
 from annoter.views.items.gdt_symbols import symbol_path
 from annoter.views.items.sub_text import SubTextItem
 
@@ -37,9 +38,10 @@ _DEFAULT_FONT_FAMILY = "Helvetica"
 _DEFAULT_FONT_POINT_SIZE = 12
 _CELL_PADDING_X = 6.0  # horizontal padding inside text cells
 _CELL_PADDING_Y = 4.0  # vertical padding above/below the text
+_NOTE_GAP = 1.5  # between the frame and the ink of its notes
 
 
-class GdtAnnotationItem(AnnotationItem):
+class GdtAnnotationItem(LeaderHost, AnnotationItem):
     """Feature control frame rendered as a row of bordered cells."""
 
     KIND = "gdt"
@@ -196,6 +198,7 @@ class GdtAnnotationItem(AnnotationItem):
     def scale_geometry(self, s: float) -> None:
         super().scale_geometry(s)
         self.set_font_size(max(4, round(self._font_size * s)))
+        self.scale_leaders(s)
 
     def font_size(self) -> int:
         return self._font_size
@@ -223,7 +226,11 @@ class GdtAnnotationItem(AnnotationItem):
         fm = QFontMetricsF(self._font)
         pad_x, pad_y = _CELL_PADDING_X, _CELL_PADDING_Y
         h = fm.height() + 2 * pad_y  # row height
-        gap = pad_y  # vertical gap between the frame and upper/lower text
+        # Gap between the frame and the text of its notes. The notes'
+        # own blank bands (document margin, room for descenders) are
+        # taken out, so the text sits just above / below the frame
+        # (2026-09-28: the upper note used to float a row-third away).
+        gap = _NOTE_GAP
 
         def cell_w(text: str) -> float:
             return max(h, fm.horizontalAdvance(text) + 2 * pad_x)
@@ -263,7 +270,10 @@ class GdtAnnotationItem(AnnotationItem):
         lower_size = (
             lower_item.content_rect() if lower_item is not None else None
         )
-        frame_top = (upper_size.height() + gap) if upper_size else 0.0
+        frame_top = 0.0
+        if upper_size is not None:
+            _top, blank_below = upper_item.ink_margins()
+            frame_top = max(0.0, upper_size.height() - blank_below) + gap
 
         borders: list[QRectF] = []
         symbols: list[tuple[QRectF, Characteristic]] = []
@@ -326,7 +336,8 @@ class GdtAnnotationItem(AnnotationItem):
             total_w = max(total_w, upper_size.width())
         bottom = frame_top + frame_h
         if lower_item is not None and lower_size is not None:
-            ly = bottom + gap
+            blank_above, _bottom = lower_item.ink_margins()
+            ly = bottom + gap - blank_above
             lower_item.setPos(0.0, ly)
             total_w = max(total_w, lower_size.width())
             bottom = ly + lower_size.height()
@@ -337,8 +348,25 @@ class GdtAnnotationItem(AnnotationItem):
         self._total_size = QRectF(0.0, 0.0, total_w, bottom)
 
     def boundingRect(self) -> QRectF:
+        return self.with_leader_bounds(self.frame_bounding_rect())
+
+    def frame_bounding_rect(self) -> QRectF:
+        """The frame, its notes and the handle margin (no leaders)."""
         m = self._stroke / 2.0 + 1.0 + self.handles_extent()
         return self._total_size.adjusted(-m, -m, m, m)
+
+    def shape(self) -> QPainterPath:
+        if not self.has_leaders() and self.leader_preview() is None:
+            return super().shape()
+        return self.shape_with_leaders(self.frame_bounding_rect())
+
+    def leader_frame_rect(self) -> QRectF:
+        """Leaders attach to the frame's cells, not to its notes (ISO
+        1101: the leader meets the frame at the end or at a side)."""
+        rect = QRectF()
+        for r in self._border_rects:
+            rect = QRectF(r) if rect.isNull() else rect.united(r)
+        return rect if not rect.isNull() else QRectF(self._total_size)
 
     def content_rect(self) -> QRectF:
         return QRectF(self._total_size)
@@ -348,16 +376,21 @@ class GdtAnnotationItem(AnnotationItem):
     # ------------------------------------------------------------------
     def handle_positions(self) -> dict[HandleRole, QPointF]:
         r = self._total_size
-        return {
+        handles = {
             HandleRole.TOP_LEFT: QPointF(r.left(), r.top()),
             HandleRole.TOP_RIGHT: QPointF(r.right(), r.top()),
             HandleRole.BOTTOM_LEFT: QPointF(r.left(), r.bottom()),
             HandleRole.BOTTOM_RIGHT: QPointF(r.right(), r.bottom()),
         }
+        handles.update(self.leader_handle_positions())
+        return handles
 
     def apply_resize(
         self, role: HandleRole, local_pos: QPointF
     ) -> None:
+        if self.is_leader_role(role):
+            self.apply_leader_handle(role, local_pos)
+            return
         r = self._total_size
         cur_w = max(r.width(), 1.0)
         cur_h = max(r.height(), 1.0)
@@ -420,16 +453,22 @@ class GdtAnnotationItem(AnnotationItem):
         return QPointF(r.left(), r.top())
 
     def geom_snapshot(self) -> object:
-        return (QPointF(self.pos()), int(self._font_size))
+        return (
+            QPointF(self.pos()),
+            int(self._font_size),
+            tuple(self.leaders()),
+        )
 
     def apply_geom(self, snapshot: object) -> None:
         if (
             not isinstance(snapshot, tuple)
-            or len(snapshot) != 2
+            or len(snapshot) not in (2, 3)
             or not isinstance(snapshot[0], QPointF)
         ):
             return
-        pos, font_size = snapshot
+        pos, font_size = snapshot[:2]
+        if len(snapshot) == 3:
+            self.set_leaders(list(snapshot[2]))
         self.setPos(pos)
         if int(font_size) != self._font_size:
             self.set_font_size(int(font_size))
@@ -438,6 +477,8 @@ class GdtAnnotationItem(AnnotationItem):
     # paint
     # ------------------------------------------------------------------
     def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
+        # Leaders first: the opaque cells then cover their start.
+        self.paint_leaders(painter)
         pen = QPen(self._color, self._stroke)
         pen.setJoinStyle(Qt.MiterJoin)
         painter.setPen(pen)
@@ -457,7 +498,7 @@ class GdtAnnotationItem(AnnotationItem):
         for rect, text, align in self._text_draws:
             painter.drawText(rect, align, text)
 
-        self._draw_selection_marker(painter, self.boundingRect())
+        self._draw_selection_marker(painter, self.frame_bounding_rect())
 
     def _paint_symbol(
         self, painter, rect: QRectF, characteristic: Characteristic
@@ -523,6 +564,7 @@ class GdtAnnotationItem(AnnotationItem):
         c.set_dash_style(self.dash_style())
         c.set_font_size(self._font_size)
         c.set_edit_callback(self._edit_callback)
+        c.set_leaders(self.leaders())
         return c
 
     # ------------------------------------------------------------------

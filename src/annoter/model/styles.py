@@ -102,3 +102,29 @@ class HandleRole(Enum):
     # Line / arrow endpoints.
     P1 = "p1"
     P2 = "p2"
+
+
+class DimOrientation(Enum):
+    """Which length a dimension measures between its two points: the
+    true distance (dimension line parallel to them), or its horizontal
+    / vertical projection (2026-09-28)."""
+
+    ALIGNED = "aligned"
+    HORIZONTAL = "horizontal"
+    VERTICAL = "vertical"
+
+
+DIM_ORIENTATION_LABELS: list[tuple[DimOrientation, str]] = [
+    (DimOrientation.ALIGNED, "Aligned"),
+    (DimOrientation.HORIZONTAL, "Horizontal"),
+    (DimOrientation.VERTICAL, "Vertical"),
+]
+
+# The extremities a dimension line can end with (ISO 129-1): filled or
+# open arrowheads, oblique strokes, dots.
+DIM_END_LABELS: list[tuple[EndStyle, str]] = [
+    (EndStyle.CLOSED_ARROW, "Filled arrow"),
+    (EndStyle.OPEN_ARROW, "Open arrow"),
+    (EndStyle.SLASH, "Oblique stroke"),
+    (EndStyle.CIRCLE, "Dot"),
+]

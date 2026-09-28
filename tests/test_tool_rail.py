@@ -110,7 +110,9 @@ def test_controller_line_kind_and_stamp_preset_signals(qapp) -> None:
 def test_rail_has_one_button_per_tool_in_order(qapp) -> None:
     rail = ToolRail(ToolController())
     assert rail.tools() == [t for t, _label in TOOL_LABELS]
-    assert Tool.GDT in rail.tools() and Tool.DIMENSION in rail.tools()
+    assert Tool.GDT in rail.tools()
+    # The linear dimension (2026-09-28), next to the GD&T frame.
+    assert rail.tools().index(Tool.DIMENSION) == rail.tools().index(Tool.GDT) + 1
     for tool, label in TOOL_LABELS:
         btn = rail.button(tool)
         assert btn.toolTip() == label

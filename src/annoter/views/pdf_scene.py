@@ -11,10 +11,18 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QPainterPath,
+    QPainterPathStroker,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QGraphicsLineItem,
+    QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsScene,
@@ -24,11 +32,12 @@ from PySide6.QtGui import QUndoStack
 
 from annoter.controllers.commands import (
     AddAnnotationCommand,
+    ChangePropsCommand,
     MoveAnnotationsCommand,
     ResizeCommand,
 )
 from annoter.controllers.geometry import item_local_rect, item_scene_rect
-from annoter.model.styles import EndStyle, HandleRole
+from annoter.model.styles import DimOrientation, EndStyle, HandleRole
 from annoter.controllers.tools import LineKind, Tool, ToolController
 from annoter.views.items import (
     ArrowItem,
@@ -44,6 +53,41 @@ from annoter.views.items import (
     TextAnnotationItem,
 )
 from annoter.views.items.base import AnnotationItem
+from annoter.views.items.dimension import TEXT_HANDLE as DIM_TEXT_HANDLE
+from annoter.views.items.dimension import DimensionItem
+from annoter.views.items.leaders import BEND as LEADER_BEND
+from annoter.views.items.leaders import TARGET as LEADER_TARGET
+
+
+# Alt+Click list: outline of the hovered annotation (Lot K).
+HIGHLIGHT_COLOR = QColor("#1E88E5")
+_HIGHLIGHT_WIDTH_PX = 10.0
+_HIGHLIGHT_MARGIN_PX = 4.0
+
+
+def pick_highlight_path(item: AnnotationItem, screen_px: float) -> QPainterPath:
+    """Scene-coordinate outline of `item` for the Alt+Click highlight: a
+    band along the stroke of a line, polyline or freehand path (its
+    bounding box would cover half the sheet for a long diagonal), the
+    true rectangle with a small margin for everything else."""
+    points = None
+    if hasattr(item, "path_points"):
+        points = item.path_points()
+    elif hasattr(item, "points"):
+        points = item.points()
+    if points and len(points) >= 2:
+        center = QPainterPath()
+        center.addPolygon(QPolygonF([item.mapToScene(p) for p in points]))
+        stroker = QPainterPathStroker()
+        stroker.setWidth(_HIGHLIGHT_WIDTH_PX * screen_px)
+        stroker.setCapStyle(Qt.RoundCap)
+        stroker.setJoinStyle(Qt.RoundJoin)
+        return stroker.createStroke(center).simplified()
+    m = _HIGHLIGHT_MARGIN_PX * screen_px
+    rect = item_local_rect(item).adjusted(-m, -m, m, m)
+    local = QPainterPath()
+    local.addRect(rect)
+    return item.mapToScene(local)
 
 
 class PdfScene(QGraphicsScene):
@@ -51,11 +95,10 @@ class PdfScene(QGraphicsScene):
 
     annotationsChanged = Signal()  # emitted after add / delete
     gdtPlacementRequested = Signal(QPointF)  # GD&T tool clicked on the page
-    dimensionPlacementRequested = Signal(QPointF)  # Dimension tool clicked
     notePlacementRequested = Signal(QPointF)  # sticky-note tool clicked
     formatPaintRequested = Signal(object)  # AnnotationItem clicked while painting
     # True while the user is dragging/resizing items with the mouse;
-    # lets chrome like the floating selection pill hide during the
+    # lets chrome like the floating edit bar hide during the
     # gesture and re-show (repositioned) on release.
     interactiveDragChanged = Signal(bool)
     # Relayed edit sessions of text items (payload: the item). Text items
@@ -64,10 +107,28 @@ class PdfScene(QGraphicsScene):
     # MainWindow gets one connection point for the contextual edit bar.
     textEditingStarted = Signal(object)
     textEditingFinished = Signal(object)
+    # Alt+Click with the Select tool (Lot K): (scene pos, screen pos) of
+    # the click; MainWindow lists the annotations stacked there.
+    pickRequested = Signal(QPointF, QPoint)
+    # "Add Leader" mode entered (True) / left (False), Lot M.
+    leaderPlacementChanged = Signal(bool)
+    # Polyline / polygon being drawn: number of points placed so far
+    # (0 once it is finished or dropped). Drives the Finish bar.
+    polyDraftChanged = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._page_item: QGraphicsPixmapItem | None = None
+        # Scene units per on-screen pixel, pushed by the view on every
+        # zoom change: handles and hit areas are sized in screen pixels.
+        self._screen_px: float = 1.0
+        # Alt+press waiting for its release (a drag is not a pick).
+        self._alt_pick: tuple[QPointF, QPoint] | None = None
+        # Outline shown over the annotation hovered in the Alt+Click list.
+        self._pick_highlight: QGraphicsPathItem | None = None
+        # Text / GD&T frame receiving a leader: the next left click on the
+        # page sets where it points (Lot M).
+        self._leader_owner: AnnotationItem | None = None
         # Hi-res viewport overlay: child of the page item, below the
         # annotations (negative Z among siblings), purely visual.
         self._hires_item: QGraphicsPixmapItem | None = None
@@ -83,6 +144,14 @@ class PdfScene(QGraphicsScene):
         # cursor; clicks append, double-click / Enter finishes.
         self._poly_draft: AnnotationItem | None = None
         self._poly_points: list[QPointF] = []
+
+        # Dimension being placed (2026-09-28): stage 1 waits for the
+        # second point, stage 2 for where the dimension line goes. The
+        # press of the first click is kept so a drag from it can give
+        # the second point on release.
+        self._dim_draft: DimensionItem | None = None
+        self._dim_stage: int = 0
+        self._dim_press_screen: QPoint | None = None
 
         # Move tracking (SELECT tool).
         self._move_origins: dict[AnnotationItem, QPointF] = {}
@@ -104,6 +173,14 @@ class PdfScene(QGraphicsScene):
         self._dup_pending_item: AnnotationItem | None = None
         self._dup_pending_scene: QPointF | None = None
         self._dup_pending_screen: QPoint | None = None
+        # Press on a selected annotation hidden under an unselected one:
+        # a drag moves the SELECTION (the user picked it), a plain click
+        # still selects the one on top. Undecided until the cursor moves
+        # past the drag threshold or the button is released. The item
+        # stored is the one on top (what a click selects).
+        self._sel_pending_item: AnnotationItem | None = None
+        self._sel_pending_scene: QPointF | None = None
+        self._sel_pending_screen: QPoint | None = None
 
         # Smart alignment guides (PowerPoint/Canva-style): only armed
         # during a real, single-item mouse drag (see mousePressEvent) so
@@ -137,10 +214,129 @@ class PdfScene(QGraphicsScene):
         self._group_drag_start_positions: list[QPointF] = []
 
     # ------------------------------------------------------------------
+    # zoom-independent chrome (Lot K)
+    # ------------------------------------------------------------------
+    def screen_px(self) -> float:
+        """Scene units per on-screen pixel at the current zoom."""
+        return self._screen_px
+
+    def set_view_scale(self, scale: float) -> None:
+        """The view's scene-to-screen scale changed (zoom). Selected
+        items re-declare their bounds: their handle margin, sized in
+        screen pixels, just changed in scene units."""
+        if scale <= 0.0:
+            return
+        px = 1.0 / scale
+        if abs(px - self._screen_px) < 1e-12:
+            return
+        self._screen_px = px
+        for it in self.selectedItems():
+            if isinstance(it, AnnotationItem):
+                it.prepareGeometryChange()
+                it.update()
+
+    # ------------------------------------------------------------------
+    # Alt+Click: pick one of several stacked annotations (Lot K)
+    # ------------------------------------------------------------------
+    _PICK_RADIUS_PX = 3.0
+
+    def annotations_at(self, scene_pos: QPointF) -> list[AnnotationItem]:
+        """Annotations under `scene_pos`, topmost first -- what a click
+        there could select, with a few screen pixels of slack so a thin
+        line counts."""
+        r = self._PICK_RADIUS_PX * self._screen_px
+        area = QRectF(scene_pos.x() - r, scene_pos.y() - r, 2 * r, 2 * r)
+        page = self._page_item
+        out: list[AnnotationItem] = []
+        for it in self.items(area):
+            if (
+                isinstance(it, AnnotationItem)
+                and it.parentItem() is page
+                and it is not self._draft_item
+                and it is not self._poly_draft
+            ):
+                out.append(it)
+        return out
+
+    def set_pick_highlight(self, item: AnnotationItem | None) -> None:
+        """Outline `item` (None clears) while it is hovered in the list."""
+        if self._pick_highlight is not None:
+            if self._pick_highlight.scene() is self:
+                self.removeItem(self._pick_highlight)
+            self._pick_highlight = None
+        if item is None or item.scene() is not self:
+            return
+        hl = QGraphicsPathItem(pick_highlight_path(item, self._screen_px))
+        pen = QPen(HIGHLIGHT_COLOR, 2.0)
+        pen.setCosmetic(True)
+        hl.setPen(pen)
+        fill = QColor(HIGHLIGHT_COLOR)
+        fill.setAlpha(60)
+        hl.setBrush(fill)
+        hl.setZValue(2_000_000.0)
+        hl.setAcceptedMouseButtons(Qt.NoButton)
+        self.addItem(hl)
+        self._pick_highlight = hl
+
+    def pick_highlight(self) -> QGraphicsPathItem | None:
+        return self._pick_highlight
+
+    # ------------------------------------------------------------------
+    # Add Leader (Lot M): the next click on the page is the target
+    # ------------------------------------------------------------------
+    def begin_leader_placement(self, owner: AnnotationItem) -> None:
+        """Enter "Add Leader": a dashed leader follows the cursor from
+        `owner`'s frame; a left click fixes it, Esc / right-click /
+        another page cancels."""
+        if not hasattr(owner, "set_leaders") or owner.scene() is not self:
+            return
+        self.end_leader_placement()
+        self._leader_owner = owner
+        self.leaderPlacementChanged.emit(True)
+
+    def leader_placement_owner(self) -> AnnotationItem | None:
+        return self._leader_owner
+
+    def end_leader_placement(self) -> None:
+        owner, self._leader_owner = self._leader_owner, None
+        if owner is None:
+            return
+        try:
+            owner.set_leader_preview(None)
+        except RuntimeError:  # the item was deleted meanwhile
+            pass
+        self.leaderPlacementChanged.emit(False)
+
+    def _place_leader(self, scene_pos: QPointF) -> None:
+        owner = self._leader_owner
+        self.end_leader_placement()
+        if owner is None or owner.parentItem() is None:
+            return
+        from annoter.views.items.leaders import Leader
+
+        target = owner.parentItem().mapFromScene(scene_pos)
+        old = owner.leaders()
+        new = old + [Leader((target.x(), target.y()))]
+        cmd = ChangePropsCommand(
+            [(owner, "leaders", old, new)], label="Add leader"
+        )
+        if self._undo_stack is not None:
+            self._undo_stack.push(cmd)
+        else:
+            cmd.redo()
+        self.annotationsChanged.emit()
+
+    # ------------------------------------------------------------------
     # wiring
     # ------------------------------------------------------------------
     def set_tool_controller(self, controller: ToolController) -> None:
         self._tool_controller = controller
+        controller.toolChanged.connect(self._on_tool_changed)
+
+    def _on_tool_changed(self, tool: Tool) -> None:
+        # Another tool picked while a dimension is half placed: drop it.
+        if tool is not Tool.DIMENSION:
+            self.cancel_dimension_draft()
 
     def set_undo_stack(self, stack: QUndoStack) -> None:
         self._undo_stack = stack
@@ -196,6 +392,9 @@ class PdfScene(QGraphicsScene):
         self._draft_origin = None
         self._poly_draft = None
         self._poly_points = []
+        self._dim_draft = None
+        self._dim_stage = 0
+        self._dim_press_screen = None
         self._move_origins.clear()
         self._resize_item = None
         self._resize_role = None
@@ -349,8 +548,11 @@ class PdfScene(QGraphicsScene):
         if self._page_item is None:
             return []
         # A half-placed multi-click draft must not be persisted as a real
-        # annotation when the user navigates away.
+        # annotation when the user navigates away; neither does a leader
+        # being placed survive the page.
         self._discard_poly_draft()
+        self.cancel_dimension_draft()
+        self.end_leader_placement()
         kids: list[AnnotationItem] = []
         for child in list(self._page_item.childItems()):
             if isinstance(child, AnnotationItem):
@@ -406,8 +608,23 @@ class PdfScene(QGraphicsScene):
         """Abort an in-progress draft, drop selection, return to Select.
 
         Bound to the Escape key. Safe to call any time -- a no-op when
-        no draft / no selection.
+        no draft / no selection. During "Add Leader" it only leaves that
+        mode (the owner stays selected); during a polyline / polygon it
+        finishes the shape.
         """
+        if self._leader_owner is not None:
+            self.end_leader_placement()
+            return
+        if self._poly_draft is not None:
+            # Esc ENDS a polyline / polygon, keeping what was drawn, like
+            # Enter or a double-click. Too few points: dropped.
+            self.finish_poly_draft()
+            return
+        if self._dim_draft is not None:
+            # A half-placed dimension goes; the tool stays armed (a
+            # second Esc leaves it).
+            self.cancel_dimension_draft()
+            return
         if self._draft_item is not None:
             try:
                 self.removeItem(self._draft_item)
@@ -417,6 +634,7 @@ class PdfScene(QGraphicsScene):
             self._draft_origin = None
         self._discard_poly_draft()
         self._clear_dup_pending()
+        self._clear_sel_pending()
         for it in list(self.selectedItems()):
             it.setSelected(False)
         if self._tool_controller is not None:
@@ -454,6 +672,14 @@ class PdfScene(QGraphicsScene):
         return tool not in (Tool.SELECT,)
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        if self._leader_owner is not None:
+            # "Add Leader" owns the click: left fixes the target (the
+            # right button's context-menu event cancels, in MainWindow).
+            # Nothing gets selected or moved.
+            if event.button() == Qt.LeftButton:
+                self._place_leader(event.scenePos())
+            event.accept()
+            return
         if event.button() != Qt.LeftButton or self._page_item is None:
             super().mousePressEvent(event)
             return
@@ -466,6 +692,14 @@ class PdfScene(QGraphicsScene):
         ):
             self.finish_poly_draft()
         if not self._is_drawing_tool(tool):
+            # Alt+Click lists the annotations stacked under the cursor
+            # on release. The press itself goes on as usual, so Alt+drag
+            # still moves the item (with snapping off).
+            self._alt_pick = (
+                (QPointF(event.scenePos()), QPoint(event.screenPos()))
+                if event.modifiers() & Qt.AltModifier
+                else None
+            )
             # Resize: hit-test handles on the topmost already-selected
             # item under the cursor. Must run before super() because
             # the default handler would start a move drag.
@@ -499,9 +733,15 @@ class PdfScene(QGraphicsScene):
                     self._dup_pending_screen = QPoint(event.screenPos())
                     event.accept()
                     return
+            clicked = self._topmost_annotation_at(event.scenePos())
+            if self._selection_hidden_under(event.scenePos(), clicked):
+                self._sel_pending_item = clicked
+                self._sel_pending_scene = QPointF(event.scenePos())
+                self._sel_pending_screen = QPoint(event.screenPos())
+                event.accept()
+                return
             # A plain click on a grouped item selects every member, so
             # the drag Qt is about to start moves the whole group.
-            clicked = self._topmost_annotation_at(event.scenePos())
             if clicked is not None:
                 group = self.group_of(clicked)
                 if group is not None:
@@ -546,13 +786,6 @@ class PdfScene(QGraphicsScene):
             event.accept()
             return
 
-        if tool is Tool.DIMENSION:
-            # Defer to MainWindow: spawns a draft dimension and opens
-            # the in-place editor; the commit pushes the Add command.
-            self.dimensionPlacementRequested.emit(pos)
-            event.accept()
-            return
-
         if tool is Tool.STICKY_NOTE:
             # Defer to MainWindow: spawns a draft note and opens the
             # floating note editor; commit pushes the Add command.
@@ -587,6 +820,13 @@ class PdfScene(QGraphicsScene):
             event.accept()
             return
 
+        if tool is Tool.DIMENSION:
+            self._dimension_click(
+                pos, event.modifiers(), QPoint(event.screenPos())
+            )
+            event.accept()
+            return
+
         self._draft_origin = pos
         self._draft_item = self._make_draft_item(tool, pos)
         if self._draft_item is not None:
@@ -595,6 +835,17 @@ class PdfScene(QGraphicsScene):
         event.accept()
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        if self._dim_draft is not None:
+            self._dimension_move(event.scenePos(), event.modifiers())
+            event.accept()
+            return
+        owner = self._leader_owner
+        if owner is not None and owner.parentItem() is not None:
+            owner.set_leader_preview(
+                owner.parentItem().mapFromScene(event.scenePos())
+            )
+            event.accept()
+            return
         if self._poly_draft is not None:
             pos = event.scenePos()
             if (
@@ -608,10 +859,18 @@ class PdfScene(QGraphicsScene):
         if self._resize_item is not None and self._resize_role is not None:
             local = self._resize_item.mapFromScene(event.scenePos())
             snapped_scene = None
-            if (
-                not (event.modifiers() & Qt.AltModifier)
-                and isinstance(self._resize_item, LineItem)
+            # The free end of a line and the tip of a leader (Lot M)
+            # behave alike: they snap onto other shapes and, with no
+            # modifier, their segment is drawn to 0/45/90 degrees.
+            free_end = (
+                isinstance(self._resize_item, LineItem)
                 and self._resize_role in (HandleRole.P1, HandleRole.P2)
+            ) or self._is_leader_role(self._resize_role, LEADER_TARGET)
+            dim_point = isinstance(
+                self._resize_item, DimensionItem
+            ) and self._resize_role in (HandleRole.P1, HandleRole.P2)
+            if not (event.modifiers() & Qt.AltModifier) and (
+                free_end or dim_point
             ):
                 snapped_scene = self._nearest_shape_snap_point(
                     event.scenePos(), exclude=self._resize_item
@@ -622,19 +881,40 @@ class PdfScene(QGraphicsScene):
                 local = self._constrain_resize(
                     self._resize_item, self._resize_role, local
                 )
-            elif (
-                not (event.modifiers() & Qt.AltModifier)
-                and isinstance(self._resize_item, LineItem)
-                and self._resize_role in (HandleRole.P1, HandleRole.P2)
-            ):
+            elif not (event.modifiers() & Qt.AltModifier) and free_end:
                 # No modifier: soft angle magnetism -- the end segment
                 # snaps onto 0/45/90-degree multiples when the drag
                 # comes close, and stays free otherwise (Alt disables,
                 # like every other snapping).
-                local = self._soft_snap_endpoint(
-                    self._resize_item, self._resize_role, local
-                )
+                if isinstance(self._resize_item, LineItem):
+                    local = self._soft_snap_endpoint(
+                        self._resize_item, self._resize_role, local
+                    )
+                else:
+                    local = self._soft_snap_angle(
+                        self._leader_prev_point(
+                            self._resize_item, self._resize_role
+                        ),
+                        local,
+                    )
             self._resize_item.apply_resize(self._resize_role, local)
+            event.accept()
+            return
+        if self._sel_pending_item is not None:
+            moved = (
+                event.screenPos() - self._sel_pending_screen
+            ).manhattanLength()
+            if moved >= QApplication.startDragDistance():
+                origin = self._sel_pending_scene
+                self._clear_sel_pending()
+                # The selection moves, whatever sits on top of it.
+                self._begin_group_drag(origin)
+                delta = event.scenePos() - origin
+                for it, start in zip(
+                    self._group_drag_items, self._group_drag_start_positions
+                ):
+                    it.setPos(start + delta)
+                self._update_group_box()
             event.accept()
             return
         if self._dup_pending_item is not None:
@@ -694,6 +974,24 @@ class PdfScene(QGraphicsScene):
             self.interactiveDragChanged.emit(active)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        if self._dim_draft is not None:
+            # A drag from the first point gives the second one on
+            # release; a plain click waits for the next click.
+            if (
+                self._dim_stage == 1
+                and self._dim_press_screen is not None
+                and event.button() == Qt.LeftButton
+                and (
+                    QPoint(event.screenPos()) - self._dim_press_screen
+                ).manhattanLength()
+                >= QApplication.startDragDistance()
+            ):
+                self._dimension_click(
+                    event.scenePos(), event.modifiers(), None
+                )
+            self._dim_press_screen = None
+            event.accept()
+            return
         if self._poly_draft is not None:
             # Vertices are placed on press; swallow the release so the
             # base class does not start a selection / move on the draft.
@@ -703,11 +1001,28 @@ class PdfScene(QGraphicsScene):
             super().mouseReleaseEvent(event)
             return
         # Whatever gesture was in flight, the left-button release ends
-        # it; listeners (selection pill) re-show their chrome now.
+        # it; listeners (the edit bar) re-show their chrome now.
         self._notify_drag(False)
+        alt_pick, self._alt_pick = self._alt_pick, None
 
         if self._resize_item is not None:
             self._flush_resize()
+            event.accept()
+            return
+
+        if self._sel_pending_item is not None:
+            # A click without a drag: select what is on top, as usual.
+            item = self._sel_pending_item
+            self._clear_sel_pending()
+            group = self.group_of(item)
+            if group is not None:
+                self._select_group(group)
+            else:
+                for it in list(self.selectedItems()):
+                    it.setSelected(False)
+                item.setSelected(True)
+            if alt_pick is not None:
+                self.pickRequested.emit(*alt_pick)
             event.accept()
             return
 
@@ -738,12 +1053,25 @@ class PdfScene(QGraphicsScene):
         self._flush_pending_moves()
         self._interactive_drag_active = False
         self._hide_guides()
+        if alt_pick is not None:
+            scene_pos, screen_pos = alt_pick
+            travelled = (QPoint(event.screenPos()) - screen_pos).manhattanLength()
+            if travelled < QApplication.startDragDistance():
+                self.pickRequested.emit(scene_pos, screen_pos)
 
     def mouseDoubleClickEvent(
         self, event: QGraphicsSceneMouseEvent
     ) -> None:
         if self._poly_draft is not None:
             self.finish_poly_draft()
+            event.accept()
+            return
+        if self._dim_draft is not None:
+            # Two quick clicks close together: still two clicks.
+            if event.button() == Qt.LeftButton:
+                self._dimension_click(
+                    event.scenePos(), event.modifiers(), None
+                )
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
@@ -763,6 +1091,32 @@ class PdfScene(QGraphicsScene):
                 self.removeItem(self._poly_draft)
             self._poly_draft = None
             self._poly_points = []
+            self.polyDraftChanged.emit(0)
+
+    def cancel_poly_draft(self) -> None:
+        """Drop the polyline / polygon being drawn (Cancel button)."""
+        self._discard_poly_draft()
+
+    def poly_draft_min_points(self) -> int:
+        """Points a finished draft needs: 3 for a polygon, else 2."""
+        return 3 if isinstance(self._poly_draft, PolygonItem) else 2
+
+    def poly_point_count(self) -> int:
+        return len(self._poly_points) if self._poly_draft is not None else 0
+
+    def remove_last_poly_point(self) -> None:
+        """Take back the last point placed (Backspace); removing the
+        only one drops the draft."""
+        if self._poly_draft is None:
+            return
+        if len(self._poly_points) <= 1:
+            self._discard_poly_draft()
+            return
+        removed = self._poly_points.pop()
+        # The rubber-band segment now runs from the new last point to
+        # where the removed one was, until the cursor moves.
+        self._poly_draft.set_points(self._poly_points + [removed])
+        self.polyDraftChanged.emit(len(self._poly_points))
 
     def _poly_click(self, tool: Tool, pos: QPointF) -> None:
         if self._page_item is None:
@@ -777,6 +1131,7 @@ class PdfScene(QGraphicsScene):
             self._apply_current_style(item)
             self._poly_draft = item
             self._poly_points = [QPointF(pos)]
+            self.polyDraftChanged.emit(1)
             return
         # Click near the first vertex closes a polygon.
         if (
@@ -789,6 +1144,7 @@ class PdfScene(QGraphicsScene):
             return
         self._poly_points.append(QPointF(pos))
         self._poly_draft.set_points(self._poly_points + [QPointF(pos)])
+        self.polyDraftChanged.emit(len(self._poly_points))
 
     def finish_poly_draft(self) -> None:
         item = self._poly_draft
@@ -797,6 +1153,7 @@ class PdfScene(QGraphicsScene):
         self._poly_points = []
         if item is None:
             return
+        self.polyDraftChanged.emit(0)
         if item.scene() is not None:
             self.removeItem(item)
         # Drop consecutive near-duplicate vertices (e.g. the floating
@@ -809,6 +1166,113 @@ class PdfScene(QGraphicsScene):
         if len(cleaned) < min_vertices:
             return  # not meaningful: drop without an undo entry
         item.set_points(cleaned)
+        self._push_add(item)
+
+    # ------------------------------------------------------------------
+    # dimension placement (2026-09-28): click, click, click
+    # ------------------------------------------------------------------
+    def dimension_draft_active(self) -> bool:
+        return self._dim_draft is not None
+
+    def dimension_stage(self) -> int:
+        """0: no dimension being placed; 1: waiting for the second
+        point; 2: waiting for where the dimension line goes."""
+        return self._dim_stage if self._dim_draft is not None else 0
+
+    def cancel_dimension_draft(self) -> None:
+        item = self._dim_draft
+        self._dim_draft = None
+        self._dim_stage = 0
+        self._dim_press_screen = None
+        if item is not None and item.scene() is not None:
+            self.removeItem(item)
+
+    def _dimension_point(
+        self, pos: QPointF, mods, anchor: QPointF | None = None  # noqa: ANN001
+    ) -> QPointF:
+        """A measured point under the cursor: on a nearby shape's key
+        point (Alt: never), or with Shift square to `anchor`."""
+        if not (mods & Qt.AltModifier):
+            snapped = self._nearest_shape_snap_point(
+                pos, exclude=self._dim_draft
+            )
+            if snapped is not None:
+                return snapped
+        if anchor is not None and mods & Qt.ShiftModifier:
+            return self._snap_angle(anchor, pos, 45.0)
+        return QPointF(pos)
+
+    @staticmethod
+    def dimension_orientation_at(
+        p1: QPointF, p2: QPointF, pos: QPointF
+    ) -> DimOrientation:
+        """With Shift: a cursor above or below the two points gives a
+        horizontal dimension, one to their side a vertical one."""
+        w, h = abs(p2.x() - p1.x()), abs(p2.y() - p1.y())
+        if w < 1e-6:
+            return DimOrientation.VERTICAL
+        if h < 1e-6:
+            return DimOrientation.HORIZONTAL
+        cx, cy = (p1.x() + p2.x()) / 2.0, (p1.y() + p2.y()) / 2.0
+        out_x = max(0.0, abs(pos.x() - cx) - w / 2.0)
+        out_y = max(0.0, abs(pos.y() - cy) - h / 2.0)
+        return (
+            DimOrientation.HORIZONTAL
+            if out_y >= out_x
+            else DimOrientation.VERTICAL
+        )
+
+    def _dimension_click(
+        self, pos: QPointF, mods, press_screen: QPoint | None  # noqa: ANN001
+    ) -> None:
+        if self._page_item is None:
+            return
+        item = self._dim_draft
+        if item is None:
+            p1 = self._dimension_point(pos, mods)
+            item = DimensionItem(p1, p1)
+            self._apply_current_style(item)
+            item.setParentItem(self._page_item)
+            self._dim_draft = item
+            self._dim_stage = 1
+            self._dim_press_screen = press_screen
+            return
+        if self._dim_stage == 1:
+            p1, _p2 = item.points()
+            p2 = self._dimension_point(pos, mods, anchor=p1)
+            if math.hypot(p2.x() - p1.x(), p2.y() - p1.y()) < 1.0:
+                return  # same point twice: still waiting for the second
+            item.set_points(p1, p2)
+            self._dim_stage = 2
+            self._dimension_move(pos, mods)
+            return
+        self._dimension_move(pos, mods)
+        self._finish_dimension()
+
+    def _dimension_move(self, pos: QPointF, mods) -> None:  # noqa: ANN001
+        item = self._dim_draft
+        if item is None:
+            return
+        p1, p2 = item.points()
+        if self._dim_stage == 1:
+            item.set_points(p1, self._dimension_point(pos, mods, anchor=p1))
+            return
+        orientation = (
+            self.dimension_orientation_at(p1, p2, pos)
+            if mods & Qt.ShiftModifier
+            else DimOrientation.ALIGNED
+        )
+        item.place_through(pos, orientation)
+
+    def _finish_dimension(self) -> None:
+        item = self._dim_draft
+        self._dim_draft = None
+        self._dim_stage = 0
+        self._dim_press_screen = None
+        if item is None:
+            return
+        if item.scene() is not None:
+            self.removeItem(item)
         self._push_add(item)
 
     # ------------------------------------------------------------------
@@ -963,6 +1427,25 @@ class PdfScene(QGraphicsScene):
         return self._soft_snap_angle(anchor, local_pos)
 
     @staticmethod
+    def _is_leader_role(role, kind: str | None = None) -> bool:  # noqa: ANN001
+        """A leader handle role ("leader", i) / ("leader-bend", i, j),
+        optionally of one `kind` (LEADER_TARGET or LEADER_BEND)."""
+        if not (isinstance(role, tuple) and role):
+            return False
+        if kind is None:
+            return role[0] in (LEADER_TARGET, LEADER_BEND)
+        return role[0] == kind
+
+    @staticmethod
+    def _leader_prev_point(item, role) -> QPointF:  # noqa: ANN001
+        """The path point before a leader's tip or bend, local coords:
+        the path is [frame attachment, bend 0, ..., tip]."""
+        path = item.leader_path(role[1])
+        if role[0] == LEADER_TARGET:
+            return path[-2]
+        return path[role[2]]  # bend j is path[j + 1]
+
+    @staticmethod
     def _axis_lock_point(anchor: QPointF, pos: QPointF) -> QPointF:
         """Constrain `pos` so the segment from `anchor` is horizontal or
         vertical, picking the axis with the larger displacement."""
@@ -1094,6 +1577,9 @@ class PdfScene(QGraphicsScene):
     def _push_add(self, item: AnnotationItem) -> None:
         if self._page_item is None:
             return
+        if isinstance(item, DimensionItem):
+            # Its value is edited in place like a text (edit bar).
+            self.hook_text_item(item.label_item())
         cmd = AddAnnotationCommand(self, self._page_item, item)
         if self._undo_stack is not None:
             self._undo_stack.push(cmd)
@@ -1144,6 +1630,24 @@ class PdfScene(QGraphicsScene):
         rectangle/ellipse/cloud dragged from a corner keeps a square
         footprint, mirroring the Shift behavior used while drafting.
         """
+        if isinstance(item, DimensionItem):
+            # A measured point: Shift squares it to the other one (a
+            # horizontal or vertical pair). The dimension line: Shift
+            # moves only the line, the value keeps its place along it.
+            if role in (HandleRole.P1, HandleRole.P2):
+                p1, p2 = item.points()
+                other = p2 if role is HandleRole.P1 else p1
+                return self._axis_lock_point(other, local_pos)
+            if role == DIM_TEXT_HANDLE:
+                return item.constrain_line_drag(local_pos)
+            return local_pos
+        if self._is_leader_role(role):
+            # A leader's tip or bend (Lot M), like a bent line's points:
+            # Shift makes the segment from the previous point (the frame
+            # attachment, or the bend before) horizontal or vertical.
+            return self._axis_lock_point(
+                self._leader_prev_point(item, role), local_pos
+            )
         if isinstance(item, LineItem) and isinstance(role, int):
             # Bend point on a bent line: Shift forces the segment from
             # the previous path point to stay horizontal or vertical
@@ -1461,8 +1965,47 @@ class PdfScene(QGraphicsScene):
     ) -> AnnotationItem | None:
         for it in self.items(scene_pos):
             if isinstance(it, AnnotationItem):
+                # A text nested in an annotation (a dimension's value, a
+                # GD&T frame's note) stands for its owner.
+                while isinstance(it.parentItem(), AnnotationItem):
+                    it = it.parentItem()
                 return it
         return None
+
+    def selected_annotation_at(
+        self, scene_pos: QPointF
+    ) -> AnnotationItem | None:
+        """The topmost SELECTED annotation under `scene_pos`, whatever
+        unselected ones lie above it; None when none is."""
+        page = self._page_item
+        for it in self.items(scene_pos):
+            if (
+                isinstance(it, AnnotationItem)
+                and it.parentItem() is page
+                and it.isSelected()
+            ):
+                return it
+        return None
+
+    def _selection_hidden_under(
+        self, scene_pos: QPointF, top: AnnotationItem | None
+    ) -> bool:
+        """True when the press at `scene_pos` lands on an unselected
+        annotation (`top`) that covers a selected one."""
+        if top is None or top.isSelected():
+            return False
+        page = self._page_item
+        return any(
+            isinstance(it, AnnotationItem)
+            and it.parentItem() is page
+            and it.isSelected()
+            for it in self.items(scene_pos)
+        )
+
+    def _clear_sel_pending(self) -> None:
+        self._sel_pending_item = None
+        self._sel_pending_scene = None
+        self._sel_pending_screen = None
 
     def _clear_dup_pending(self) -> None:
         self._dup_pending_item = None

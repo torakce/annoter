@@ -312,23 +312,6 @@ def test_text_border_pdf_roundtrip(qapp, tmp_path: Path) -> None:
     assert texts[0].border() is TextBorder.ELLIPSE
 
 
-def test_selection_pill_has_real_size_after_rebuild(qapp) -> None:
-    """Regression for the 'tiny square' bug: a freshly rebuilt (still
-    hidden) pill must already have its laid-out size."""
-    from PySide6.QtCore import QRectF
-    from PySide6.QtWidgets import QWidget
-
-    from annoter.views.items.shapes import RectangleItem
-    from annoter.views.selection_toolbar import SelectionToolbar
-
-    host = QWidget()
-    pill = SelectionToolbar(host)
-    rect = RectangleItem(QRectF(0, 0, 10, 10))
-    pill.set_context([rect])
-    assert pill.width() > 80
-    assert pill.height() > 15
-
-
 # ----------------------------------------------------------------------
 # persistence
 # ----------------------------------------------------------------------

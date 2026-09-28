@@ -27,16 +27,21 @@ Mapping (M4):
     GdtAnnotationItem  -> Square + JSON in `Contents` + rasterized
                           appearance stream (so Acrobat/Foxit show the
                           actual feature control frame)
-    DimensionAnnotationItem -> Square + JSON in `Contents` + rasterized
-                          appearance stream (same convention as GD&T)
+
+Legacy: the Dimension annotation (v0.2.0 only) was a Square + JSON
+in `Contents` tagged "Annoter:dim". The tool is retired (Lot L); such a
+marker now reopens as a TextAnnotationItem carrying the same value and
+tolerance run (`legacy_dimension_runs`), and the next save writes it as
+a FreeText.
 
 Coordinates are in page-local pixel space at the renderer's base DPI;
 this module converts to PDF points (1pt = 1/72 in) on write and back on
 read. We do not currently transform across page rotation -- annotations
 are expected to live in the unrotated frame.
 
-Annotations we own are tagged via `/T = "Annoter"` (or "Annoter:gdt" /
-"Annoter:dim" for the JSON-bearing GD&T / Dimension markers) so a Save
+Annotations we own are tagged via `/T = "Annoter"` (or "Annoter:gdt"
+for the JSON-bearing GD&T markers, "Annoter:dim" for legacy dimensions)
+so a Save
 can wipe-and-rewrite without clobbering annotations the user opened
 from Acrobat. Annotations without our tag are left untouched on save
 and reconstructed on open when their type maps to a known item.
@@ -53,23 +58,27 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QStyleOptionGraphicsItem
 
-from annoter.model.dimension import DimensionState
 from annoter.model.gdt import GdtState
+from annoter.model.tolerance import Tolerance
+from annoter.model.tolerance import ToleranceMode as TolMode
 from annoter.model.styles import (
     DASH_PATTERNS,
     DashStyle,
+    DimOrientation,
     EndStyle,
     TextAlign,
     TextBorder,
 )
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.callout import CalloutItem
-from annoter.views.items.dimension import DimensionAnnotationItem
+from annoter.views.items.dimension import DimensionItem
 from annoter.views.items.freehand import FreehandItem
 from annoter.views.items.gdt import GdtAnnotationItem
+from annoter.views.items.leaders import Leader
 from annoter.views.items.lines import ArrowItem, LineItem
 from annoter.views.items.note import StickyNoteItem
 from annoter.views.items.poly import PolygonItem, PolylineItem
+from annoter.views.items.rounding import has_rounding, rounded_points
 from annoter.views.items.shapes import CloudItem, EllipseItem, RectangleItem
 from annoter.views.items.stamp import StampItem
 from annoter.views.items.text import TextAnnotationItem
@@ -78,8 +87,39 @@ from annoter.views.items.text import TextAnnotationItem
 _OWNER_TAG = "Annoter"
 _GDT_TAG = "Annoter:gdt"
 _GDT_CONTENT_PREFIX = "annoter.gdt:"
+# Legacy Dimension markers (read only, see the module docstring).
 _DIM_TAG = "Annoter:dim"
 _DIM_CONTENT_PREFIX = "annoter.dim:"
+_LEGACY_DIM_FONT_SIZE = 12
+
+
+def legacy_dimension_runs(data: dict) -> list[dict]:
+    """Text runs equivalent to a retired Dimension annotation.
+
+    `data` is the JSON the Dimension tool stored: `nominal`, an optional
+    `prefix` (the symbol itself: diameter, "R", "SR"...) and
+    `tolerance_mode` none / symmetric / bilateral with `tol_value` or
+    `tol_upper` / `tol_lower`. The prefix and value become plain text,
+    the tolerance an inline tolerance run -- what typing it in a text
+    gives.
+    """
+    text = f"{data.get('prefix', '')}{data.get('nominal', '')}".strip()
+    mode = str(data.get("tolerance_mode", "none"))
+    tol: Tolerance | None = None
+    if mode == TolMode.SYMMETRIC.value:
+        tol = Tolerance(TolMode.SYMMETRIC, value=str(data.get("tol_value", "")))
+    elif mode == TolMode.BILATERAL.value:
+        tol = Tolerance(
+            TolMode.BILATERAL,
+            upper=str(data.get("tol_upper", "")),
+            lower=str(data.get("tol_lower", "")),
+        )
+    runs: list[dict] = []
+    if text:
+        runs.append({"t": text})
+    if tol is not None and not tol.is_empty():
+        runs.append({"tol": tol.to_dict()})
+    return runs
 
 
 # ----------------------------------------------------------------------
@@ -187,18 +227,20 @@ def _scene_rect(item) -> QRectF:
     if isinstance(item, (RectangleItem, EllipseItem, CloudItem)):
         r = item.rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
-    if isinstance(item, (GdtAnnotationItem, DimensionAnnotationItem)):
+    if isinstance(item, GdtAnnotationItem):
         # content_rect, not boundingRect: the bounding rect includes the
         # selection/handle margin, which would shift the item's position
         # on every save/reopen cycle (the reader anchors on rect topleft).
         r = item.content_rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
-    if isinstance(item, (CalloutItem, StampItem)):
-        # The content box only (callout leader / stamp glyph aside).
+    if isinstance(item, (CalloutItem, StampItem, DimensionItem)):
+        # The content box only (callout leader / stamp glyph aside; a
+        # dimension's lines, ends and value without the selection chrome).
         r = item.content_rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
     if isinstance(item, TextAnnotationItem):
-        r = item.boundingRect()
+        # The text box and its outline, not the leaders.
+        r = item.frame_bounding_rect()
         return QRectF(r.x() + pos.x(), r.y() + pos.y(), r.width(), r.height())
     return item.boundingRect().translated(pos)
 
@@ -228,7 +270,6 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
             EllipseItem,
             CloudItem,
             GdtAnnotationItem,
-            DimensionAnnotationItem,
             StampItem,
         ),
     ):
@@ -298,8 +339,6 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
             p["runs"] = item.rich_runs()
     elif isinstance(item, GdtAnnotationItem):
         p["font_size"] = int(item.font_size())
-    elif isinstance(item, DimensionAnnotationItem):
-        p["font_size"] = int(item.font_size())
     elif isinstance(item, StampItem):
         p["text"] = item.text()
         p["font_size"] = int(item.font_size())
@@ -322,7 +361,96 @@ def _props_payload(item: AnnotationItem, dpi: int) -> dict:
             p["start_label_border"] = item.start_label_border().value
         if item.end_label_border() is not TextBorder.NONE:
             p["end_label_border"] = item.end_label_border().value
+    if isinstance(item, DimensionItem):
+        # Everything a dimension is, page coordinates in points: the
+        # annot's /Rect and appearance are only its picture.
+        pos = item.pos()
+        p1, p2 = item.points()
+
+        def page_pt(q: QPointF) -> list[float]:
+            return [
+                round(_pt(q.x() + pos.x(), dpi), 4),
+                round(_pt(q.y() + pos.y(), dpi), 4),
+            ]
+
+        p["dimension"] = {
+            "p1_pt": page_pt(p1),
+            "p2_pt": page_pt(p2),
+            "offset_pt": round(_pt(item.offset(), dpi), 4),
+            "shift_pt": round(_pt(item.shift(), dpi), 4),
+            "orientation": item.orientation().value,
+            "end": item.end_style().value,
+            "decimals": item.decimals(),
+            "font_size": item.font_size(),
+            "runs": item.value_runs(),
+        }
+    radii = _rounded_radii(item)
+    if radii is not None:
+        # Rounded bends (2026-09-28): the PDF vertices sample the arcs
+        # for external viewers, so the sharp source vertices and one
+        # radius per bend (line) / vertex (polyline, polygon) are kept
+        # here, page coordinates in points, and win on reopen.
+        pos = item.pos()
+        source = (
+            item.path_points() if isinstance(item, LineItem) else item.points()
+        )
+        p["vertices_pt"] = [
+            [round(_pt(q.x() + pos.x(), dpi), 4),
+             round(_pt(q.y() + pos.y(), dpi), 4)]
+            for q in source
+        ]
+        p["radii_pt"] = [round(_pt(r, dpi), 4) for r in radii]
+    leaders = item.leaders() if hasattr(item, "leaders") else []
+    if leaders:
+        # Page coordinates, in points (the leaders' source of truth;
+        # the Line annots written next to the item are only for
+        # external viewers).
+        p["leaders"] = [
+            ld.to_dict(lambda v: round(_pt(v, dpi), 4)) for ld in leaders
+        ]
     return p
+
+
+def _rounded_radii(item) -> list[float] | None:  # noqa: ANN001
+    """The bend radii of a line / polyline / polygon with at least one
+    rounded corner, else None (nothing extra to save)."""
+    if isinstance(item, (LineItem, PolylineItem, PolygonItem)):
+        values = item.bend_radii()
+        if has_rounding(values):
+            return values
+    return None
+
+
+def _drawn_vertices(item) -> list[QPointF]:  # noqa: ANN001
+    """Local vertices as drawn: rounded bends sampled (see rounding.py)."""
+    if isinstance(item, LineItem):
+        points = item.path_points()
+        radii = [0.0, *item.bend_radii(), 0.0]
+        closed = False
+    else:
+        points = item.points()
+        radii = item.bend_radii()
+        closed = isinstance(item, PolygonItem)
+    if not has_rounding(radii) or len(points) < 3:
+        return points
+    return rounded_points(points, radii, closed=closed)
+
+
+def _source_vertices(
+    props: dict, dpi: int
+) -> tuple[list[QPointF], list[float]] | None:
+    """The sharp vertices and radii saved with rounded bends, in page
+    pixels; None when absent or malformed (then the PDF vertices are
+    the geometry)."""
+    try:
+        pts = [
+            QPointF(_px(float(x), dpi), _px(float(y), dpi))
+            for x, y in props["vertices_pt"]
+        ]
+        radii = [max(0.0, _px(float(r), dpi)) for r in props["radii_pt"]]
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (pts, radii) if len(pts) >= 2 else None
 
 
 def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
@@ -422,9 +550,6 @@ def _apply_props_to_item(item: AnnotationItem, props: dict) -> None:
     elif isinstance(item, GdtAnnotationItem):
         if "font_size" in props:
             item.set_font_size(int(props["font_size"]))
-    elif isinstance(item, DimensionAnnotationItem):
-        if "font_size" in props:
-            item.set_font_size(int(props["font_size"]))
     elif isinstance(item, StampItem):
         if "text" in props:
             item.set_text(str(props["text"]))
@@ -456,6 +581,42 @@ def _apply_fill_opacity(annot: fitz.Annot, item) -> None:
 
 
 def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
+    _write_item_body(page, item, dpi)
+    if getattr(item, "has_leaders", lambda: False)():
+        try:
+            _write_leader_companions(page, item, dpi)
+        except Exception:
+            # Cosmetic for external viewers: never let it break a save.
+            pass
+
+
+def _write_leader_companions(page: fitz.Page, item, dpi: int) -> None:  # noqa: ANN001
+    """One Line (PolyLine when bent) annot per leader of a text or GD&T
+    frame, so external viewers draw them. Tagged `"companion": "leader"`:
+    the reader skips them and rebuilds the leaders from the owner's
+    "leaders" payload."""
+    color = _qcolor_to_rgb01(item.color())
+    subject = json.dumps({"companion": "leader"})
+    for i, leader in enumerate(item.leaders()):
+        path = [
+            _point_pt(item.mapToParent(p), dpi)
+            for p in item.leader_drawn_points(i)
+        ]
+        if len(path) > 2:
+            annot = page.add_polyline_annot(path)
+        else:
+            annot = page.add_line_annot(path[0], path[-1])
+        annot.set_line_ends(
+            fitz.PDF_ANNOT_LE_NONE,
+            _END_TO_PDF.get(leader.end, fitz.PDF_ANNOT_LE_CLOSED_ARROW),
+        )
+        annot.set_colors(stroke=color, fill=color)
+        annot.set_border(width=_pt(item.leader_stroke(), dpi))
+        annot.set_info(title=_OWNER_TAG, subject=subject)
+        annot.update()
+
+
+def _write_item_body(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
     color = _qcolor_to_rgb01(item.color())
     stroke = float(item.stroke())
     props = _props_payload(item, dpi)
@@ -513,7 +674,7 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         pos = item.pos()
         pts = [
             _point_pt(QPointF(p.x() + pos.x(), p.y() + pos.y()), dpi)
-            for p in item.points()
+            for p in _drawn_vertices(item)
         ]
         if len(pts) < 2:
             return
@@ -532,6 +693,10 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
         annot.update()
         return
 
+    if isinstance(item, DimensionItem):
+        _write_dimension(page, item, dpi, color, subject)
+        return
+
     if isinstance(item, GdtAnnotationItem):
         rect_pt = _rect_pt(_scene_rect(item), dpi)
         annot = page.add_rect_annot(rect_pt)
@@ -548,27 +713,11 @@ def _write_item(page: fitz.Page, item: AnnotationItem, dpi: int) -> None:
             pass
         return
 
-    if isinstance(item, DimensionAnnotationItem):
-        rect_pt = _rect_pt(_scene_rect(item), dpi)
-        annot = page.add_rect_annot(rect_pt)
-        payload = _DIM_CONTENT_PREFIX + json.dumps(item.state().to_dict())
-        annot.set_info(title=_DIM_TAG, content=payload, subject=subject)
-        annot.set_colors(stroke=color)
-        _set_dash_border(annot, stroke, item.dash_style())
-        annot.update()
-        try:
-            _set_rasterized_appearance(annot, item, dpi)
-        except Exception:
-            # The appearance is cosmetic for external viewers; never let
-            # it break a save. Acrobat falls back to a plain rectangle.
-            pass
-        return
-
     if isinstance(item, LineItem):  # ArrowItem included (subclass)
         pos = item.pos()
         path = [
             _point_pt(QPointF(p.x() + pos.x(), p.y() + pos.y()), dpi)
-            for p in item.path_points()
+            for p in _drawn_vertices(item)
         ]
         if item.bends():
             # Bent shaft: a native Line annot only holds two points, so
@@ -818,7 +967,7 @@ def _paint_source_rect(item) -> QRectF:
     handle margin that rect would otherwise carry.
     """
     if isinstance(item, TextAnnotationItem):
-        return item.boundingRect()
+        return item.frame_bounding_rect()
     return item.content_rect()
 
 
@@ -857,6 +1006,11 @@ def _rasterize_item_planes(
         # marker must stay out of the AP, and a selected item's
         # boundingRect is inflated by the handle margin.
         item.setSelected(False)
+    # Leaders are written as Line annots of their own, not baked into
+    # (and clipped by) the frame's picture.
+    has_leaders = hasattr(item, "set_leaders_hidden")
+    if has_leaders:
+        item.set_leaders_hidden(True)
     try:
         src = _paint_source_rect(item)
         # Item units are page pixels at `dpi`; target density is
@@ -878,6 +1032,8 @@ def _rasterize_item_planes(
     finally:
         if was_selected:
             item.setSelected(True)
+        if has_leaders:
+            item.set_leaders_hidden(False)
 
     stride = img.bytesPerLine()
     buf = bytes(img.constBits())[: stride * h]
@@ -891,21 +1047,10 @@ def _rasterize_item_planes(
     return bytes(rgb), bytes(alpha), w, h, src
 
 
-def _set_rasterized_appearance(
-    annot: fitz.Annot, item, dpi: int
-) -> None:
-    """Replace the annot's appearance stream with the rendered item.
-
-    External viewers (Acrobat, Foxit) display whatever is in /AP/N, so
-    they show the actual feature control frame / stamp instead of an
-    empty rectangle. The image carries an /SMask so the page content
-    stays visible around the glyphs. Annoter itself ignores the
-    appearance and rebuilds the editable item from the JSON.
-    """
-    page = annot.parent
-    doc = page.parent
-    rgb, alpha, w, h, src = _rasterize_item_planes(item, dpi)
-
+def _image_xobject(
+    doc: fitz.Document, rgb: bytes, alpha: bytes, w: int, h: int
+) -> int:
+    """An RGB image XObject with its alpha as /SMask; its xref."""
     smask_xref = doc.get_new_xref()
     doc.update_object(
         smask_xref,
@@ -922,6 +1067,133 @@ def _set_rasterized_appearance(
         f"/SMask {smask_xref} 0 R>>",
     )
     doc.update_stream(img_xref, bytes(rgb))
+    return img_xref
+
+
+# ----------------------------------------------------------------------
+# dimensions: a vector picture for external viewers (2026-09-28)
+# ----------------------------------------------------------------------
+_KAPPA = 0.5522847498  # cubic Bezier approximation of a quarter circle
+
+
+def _write_dimension(
+    page: fitz.Page, item: DimensionItem, dpi: int, color, subject: str  # noqa: ANN001
+) -> None:
+    """A Square annot around the dimension whose appearance draws it:
+    extension and dimension lines and ends as vector paths, the value
+    as an image (it can carry any symbol or stacked tolerance) placed
+    at its angle. Annoter rebuilds the item from the "dimension" JSON."""
+    stroke = float(item.stroke())
+    r = _scene_rect(item)
+    m = stroke + 1.0
+    annot = page.add_rect_annot(_rect_pt(r.adjusted(-m, -m, m, m), dpi))
+    annot.set_colors(stroke=color)
+    annot.set_border(width=stroke)
+    annot.set_info(title=_OWNER_TAG, subject=subject)
+    annot.update()
+    try:
+        _set_dimension_appearance(annot, item, dpi, color)
+    except Exception:
+        # Cosmetic for external viewers: never let it break a save.
+        pass
+
+
+def _dimension_ap_content(
+    item: DimensionItem, dpi: int, color, to_ap  # noqa: ANN001
+) -> list[str]:
+    """PDF drawing operators for the lines and ends of `item`; `to_ap`
+    maps an item-local point to appearance space."""
+    red, green, blue = color
+    ops = [
+        "q",
+        f"{red:.4f} {green:.4f} {blue:.4f} RG {red:.4f} {green:.4f} {blue:.4f} rg",
+        f"{_pt(item.stroke(), dpi):.4f} w 0 J 0 j",
+    ]
+    dashes = _dash_pattern_pt(item.dash_style(), _pt(item.stroke(), dpi))
+    if dashes:
+        ops.append("[" + " ".join(f"{d:.3f}" for d in dashes) + "] 0 d")
+    for a, b in item.line_segments():
+        (x1, y1), (x2, y2) = to_ap(a), to_ap(b)
+        ops.append(f"{x1:.3f} {y1:.3f} m {x2:.3f} {y2:.3f} l S")
+    if dashes:
+        ops.append("[] 0 d")
+    for prim in item.end_shapes():
+        if prim[0] == "dot":
+            (cx, cy) = to_ap(prim[1])
+            rr = _pt(prim[2], dpi)
+            k = rr * _KAPPA
+            ops.append(
+                f"{cx + rr:.3f} {cy:.3f} m "
+                f"{cx + rr:.3f} {cy + k:.3f} {cx + k:.3f} {cy + rr:.3f} {cx:.3f} {cy + rr:.3f} c "
+                f"{cx - k:.3f} {cy + rr:.3f} {cx - rr:.3f} {cy + k:.3f} {cx - rr:.3f} {cy:.3f} c "
+                f"{cx - rr:.3f} {cy - k:.3f} {cx - k:.3f} {cy - rr:.3f} {cx:.3f} {cy - rr:.3f} c "
+                f"{cx + k:.3f} {cy - rr:.3f} {cx + rr:.3f} {cy - k:.3f} {cx + rr:.3f} {cy:.3f} c f"
+            )
+            continue
+        pts = [to_ap(q) for q in prim[1]]
+        path = f"{pts[0][0]:.3f} {pts[0][1]:.3f} m " + " ".join(
+            f"{x:.3f} {y:.3f} l" for x, y in pts[1:]
+        )
+        ops.append(path + (" h f" if prim[0] == "fill" else " S"))
+    ops.append("Q")
+    return ops
+
+
+def _set_dimension_appearance(
+    annot: fitz.Annot, item: DimensionItem, dpi: int, color  # noqa: ANN001
+) -> None:
+    page = annot.parent
+    doc = page.parent
+    ap = doc.xref_get_key(annot.xref, "AP/N")
+    if ap[0] != "xref":
+        return
+    ap_xref = int(ap[1].split()[0])
+    rect = annot.rect
+    pos = item.pos()
+
+    def to_ap(local: QPointF) -> tuple[float, float]:
+        x = _pt(local.x() + pos.x(), dpi)
+        y = _pt(local.y() + pos.y(), dpi)
+        return x - rect.x0, rect.y1 - y
+
+    ops = _dimension_ap_content(item, dpi, color, to_ap)
+    resources = ""
+    label = item.label_item()
+    if not label.is_blank():
+        rgb, alpha, w, h, src = _rasterize_item_planes(label, dpi)
+        img_xref = _image_xobject(doc, rgb, alpha, w, h)
+        # Unit square of the image -> the value's frame, rotated with it.
+        x0, y0 = to_ap(label.mapToParent(QPointF(src.left(), src.bottom())))
+        x1, y1 = to_ap(label.mapToParent(QPointF(src.right(), src.bottom())))
+        x2, y2 = to_ap(label.mapToParent(QPointF(src.left(), src.top())))
+        ops.append(
+            f"q {x1 - x0:.4f} {y1 - y0:.4f} {x2 - x0:.4f} {y2 - y0:.4f} "
+            f"{x0:.4f} {y0:.4f} cm /DimValue Do Q"
+        )
+        resources = f"<</XObject<</DimValue {img_xref} 0 R>>>>"
+    doc.update_stream(ap_xref, "\n".join(ops).encode())
+    doc.xref_set_key(
+        ap_xref, "BBox", f"[0 0 {rect.width:.4f} {rect.height:.4f}]"
+    )
+    doc.xref_set_key(ap_xref, "Matrix", "[1 0 0 1 0 0]")
+    doc.xref_set_key(ap_xref, "Resources", resources or "<<>>")
+
+
+def _set_rasterized_appearance(
+    annot: fitz.Annot, item, dpi: int
+) -> None:
+    """Replace the annot's appearance stream with the rendered item.
+
+    External viewers (Acrobat, Foxit) display whatever is in /AP/N, so
+    they show the actual feature control frame / stamp instead of an
+    empty rectangle. The image carries an /SMask so the page content
+    stays visible around the glyphs. Annoter itself ignores the
+    appearance and rebuilds the editable item from the JSON.
+    """
+    page = annot.parent
+    doc = page.parent
+    rgb, alpha, w, h, src = _rasterize_item_planes(item, dpi)
+    img_xref = _image_xobject(doc, rgb, alpha, w, h)
 
     ap = doc.xref_get_key(annot.xref, "AP/N")
     if ap[0] != "xref":
@@ -994,6 +1266,57 @@ def _polygon_has_cloud_border(annot: fitz.Annot) -> bool:
 def _annot_to_items(
     annot: fitz.Annot, dpi: int
 ) -> list[AnnotationItem]:
+    items = _annot_to_items_body(annot, dpi)
+    if items and hasattr(items[0], "set_leaders"):
+        _restore_leaders(annot, items[0], dpi)
+    return items
+
+
+def _restore_leaders(annot: fitz.Annot, item, dpi: int) -> None:  # noqa: ANN001
+    """Leaders from an owned annot's "leaders" payload (points)."""
+    info = annot.info or {}
+    if not (info.get("title", "") or "").startswith(_OWNER_TAG):
+        return
+    try:
+        props = json.loads(info.get("subject", "") or "{}")
+        raw = props.get("leaders", []) if isinstance(props, dict) else []
+        leaders = [Leader.from_dict(d, lambda v: _px(v, dpi)) for d in raw]
+    except (ValueError, KeyError, TypeError):
+        return
+    item.set_leaders(leaders)
+
+
+def _dimension_from_props(data: dict, dpi: int) -> DimensionItem | None:
+    """A DimensionItem from its "dimension" payload (points)."""
+    try:
+        p1 = QPointF(*(_px(float(v), dpi) for v in data["p1_pt"]))
+        p2 = QPointF(*(_px(float(v), dpi) for v in data["p2_pt"]))
+        offset = _px(float(data.get("offset_pt", 0.0)), dpi)
+        shift = _px(float(data.get("shift_pt", 0.0)), dpi)
+        orientation = DimOrientation(data.get("orientation", "aligned"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    item = DimensionItem(p1, p2, offset, orientation)
+    item.set_shift(shift)
+    try:
+        item.set_end_style(EndStyle(data.get("end", "closed_arrow")))
+    except ValueError:
+        pass
+    try:
+        item.set_decimals(int(data.get("decimals", 1)))
+        if "font_size" in data:
+            item.set_font_size(int(data["font_size"]))
+    except (TypeError, ValueError):
+        pass
+    runs = data.get("runs")
+    if isinstance(runs, list):
+        item.set_value_runs(runs)
+    return item
+
+
+def _annot_to_items_body(
+    annot: fitz.Annot, dpi: int
+) -> list[AnnotationItem]:
     subtype = annot.type[1] if annot.type else ""
     info = annot.info or {}
     title = info.get("title", "") or ""
@@ -1043,6 +1366,15 @@ def _annot_to_items(
         except (TypeError, ValueError):
             pass
 
+    if isinstance(props.get("dimension"), dict):
+        item = _dimension_from_props(props["dimension"], dpi)
+        if item is None:
+            return []
+        item.set_color(qcolor)
+        item.set_stroke(width)
+        _apply_props_to_item(item, props)
+        return [item]
+
     # GD&T marker: Square + JSON.
     if (
         subtype == "Square"
@@ -1060,7 +1392,7 @@ def _annot_to_items(
         _apply_props_to_item(item, props)
         return [item]
 
-    # Dimension marker: Square + JSON.
+    # Legacy Dimension marker (Square + JSON): reopens as a text.
     if (
         subtype == "Square"
         and title.startswith(_DIM_TAG)
@@ -1068,15 +1400,18 @@ def _annot_to_items(
     ):
         try:
             data = json.loads(content[len(_DIM_CONTENT_PREFIX) :])
-            dim_state = DimensionState.from_dict(data)
-        except (ValueError, KeyError):
+            runs = legacy_dimension_runs(data)
+        except (ValueError, KeyError, TypeError, AttributeError):
             return []
-        item = DimensionAnnotationItem(
-            dim_state, QPointF(qrect.x(), qrect.y())
-        )
+        if not runs:
+            return []
+        item = TextAnnotationItem(QPointF(qrect.x(), qrect.y()))
         item.set_color(qcolor)
-        item.set_stroke(width)
-        _apply_props_to_item(item, props)
+        text_props = {
+            "font_size": props.get("font_size", _LEGACY_DIM_FONT_SIZE),
+            "runs": runs,
+        }
+        _apply_props_to_item(item, text_props)
         return [item]
 
     if subtype == "Square":
@@ -1130,15 +1465,21 @@ def _annot_to_items(
         pts = [QPointF(_px(x, dpi), _px(y, dpi)) for x, y in verts]
         if len(pts) < 2:
             return []
+        source = _source_vertices(props, dpi)
+        radii = None
+        if source is not None:
+            pts, radii = source
         bent = props.get("bent")
         if bent in ("line", "arrow"):
             # A bent LineItem/ArrowItem persisted as PolyLine: first and
             # last vertices are the endpoints, the middle ones the bends.
             cls = ArrowItem if bent == "arrow" else LineItem
             item = cls(pts[0], pts[-1])
-            item.set_bends(pts[1:-1])
+            item.set_bends(pts[1:-1], radii)
         else:
             item = PolylineItem(pts)
+            if radii is not None:
+                item.set_bend_radii(radii)
         item.set_color(qcolor)
         item.set_stroke(width)
         _apply_props_to_item(item, props)
@@ -1174,9 +1515,14 @@ def _annot_to_items(
         else:
             verts = annot.vertices or []
             pts = [QPointF(_px(x, dpi), _px(y, dpi)) for x, y in verts]
+            source = _source_vertices(props, dpi)
+            if source is not None:
+                pts = source[0]
             if len(pts) < 3:
                 return []
             item = PolygonItem(pts)
+            if source is not None:
+                item.set_bend_radii(source[1])
         item.set_color(qcolor)
         item.set_stroke(width)
         if fill_rgb is not None and "fill_enabled" not in props:

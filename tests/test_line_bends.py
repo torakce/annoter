@@ -191,3 +191,30 @@ def test_straight_line_still_saves_as_native_line(qapp, tmp_path: Path) -> None:
         assert subtypes == ["Line"]
     finally:
         doc.close()
+
+
+# ----------------------------------------------------------------------
+# a bend added from an endpoint lands mid-segment (user report,
+# 2026-09-28: right-click on an extremity > Add Bend Point put the new
+# point under the endpoint, where it could not be seen)
+# ----------------------------------------------------------------------
+def test_bend_added_at_an_endpoint_goes_mid_segment(qapp) -> None:
+    line = LineItem(QPointF(0, 0), QPointF(200, 0))
+    line.insert_bend_near(QPointF(199, 2))  # on the end handle
+    assert line.bends() == [QPointF(100, 0)]
+    line = LineItem(QPointF(0, 0), QPointF(200, 0))
+    line.insert_bend_near(QPointF(1, -1))  # on the start handle
+    assert line.bends() == [QPointF(100, 0)]
+
+
+def test_bend_added_along_a_segment_stays_under_the_click(qapp) -> None:
+    line = LineItem(QPointF(0, 0), QPointF(200, 0))
+    line.insert_bend_near(QPointF(60, 3))
+    assert line.bends() == [QPointF(60, 0)]
+
+
+def test_bend_near_an_existing_bend_goes_mid_segment(qapp) -> None:
+    line = LineItem(QPointF(0, 0), QPointF(200, 0))
+    line.set_bends([QPointF(100, 0)])
+    line.insert_bend_near(QPointF(197, 0))
+    assert line.bends() == [QPointF(100, 0), QPointF(150, 0)]

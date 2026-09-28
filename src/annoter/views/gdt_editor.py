@@ -35,10 +35,10 @@ Form tolerances skip the datum step; datums typed for another
 characteristic are kept in the row and come back if the user switches
 back, but a form row never carries them into the frame.
 
-Lifecycle contract (unchanged, shared with the dimension and note
-editors): `committed` on Enter or the primary button, `cancelled` on
-Escape, the close button or Cancel; clicking elsewhere does not close
-it -- MainWindow commits it on save, page switch or another frame.
+Lifecycle contract (unchanged, shared with the note editor):
+`committed` on Enter or the primary button, `cancelled` on Escape, the
+close button or Cancel; clicking elsewhere does not close it --
+MainWindow commits it on save, page switch or another frame.
 """
 
 from __future__ import annotations

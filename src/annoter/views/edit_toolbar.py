@@ -1,19 +1,18 @@
 """EditToolbar: floating contextual bar over the item being EDITED.
 
-`SelectionToolbar` is the pill for what is *selected*; this is the pill
-for what is being *edited*. It pops up above a text annotation the
-moment its inline edit session starts and carries the actions that
-belong to authoring content rather than to restyling a shape: font
+It is the pill for what is being *edited* (what is merely *selected*
+is handled by the right-click menu and the Inspector). It pops up above
+a text annotation the moment its inline edit session starts and carries
+the actions that belong to authoring content rather than to restyling a shape: font
 size, bold / italic, alignment, outline, and the two drawing-specific
 insertions -- a symbol at the caret and an inline tolerance run.
 
-That is the point of the widget: placing a dimension or a tolerance is
-no longer a tool of its own, it is something you do while writing the
-text that carries it.
+That is the point of the widget: a dimension or a tolerance is not a
+tool of its own, it is something you do while writing the text that
+carries it.
 
-Architecture mirrors `SelectionToolbar` exactly -- the widget stays
-dumb, emits semantic signals and lets MainWindow own every behaviour
-(including the undo commands). `set_context(item)` rebuilds it for the
+The widget stays dumb, emits semantic signals and lets MainWindow own
+every behaviour (including the undo commands). `set_context(item)` rebuilds it for the
 item's type; only text items are handled today and the branch is laid
 out so other kinds can plug in later.
 """
@@ -186,8 +185,7 @@ class EditToolbar(QFrame):
         self._lay = QHBoxLayout(self)
         self._lay.setContentsMargins(4, 3, 4, 3)
         self._lay.setSpacing(2)
-        # Same proven fix as the selection pill and the GD&T editor: the
-        # widget tracks its layout's size, so a rebuilt bar can never
+        # Same proven fix as the GD&T editor: the widget tracks its layout's size, so a rebuilt bar can never
         # linger as a tiny empty square.
         self._lay.setSizeConstraint(QHBoxLayout.SizeConstraint.SetFixedSize)
         self._icon_color = QColor("#212121")
@@ -216,10 +214,7 @@ class EditToolbar(QFrame):
         if isinstance(item, TextAnnotationItem):
             self._item = item
             self._build_text(item)
-        # other item kinds plug in here, one `_build_*` per kind --
-        # same branch structure as SelectionToolbar._build_single:
-        #     elif isinstance(item, DimensionAnnotationItem):
-        #         self._build_dimension(item)
+        # other item kinds plug in here, one `_build_*` per kind.
         else:
             self.hide()
             return

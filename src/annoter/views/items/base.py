@@ -16,9 +16,14 @@ from PySide6.QtWidgets import QGraphicsItem
 from annoter.model.styles import DASH_PATTERNS, DashStyle, HandleRole
 
 
-# Visual size of a resize handle, in scene units (pixels at zoom 1).
-HANDLE_HALF: float = 4.0
-HANDLE_HIT_HALF: float = 6.0  # forgiving hit area, slightly larger than visual
+# Handle sizes are in SCREEN pixels (Lot K): the scene converts them
+# with `screen_px()` -- scene units per on-screen pixel at the current
+# zoom, pushed by the view -- so a handle keeps the same size whether
+# the page is zoomed in or out. Outside a PdfScene (tests, detached
+# clones) one scene unit counts as one pixel.
+HANDLE_HALF: float = 4.5  # half the side of the drawn square
+HANDLE_HIT_HALF: float = 7.0  # forgiving hit area, larger than the square
+HANDLE_COLOR = QColor("#1E88E5")
 
 _CORNER_HANDLES = {
     HandleRole.TOP_LEFT,
@@ -123,6 +128,14 @@ class AnnotationItem(QGraphicsItem):
     # ------------------------------------------------------------------
     # resize handles
     # ------------------------------------------------------------------
+    def screen_px(self) -> float:
+        """Scene units per on-screen pixel (1.0 outside a PdfScene)."""
+        scene = self.scene()
+        getter = getattr(scene, "screen_px", None)
+        if getter is None:
+            return 1.0
+        return float(getter())
+
     def handle_positions(self) -> dict[HandleRole, QPointF]:
         """Local-coordinate position of each resize handle.
 
@@ -143,20 +156,12 @@ class AnnotationItem(QGraphicsItem):
         """Restore a snapshot returned by `geom_snapshot`."""
 
     def _handle_visual_rect(self, pt: QPointF) -> QRectF:
-        return QRectF(
-            pt.x() - HANDLE_HALF,
-            pt.y() - HANDLE_HALF,
-            2 * HANDLE_HALF,
-            2 * HANDLE_HALF,
-        )
+        half = HANDLE_HALF * self.screen_px()
+        return QRectF(pt.x() - half, pt.y() - half, 2 * half, 2 * half)
 
     def _handle_hit_rect(self, pt: QPointF) -> QRectF:
-        return QRectF(
-            pt.x() - HANDLE_HIT_HALF,
-            pt.y() - HANDLE_HIT_HALF,
-            2 * HANDLE_HIT_HALF,
-            2 * HANDLE_HIT_HALF,
-        )
+        half = HANDLE_HIT_HALF * self.screen_px()
+        return QRectF(pt.x() - half, pt.y() - half, 2 * half, 2 * half)
 
     def hit_handle(self, local_pos: QPointF) -> HandleRole | None:
         positions = self.handle_positions()
@@ -178,7 +183,7 @@ class AnnotationItem(QGraphicsItem):
         if not positions:
             return
         painter.save()
-        pen = QPen(QColor("#1E88E5"), 0)
+        pen = QPen(HANDLE_COLOR, 0)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(QBrush(QColor("#FFFFFF")))
@@ -194,7 +199,7 @@ class AnnotationItem(QGraphicsItem):
             return 0.0
         if not self.handle_positions():
             return 0.0
-        return HANDLE_HIT_HALF + 1.0
+        return (HANDLE_HIT_HALF + 1.0) * self.screen_px()
 
     # ------------------------------------------------------------------
     # hover -> contextual cursor when above a handle

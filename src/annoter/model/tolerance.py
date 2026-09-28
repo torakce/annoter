@@ -6,10 +6,9 @@ forward model: a tolerance is a run *inside* a text annotation, not an
 annotation type of its own, so the nominal value is simply the text
 around it.
 
-`model.dimension` carries its own copy of the same three-state enum for
-the standalone Dimension tool; that duplication is deliberate and
-transitional -- it disappears with the tool once every drawing use case
-goes through inline runs.
+It replaced the standalone Dimension annotation (retired in Lot L,
+2026-09): a PDF that still holds one reopens as a text carrying the same
+value and tolerance run (`services.pdf_export.legacy_dimension_runs`).
 """
 
 from __future__ import annotations

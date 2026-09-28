@@ -13,7 +13,8 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsItem
 
-from annoter.views.items.base import AnnotationItem
+from annoter.views.items.base import HANDLE_HIT_HALF, AnnotationItem
+from annoter.views.items.rounding import has_rounding, rounded_path
 
 
 class _PolyItem(AnnotationItem):
@@ -30,6 +31,9 @@ class _PolyItem(AnnotationItem):
         self._points: list[QPointF] = (
             [QPointF(p) for p in points] if points else []
         )
+        # One corner radius per vertex (0 = sharp), 2026-09-28. The two
+        # ends of an open polyline are never rounded.
+        self._radii: list[float] = []
 
     # ------------------------------------------------------------------
     # vertices
@@ -37,15 +41,63 @@ class _PolyItem(AnnotationItem):
     def points(self) -> list[QPointF]:
         return [QPointF(p) for p in self._points]
 
-    def set_points(self, points: list[QPointF]) -> None:
+    def set_points(
+        self, points: list[QPointF], radii: list[float] | None = None
+    ) -> None:
+        """Replace the vertices. Without `radii`, the current radii are
+        kept when the count is unchanged (vertices moved), else dropped."""
         self.prepareGeometryChange()
         self._points = [QPointF(p) for p in points]
+        if radii is not None:
+            self._radii = [max(0.0, float(r)) for r in radii]
+        elif len(self._radii) != len(self._points):
+            self._radii = []
+        n = len(self._points)
+        self._radii = (self._radii + [0.0] * n)[:n]
         self.update()
+
+    def bend_radii(self) -> list[float]:
+        """Corner radius of each vertex, in item units (0 = sharp)."""
+        n = len(self._points)
+        return (list(self._radii) + [0.0] * n)[:n]
+
+    def set_bend_radii(self, radii: list[float]) -> None:
+        n = len(self._points)
+        new = ([max(0.0, float(r)) for r in radii] + [0.0] * n)[:n]
+        if new == self.bend_radii():
+            return
+        self.prepareGeometryChange()
+        self._radii = new
+        self.update()
+
+    def corner_indices(self) -> list[int]:
+        """Vertices that can be rounded (not the ends of an open path)."""
+        n = len(self._points)
+        return list(range(n)) if self.CLOSED else list(range(1, n - 1))
+
+    def vertex_at(
+        self, local_pos: QPointF, radius: float | None = None
+    ) -> int | None:
+        """Index of the vertex within `radius` of `local_pos` (default:
+        the handle hit area, in screen pixels), or None."""
+        if radius is None:
+            radius = (HANDLE_HIT_HALF + 1.0) * self.screen_px()
+        r2 = radius * radius
+        for i, p in enumerate(self._points):
+            dx, dy = local_pos.x() - p.x(), local_pos.y() - p.y()
+            if dx * dx + dy * dy <= r2:
+                return i
+        return None
 
     def _path(self) -> QPainterPath:
         path = QPainterPath()
         if not self._points:
             return path
+        radii = self.bend_radii()
+        if has_rounding(radii) and len(self._points) >= 3:
+            return rounded_path(
+                self._points, radii, closed=self.CLOSED
+            )
         path.moveTo(self._points[0])
         for p in self._points[1:]:
             path.lineTo(p)
@@ -101,16 +153,19 @@ class _PolyItem(AnnotationItem):
             self.update()
 
     def geom_snapshot(self) -> object:
-        return [QPointF(p) for p in self._points]
+        return ([QPointF(p) for p in self._points], self.bend_radii())
 
     def apply_geom(self, snapshot: object) -> None:
-        if isinstance(snapshot, list):
+        if isinstance(snapshot, list):  # before corner radii
             self.set_points(snapshot)
+        elif isinstance(snapshot, tuple) and len(snapshot) == 2:
+            self.set_points(snapshot[0], snapshot[1])
 
     def scale_geometry(self, s: float) -> None:
         super().scale_geometry(s)
         self.set_points(
-            [QPointF(p.x() * s, p.y() * s) for p in self._points]
+            [QPointF(p.x() * s, p.y() * s) for p in self._points],
+            [r * s for r in self.bend_radii()],
         )
 
 
@@ -122,6 +177,7 @@ class PolylineItem(_PolyItem):
 
     def clone(self) -> "PolylineItem":
         c = PolylineItem([QPointF(p) for p in self._points])
+        c.set_bend_radii(self.bend_radii())
         self._copy_base_style_into(c)
         return c
 
@@ -180,6 +236,7 @@ class PolygonItem(_PolyItem):
 
     def clone(self) -> "PolygonItem":
         c = PolygonItem([QPointF(p) for p in self._points])
+        c.set_bend_radii(self.bend_radii())
         self._copy_base_style_into(c)
         c.set_fill_enabled(self._fill_enabled)
         c.set_fill_color(self._fill_color)

@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetricsF,
+    QPainterPath,
     QPen,
     QTextCursor,
 )
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 from annoter.model.styles import HandleRole, TextAlign, TextBorder
 from annoter.model.tolerance import Tolerance, ToleranceMode
 from annoter.views.items.base import AnnotationItem
+from annoter.views.items.leaders import LeaderHost
 from annoter.views.items.text_objects import (
     insert_tolerance,
     iter_fragments,
@@ -101,7 +103,7 @@ class _InnerTextItem(QGraphicsTextItem):
             parent.editingFinished.emit(self.toPlainText())
 
 
-class TextAnnotationItem(AnnotationItem):
+class TextAnnotationItem(LeaderHost, AnnotationItem):
     """Free-text annotation. Stores a position and a string."""
 
     KIND = "text"
@@ -377,6 +379,7 @@ class TextAnnotationItem(AnnotationItem):
         if self._text_width > 0:
             self._text_width *= s
             self._inner.setTextWidth(self._text_width)
+        self.scale_leaders(s)
 
     def start_typing(self, text: str) -> None:
         """Enter edit mode and append `text` at the end."""
@@ -427,6 +430,22 @@ class TextAnnotationItem(AnnotationItem):
         return padded
 
     def boundingRect(self) -> QRectF:
+        return self.with_leader_bounds(self.frame_bounding_rect())
+
+    def shape(self) -> QPainterPath:
+        if not self.has_leaders() and self.leader_preview() is None:
+            return super().shape()
+        return self.shape_with_leaders(self.frame_bounding_rect())
+
+    def leader_frame_rect(self) -> QRectF:
+        """Leaders attach to the outline when there is one, else to the
+        text frame."""
+        outline = self._border_draw_rect()
+        return outline if outline is not None else self.content_rect()
+
+    def frame_bounding_rect(self) -> QRectF:
+        """The text box, its outline and the handle margin -- the
+        bounding rect without the leaders (the PDF FreeText rect)."""
         inner = self._inner.boundingRect()
         if inner.isEmpty():
             fm = QFontMetricsF(self._inner.font())
@@ -443,6 +462,17 @@ class TextAnnotationItem(AnnotationItem):
         if m > 0:
             return base.adjusted(-m, -m, m, m)
         return base
+
+    def ink_margins(self) -> tuple[float, float]:
+        """(top, bottom) blank bands inside `content_rect`: the document
+        margin, plus half the room above capitals at the top and half
+        the descent at the bottom (accents and descenders keep the other
+        half). Lets an owner set this text close to its own drawing (a
+        GD&T frame's notes)."""
+        margin = self._inner.document().documentMargin()
+        fm = QFontMetricsF(self._inner.font())
+        above_caps = max(0.0, fm.ascent() - fm.capHeight())
+        return margin + above_caps * 0.5, margin + fm.descent() * 0.5
 
     def content_rect(self) -> QRectF:
         """Bounding rect of the text frame, ignoring handle padding."""
@@ -466,7 +496,7 @@ class TextAnnotationItem(AnnotationItem):
     def handle_positions(self) -> dict[HandleRole, QPointF]:
         r = self.content_rect()
         cy = r.top() + r.height() / 2.0
-        return {
+        handles = {
             HandleRole.TOP_LEFT: QPointF(r.left(), r.top()),
             HandleRole.TOP_RIGHT: QPointF(r.right(), r.top()),
             HandleRole.RIGHT: QPointF(r.right(), cy),
@@ -474,10 +504,15 @@ class TextAnnotationItem(AnnotationItem):
             HandleRole.BOTTOM_LEFT: QPointF(r.left(), r.bottom()),
             HandleRole.LEFT: QPointF(r.left(), cy),
         }
+        handles.update(self.leader_handle_positions())
+        return handles
 
     def apply_resize(
         self, role: HandleRole, local_pos: QPointF
     ) -> None:
+        if self.is_leader_role(role):
+            self.apply_leader_handle(role, local_pos)
+            return
         r = self.content_rect()
         x1, y1, x2, y2 = r.left(), r.top(), r.right(), r.bottom()
         px, py = local_pos.x(), local_pos.y()
@@ -552,16 +587,19 @@ class TextAnnotationItem(AnnotationItem):
             QPointF(self.pos()),
             int(self._font_size),
             float(self._text_width),
+            tuple(self.leaders()),
         )
 
     def apply_geom(self, snapshot: object) -> None:
         if (
             not isinstance(snapshot, tuple)
-            or len(snapshot) != 3
+            or len(snapshot) not in (3, 4)
             or not isinstance(snapshot[0], QPointF)
         ):
             return
-        pos, font_size, text_width = snapshot
+        pos, font_size, text_width = snapshot[:3]
+        if len(snapshot) == 4:
+            self.set_leaders(list(snapshot[3]))
         self.setPos(pos)
         if int(font_size) != self._font_size:
             self._font_size = int(font_size)
@@ -575,8 +613,9 @@ class TextAnnotationItem(AnnotationItem):
         self.update()
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
-        # The inner QGraphicsTextItem paints itself; we add the optional
-        # outline and the selection marker.
+        # The inner QGraphicsTextItem paints itself; we add the leaders,
+        # the optional outline and the selection marker.
+        self.paint_leaders(painter)
         outline = self._border_draw_rect()
         if outline is not None:
             pen = QPen(self._color, max(self._stroke, 1.0))
@@ -586,7 +625,13 @@ class TextAnnotationItem(AnnotationItem):
                 painter.drawEllipse(outline)
             else:
                 painter.drawRect(outline)
-        self._draw_selection_marker(painter, self.boundingRect())
+        # With leaders, the dashed box marks the text, not the leaders.
+        marker = (
+            self.frame_bounding_rect()
+            if self.has_leaders() or self.leader_preview() is not None
+            else self.boundingRect()
+        )
+        self._draw_selection_marker(painter, marker)
 
     def mouseDoubleClickEvent(
         self, event: QGraphicsSceneMouseEvent
@@ -614,4 +659,5 @@ class TextAnnotationItem(AnnotationItem):
         if self._text_width > 0:
             c._text_width = self._text_width
             c._inner.setTextWidth(self._text_width)
+        c.set_leaders(self.leaders())
         return c

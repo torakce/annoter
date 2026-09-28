@@ -6,7 +6,7 @@ Replaces the QMenuBar and the file / undo half of the old toolbar:
                                   [undo] [redo] | [theme] [Save]
 
 It is installed with `QMainWindow.setMenuWidget()`. The widget stays
-dumb, like `SelectionToolbar`: MainWindow hands it the existing QActions
+dumb, like the canvas overlays: MainWindow hands it the existing QActions
 (undo, redo, save, theme toggle) and the main QMenu, and it only mirrors
 their state. No behavior lives here, so every command keeps working from
 its shortcut and from the menu exactly as before.
@@ -68,10 +68,27 @@ def _divider() -> QFrame:
     return d
 
 
+class _TitleLabel(QLabel):
+    """The document name: a click opens the document's properties."""
+
+    clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.LeftButton and self.text():
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class TopBar(QFrame):
-    """Window header. Emits `searchRequested` from the command field."""
+    """Window header. Emits `searchRequested` from the command field and
+    `titleClicked` from the document name."""
 
     searchRequested = Signal()
+    titleClicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -101,9 +118,10 @@ class TopBar(QFrame):
         mark.setToolTip("Annoter")
         left.addWidget(mark)
 
-        self.title_label = QLabel("", self)
+        self.title_label = _TitleLabel(self)
         self.title_label.setObjectName("TopBarTitle")
         self.title_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.title_label.clicked.connect(self.titleClicked)
         left.addSpacing(4)
         left.addWidget(self.title_label)
 
@@ -227,7 +245,8 @@ class TopBar(QFrame):
     # ------------------------------------------------------------------
     def set_document_name(self, name: str | None, tooltip: str = "") -> None:
         self.title_label.setText(name or "")
-        self.title_label.setToolTip(tooltip)
+        tip = f"{tooltip}\nClick for the document's properties" if name else ""
+        self.title_label.setToolTip(tip.strip())
 
     def set_unsaved(self, unsaved: bool) -> None:
         self.unsaved_chip.setVisible(bool(unsaved))

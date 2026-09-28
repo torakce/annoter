@@ -13,12 +13,33 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPen, QPolygonF
 from PySide6.QtWidgets import QGraphicsItem
 
 from annoter.model.styles import EndStyle, HandleRole, TextBorder
-from annoter.views.items.base import AnnotationItem
+from annoter.views.items.base import (
+    HANDLE_COLOR,
+    HANDLE_HALF,
+    HANDLE_HIT_HALF,
+    AnnotationItem,
+)
+from annoter.views.items.rounding import has_rounding, rounded_path
+from annoter.views.items.line_ends import (
+    HEAD_HALF_ANGLE,
+    bend_point_on_segment,
+    draw_line_end,
+)
 from annoter.views.items.text import circumscribed_circle_rect
 
 _LABEL_FONT_FAMILY = "Helvetica"
 _LABEL_POINT_SIZE = 11
 _LABEL_PADDING = 4.0
+
+# Selected-line chrome (Lot K), in screen pixels: the START handle is a
+# disc, the END handle a square, bends are small hollow discs, and a
+# chevron in the middle of the longest segment points from start to end.
+_CHEVRON_HALF_PX = 4.0
+_CHEVRON_MIN_PATH_PX = 48.0  # no chevron on a line shorter than this
+HANDLE_TIPS = {
+    HandleRole.P1: "Start point",
+    HandleRole.P2: "End point",
+}
 
 
 class LineItem(AnnotationItem):
@@ -37,6 +58,8 @@ class LineItem(AnnotationItem):
         # order (Discussion #1, item 5). Each bend is a draggable handle;
         # right-click adds/removes them.
         self._bends: list[QPointF] = []
+        # One corner radius per bend (0 = sharp), 2026-09-28.
+        self._bend_radii: list[float] = []
         # Optional text labels floating just past each endpoint. Carried
         # by the line itself (not a converted callout) so labels and
         # bends coexist and BOTH ends can be labeled.
@@ -212,9 +235,36 @@ class LineItem(AnnotationItem):
     def bends(self) -> list[QPointF]:
         return [QPointF(b) for b in self._bends]
 
-    def set_bends(self, bends: list[QPointF]) -> None:
+    def set_bends(
+        self, bends: list[QPointF], radii: list[float] | None = None
+    ) -> None:
+        """Replace the bends. Without `radii`, the current radii are
+        kept when the count is unchanged (bends moved), else dropped."""
         self.prepareGeometryChange()
         self._bends = [QPointF(b) for b in bends]
+        if radii is not None:
+            self._bend_radii = [max(0.0, float(r)) for r in radii]
+        elif len(self._bend_radii) != len(self._bends):
+            self._bend_radii = []
+        self._fit_radii()
+        self.update()
+
+    def _fit_radii(self) -> None:
+        n = len(self._bends)
+        self._bend_radii = (self._bend_radii + [0.0] * n)[:n]
+
+    def bend_radii(self) -> list[float]:
+        """Corner radius of each bend, in item units (0 = sharp)."""
+        self._fit_radii()
+        return list(self._bend_radii)
+
+    def set_bend_radii(self, radii: list[float]) -> None:
+        new = [max(0.0, float(r)) for r in radii]
+        if new == self._bend_radii:
+            return
+        self.prepareGeometryChange()
+        self._bend_radii = new
+        self._fit_radii()
         self.update()
 
     def path_points(self) -> list[QPointF]:
@@ -223,11 +273,12 @@ class LineItem(AnnotationItem):
 
     def insert_bend_near(self, local_pos: QPointF) -> int:
         """Insert a bend on the segment closest to `local_pos`, at its
-        projection onto that segment. Returns the new bend's index."""
+        projection onto that segment -- or at the segment's middle when
+        the projection falls on (or right next to) one of its ends.
+        Returns the new bend's index."""
         pts = self.path_points()
         best_seg = 0
         best_d2 = float("inf")
-        best_proj = QPointF(local_pos)
         for i in range(len(pts) - 1):
             a, b = pts[i], pts[i + 1]
             abx, aby = b.x() - a.x(), b.y() - a.y()
@@ -246,20 +297,34 @@ class LineItem(AnnotationItem):
             if d2 < best_d2:
                 best_d2 = d2
                 best_seg = i
-                best_proj = proj
+        point = bend_point_on_segment(
+            pts[best_seg],
+            pts[best_seg + 1],
+            local_pos,
+            (HANDLE_HIT_HALF + 2.0) * self.screen_px(),
+        )
         self.prepareGeometryChange()
-        self._bends.insert(best_seg, best_proj)
+        self._fit_radii()
+        self._bends.insert(best_seg, point)
+        self._bend_radii.insert(best_seg, 0.0)
         self.update()
         return best_seg
 
     def remove_bend(self, index: int) -> None:
         if 0 <= index < len(self._bends):
             self.prepareGeometryChange()
+            self._fit_radii()
             del self._bends[index]
+            del self._bend_radii[index]
             self.update()
 
-    def bend_at(self, local_pos: QPointF, radius: float = 8.0) -> int | None:
-        """Index of the bend within `radius` of `local_pos`, or None."""
+    def bend_at(
+        self, local_pos: QPointF, radius: float | None = None
+    ) -> int | None:
+        """Index of the bend within `radius` of `local_pos`, or None.
+        The default radius is the handle hit area, in screen pixels."""
+        if radius is None:
+            radius = (HANDLE_HIT_HALF + 1.0) * self.screen_px()
         r2 = radius * radius
         for i, b in enumerate(self._bends):
             dx, dy = local_pos.x() - b.x(), local_pos.y() - b.y()
@@ -295,6 +360,13 @@ class LineItem(AnnotationItem):
         return self._apply_dash(pen)
 
     def _draw_shaft(self, painter) -> None:  # noqa: ANN001
+        radii = self.bend_radii()
+        if has_rounding(radii):
+            # Ends are never rounded: radii sit on the inner points.
+            painter.drawPath(
+                rounded_path(self.path_points(), [0.0, *radii, 0.0])
+            )
+            return
         painter.drawPolyline(QPolygonF(self.path_points()))
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
@@ -303,6 +375,89 @@ class LineItem(AnnotationItem):
         self._draw_shaft(painter)
         self._draw_labels(painter)
         self._draw_selection_marker(painter, self.boundingRect())
+
+    # ------------------------------------------------------------------
+    # selection chrome: which end is which (Lot K)
+    # ------------------------------------------------------------------
+    def _draw_handles(self, painter) -> None:  # noqa: ANN001
+        px = self.screen_px()
+        half = HANDLE_HALF * px
+        painter.save()
+        self._draw_direction_chevron(painter, px)
+        outline = QPen(HANDLE_COLOR, 0)
+        outline.setCosmetic(True)
+        painter.setPen(outline)
+        painter.setBrush(QColor("#FFFFFF"))
+        r_bend = half * 0.8
+        for b in self._bends:
+            painter.drawEllipse(b, r_bend, r_bend)
+        # Filled markers, ringed in white so they read on a dark stroke.
+        ring = QPen(QColor("#FFFFFF"), 1.5)
+        ring.setCosmetic(True)
+        painter.setPen(ring)
+        painter.setBrush(HANDLE_COLOR)
+        painter.drawEllipse(self._p1, half, half)
+        painter.drawRect(
+            QRectF(self._p2.x() - half, self._p2.y() - half, 2 * half, 2 * half)
+        )
+        painter.restore()
+
+    def direction_chevron(self) -> tuple[QPointF, QPointF, QPointF] | None:
+        """(barb, tip, barb) of the start-to-end chevron, in local
+        coordinates, or None when the path is too short to carry one."""
+        px = self.screen_px()
+        pts = self.path_points()
+        lengths = [
+            math.hypot(b.x() - a.x(), b.y() - a.y())
+            for a, b in zip(pts, pts[1:])
+        ]
+        if sum(lengths) < _CHEVRON_MIN_PATH_PX * px:
+            return None
+        # Middle of the longest segment: always on a straight run, never
+        # on a corner where the heading would be ambiguous.
+        i = max(range(len(lengths)), key=lambda k: lengths[k])
+        a, b, seg = pts[i], pts[i + 1], lengths[i]
+        if seg < 1e-9:
+            return None
+        ux, uy = (b.x() - a.x()) / seg, (b.y() - a.y()) / seg
+        mid = QPointF((a.x() + b.x()) / 2.0, (a.y() + b.y()) / 2.0)
+        h = _CHEVRON_HALF_PX * px
+        tip = QPointF(mid.x() + ux * h, mid.y() + uy * h)
+        back = QPointF(mid.x() - ux * h, mid.y() - uy * h)
+        nx, ny = -uy, ux
+        return (
+            QPointF(back.x() + nx * h * 1.2, back.y() + ny * h * 1.2),
+            tip,
+            QPointF(back.x() - nx * h * 1.2, back.y() - ny * h * 1.2),
+        )
+
+    def _draw_direction_chevron(self, painter, px: float) -> None:  # noqa: ANN001
+        chevron = self.direction_chevron()
+        if chevron is None:
+            return
+        poly = QPolygonF(list(chevron))
+        for color, width in ((QColor("#FFFFFF"), 4.0), (HANDLE_COLOR, 2.0)):
+            pen = QPen(color, width)
+            pen.setCosmetic(True)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolyline(poly)
+
+    def hoverMoveEvent(self, event) -> None:  # noqa: ANN001
+        # Name the end under the cursor, so start and end are never a
+        # guess.
+        role = self.hit_handle(event.pos()) if self.isSelected() else None
+        if role in HANDLE_TIPS:
+            tip = HANDLE_TIPS[role]
+        elif isinstance(role, int):
+            tip = "Bend point"
+        else:
+            tip = ""
+        if self.toolTip() != tip:
+            self.setToolTip(tip)
+        super().hoverMoveEvent(event)
 
     # ------------------------------------------------------------------
     # resize handles (two endpoints + one int-keyed handle per bend,
@@ -328,7 +483,12 @@ class LineItem(AnnotationItem):
             self.update()
 
     def geom_snapshot(self) -> object:
-        return (QPointF(self._p1), QPointF(self._p2), self.bends())
+        return (
+            QPointF(self._p1),
+            QPointF(self._p2),
+            self.bends(),
+            self.bend_radii(),
+        )
 
     def apply_geom(self, snapshot: object) -> None:
         if (
@@ -337,10 +497,12 @@ class LineItem(AnnotationItem):
             and isinstance(snapshot[0], QPointF)
         ):
             self.set_line_points(snapshot[0], snapshot[1])
-            # Pre-bend snapshots were plain (p1, p2) tuples.
+            # Pre-bend snapshots were plain (p1, p2) tuples, pre-radius
+            # ones (p1, p2, bends).
             bends = snapshot[2] if len(snapshot) >= 3 else []
+            radii = snapshot[3] if len(snapshot) >= 4 else None
             if isinstance(bends, list):
-                self.set_bends(bends)
+                self.set_bends(bends, radii)
 
     def scale_geometry(self, s: float) -> None:
         super().scale_geometry(s)
@@ -349,11 +511,12 @@ class LineItem(AnnotationItem):
             QPointF(self._p2.x() * s, self._p2.y() * s),
         )
         self.set_bends(
-            [QPointF(b.x() * s, b.y() * s) for b in self._bends]
+            [QPointF(b.x() * s, b.y() * s) for b in self._bends],
+            [r * s for r in self.bend_radii()],
         )
 
     def _copy_line_extras_into(self, dst: "LineItem") -> None:
-        dst.set_bends(self.bends())
+        dst.set_bends(self.bends(), self.bend_radii())
         dst.set_start_label(self._start_label)
         dst.set_end_label(self._end_label)
         dst.set_start_label_border(self._start_label_border)
@@ -370,7 +533,7 @@ class ArrowItem(LineItem):
     KIND = "arrow"
 
     HEAD_LEN_FACTOR = 5.0  # head size = stroke * factor
-    HEAD_HALF_ANGLE = math.radians(22.0)
+    HEAD_HALF_ANGLE = HEAD_HALF_ANGLE
 
     def __init__(
         self,
@@ -420,135 +583,9 @@ class ArrowItem(LineItem):
         self, painter, anchor: QPointF, towards: QPointF, style: EndStyle
     ) -> None:
         """Draw `style` at `anchor`, oriented along anchor->towards."""
-        if style is EndStyle.NONE:
-            return
-        dx = towards.x() - anchor.x()
-        dy = towards.y() - anchor.y()
-        length = math.hypot(dx, dy)
-        if length < 1e-6:
-            return
-        ang = math.atan2(dy, dx)
-        size = self._head_size()
-
-        if style in (EndStyle.OPEN_ARROW, EndStyle.CLOSED_ARROW):
-            a1 = ang - self.HEAD_HALF_ANGLE
-            a2 = ang + self.HEAD_HALF_ANGLE
-            h1 = QPointF(
-                anchor.x() + size * math.cos(a1),
-                anchor.y() + size * math.sin(a1),
-            )
-            h2 = QPointF(
-                anchor.x() + size * math.cos(a2),
-                anchor.y() + size * math.sin(a2),
-            )
-            if style is EndStyle.CLOSED_ARROW:
-                painter.setBrush(self._color)
-                painter.drawPolygon(QPolygonF([anchor, h1, h2]))
-            else:
-                # Open chevron: two barbs only -- drawPolygon would close
-                # the triangle and add a bar across the back of the head.
-                painter.setBrush(Qt.NoBrush)
-                painter.drawPolyline(QPolygonF([h1, anchor, h2]))
-            return
-
-        if style in (EndStyle.TRIANGLE, EndStyle.TRIANGLE_FILLED):
-            # GD&T datum-feature triangle (ISO 5459): flat base sitting
-            # ON the endpoint, perpendicular to the shaft, apex pointing
-            # back along the line so the leader meets the apex.
-            apex = QPointF(
-                anchor.x() + size * math.cos(ang),
-                anchor.y() + size * math.sin(ang),
-            )
-            half_base = size / math.sqrt(3.0)  # equilateral proportions
-            perp = ang + math.pi / 2
-            b1 = QPointF(
-                anchor.x() + half_base * math.cos(perp),
-                anchor.y() + half_base * math.sin(perp),
-            )
-            b2 = QPointF(
-                anchor.x() - half_base * math.cos(perp),
-                anchor.y() - half_base * math.sin(perp),
-            )
-            if style is EndStyle.TRIANGLE_FILLED:
-                painter.setBrush(self._color)
-            else:
-                # Opaque white (not transparent) so the shaft does not
-                # show through the "hollow" triangle -- same convention
-                # as the GD&T frame cells.
-                painter.setBrush(QColor("#FFFFFF"))
-            painter.drawPolygon(QPolygonF([b1, apex, b2]))
-            return
-
-        if style is EndStyle.BUTT:
-            # Perpendicular tick at the anchor.
-            half = size * 0.4
-            perp = ang + math.pi / 2
-            p1 = QPointF(
-                anchor.x() + half * math.cos(perp),
-                anchor.y() + half * math.sin(perp),
-            )
-            p2 = QPointF(
-                anchor.x() - half * math.cos(perp),
-                anchor.y() - half * math.sin(perp),
-            )
-            painter.drawLine(p1, p2)
-            return
-
-        if style is EndStyle.SLASH:
-            half = size * 0.5
-            slash = ang + math.radians(60.0)
-            p1 = QPointF(
-                anchor.x() + half * math.cos(slash),
-                anchor.y() + half * math.sin(slash),
-            )
-            p2 = QPointF(
-                anchor.x() - half * math.cos(slash),
-                anchor.y() - half * math.sin(slash),
-            )
-            painter.drawLine(p1, p2)
-            return
-
-        if style is EndStyle.DIAMOND:
-            half = size * 0.4
-            tip1 = QPointF(
-                anchor.x() + half * math.cos(ang),
-                anchor.y() + half * math.sin(ang),
-            )
-            tip2 = QPointF(
-                anchor.x() - half * math.cos(ang),
-                anchor.y() - half * math.sin(ang),
-            )
-            perp = ang + math.pi / 2
-            tip3 = QPointF(
-                anchor.x() + half * math.cos(perp),
-                anchor.y() + half * math.sin(perp),
-            )
-            tip4 = QPointF(
-                anchor.x() - half * math.cos(perp),
-                anchor.y() - half * math.sin(perp),
-            )
-            painter.setBrush(self._color)
-            painter.drawPolygon(QPolygonF([tip1, tip3, tip2, tip4]))
-            return
-
-        if style is EndStyle.CIRCLE:
-            r = size * 0.35
-            painter.setBrush(self._color)
-            painter.drawEllipse(anchor, r, r)
-            return
-
-        if style is EndStyle.SQUARE:
-            half = size * 0.3
-            painter.setBrush(self._color)
-            painter.drawRect(
-                QRectF(
-                    anchor.x() - half,
-                    anchor.y() - half,
-                    2 * half,
-                    2 * half,
-                )
-            )
-            return
+        draw_line_end(
+            painter, anchor, towards, style, self._head_size(), self._color
+        )
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
         painter.setPen(self._pen())

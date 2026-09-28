@@ -141,7 +141,7 @@ def test_title_and_unsaved_chip_follow_the_document(
         assert not bar.is_unsaved_shown()
         win.open_path(sample_pdf)
         assert bar.title_label.text() == "sample.pdf"
-        assert bar.title_label.toolTip() == str(sample_pdf)
+        assert bar.title_label.toolTip().startswith(str(sample_pdf))
         assert not bar.is_unsaved_shown()
         win._scene.push_add(RectangleItem(QRectF(10, 10, 40, 40)))
         assert bar.is_unsaved_shown()

@@ -32,8 +32,8 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QUndoStack
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from annoter.controllers import bend_radius
 from annoter.controllers.commands import (
     ChangePropsCommand,
     MoveAnnotationsCommand,
@@ -71,9 +72,12 @@ from annoter.controllers.geometry import (
     px_to_pt,
 )
 from annoter.model.styles import (
+    DIM_END_LABELS,
+    DIM_ORIENTATION_LABELS,
     END_STYLE_LABELS,
     TEXT_BORDER_LABELS,
     DashStyle,
+    DimOrientation,
     TextAlign,
 )
 from annoter.services.palette import PaletteStore
@@ -87,6 +91,7 @@ from annoter.views.inspector_widgets import (
 )
 from annoter.views.items.base import AnnotationItem
 from annoter.views.items.callout import CalloutItem
+from annoter.views.items.dimension import VALUE_RUN, DimensionItem, format_mm
 from annoter.views.items.freehand import FreehandItem
 from annoter.views.items.gdt import GdtAnnotationItem
 from annoter.views.items.lines import ArrowItem, LineItem
@@ -172,9 +177,10 @@ class PropertiesDock(QDockWidget):
     strokePicked = Signal(float)  # preset or default width
     strokeCommitted = Signal(float)  # exact field committed on a selection
     editPaletteRequested = Signal()
-    editRequested = Signal()  # GD&T / dimension / note editor
+    editRequested = Signal()  # GD&T / note editor
     duplicateRequested = Signal()
     deleteRequested = Signal()
+    documentPropertiesRequested = Signal()
 
     def __init__(
         self,
@@ -196,6 +202,12 @@ class PropertiesDock(QDockWidget):
         self._default_color = QColor("#E53935")
         self._default_stroke = 2.0
         self._actions: dict[str, QAction] = {}
+        # (label, value) rows about the open document, shown when
+        # nothing is selected; None without a document.
+        self._doc_rows: list[tuple[str, str]] | None = None
+        # What decided which rows the current body has (see
+        # `sync_structure`).
+        self._built_key: tuple = ()
 
         self._scroll = QScrollArea(self)
         self._scroll.setObjectName("InspectorScroll")
@@ -218,9 +230,51 @@ class PropertiesDock(QDockWidget):
     def set_undo_stack(self, stack: QUndoStack | None) -> None:
         self._undo_stack = stack
 
+    def set_document_summary(
+        self, rows: list[tuple[str, str]] | None
+    ) -> None:
+        """Key facts about the open document, for the empty state."""
+        rows = None if rows is None else list(rows)
+        if rows == self._doc_rows:
+            return
+        self._doc_rows = rows
+        if not self._items:
+            self._rebuild()
+
     def set_items(self, items: list[AnnotationItem]) -> None:
         self._items = list(items)
         self._rebuild()
+
+    def _structure_key(self) -> tuple:
+        """The item state that adds or removes rows (or changes what a
+        row shows) without a selection change: whether a single item has
+        bends to round; what a dimension measures and shows."""
+        if len(self._items) != 1:
+            return ()
+        item = self._items[0]
+        key: tuple = (bend_radius.has_corners(item),)
+        if isinstance(item, DimensionItem):
+            key += (
+                item.orientation(),
+                item.value_text(),
+                item.is_measured(),
+                item.decimals(),
+                item.end_style(),
+                item.font_size(),
+            )
+        return key
+
+    def sync_structure(self) -> None:
+        """Rebuild when an edit (undo index change) made rows appear or
+        vanish -- a first bend added, the last one removed. Deferred, so
+        the field whose edit pushed the command is not deleted under its
+        own signal."""
+        if self._structure_key() != self._built_key:
+            QTimer.singleShot(0, self._rebuild_if_stale)
+
+    def _rebuild_if_stale(self) -> None:
+        if self._structure_key() != self._built_key:
+            self._rebuild()
 
     def set_icon_color(
         self, color: QColor, ring: QColor | None = None
@@ -241,8 +295,8 @@ class PropertiesDock(QDockWidget):
             self._rebuild()
 
     def set_actions(self, **actions: QAction) -> None:
-        """Arrange buttons mirror these actions (bring_front, send_back,
-        format_painter)."""
+        """Arrange buttons mirror these actions (send_back, lower_one,
+        raise_one, bring_front, format_painter)."""
         self._actions.update(actions)
         self._rebuild()
 
@@ -281,11 +335,29 @@ class PropertiesDock(QDockWidget):
 
     def _add_row(
         self, section: _Section, label: str, widget: QWidget,
-        key: QWidget | None = None,
+        key: QWidget | None = None, glyph: str | None = None,
     ) -> None:
+        """One form row. `glyph` puts a small line icon before the label
+        (the start / end marks of a line, as drawn on its handles)."""
         lbl = QLabel(label)
         lbl.setObjectName("InspectorLabel")
-        section.form.addRow(lbl, widget)
+        if glyph is None:
+            section.form.addRow(lbl, widget)
+        else:
+            box = QWidget()
+            box.setObjectName("InspectorLabelBox")
+            h = QHBoxLayout(box)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(5)
+            mark = QLabel()
+            mark.setObjectName("InspectorLabelGlyph")
+            pm = line_pixmap(glyph, self._icon_color, 32)
+            pm.setDevicePixelRatio(2.0)
+            mark.setPixmap(pm)
+            h.addWidget(mark)
+            h.addWidget(lbl)
+            h.addStretch(1)
+            section.form.addRow(box, widget)
         self._fields[label] = key if key is not None else widget
 
     def _section(self, title: str) -> _Section:
@@ -322,6 +394,7 @@ class PropertiesDock(QDockWidget):
 
     def _rebuild(self) -> None:
         self._clear_body()
+        self._built_key = self._structure_key()
         if not self._items:
             self._build_empty()
             self._body_layout.addStretch(1)
@@ -384,6 +457,8 @@ class PropertiesDock(QDockWidget):
                 self._add_text_rows(self._section("Text"))
             elif issubclass(cls, GdtAnnotationItem):
                 self._add_gdt_rows(self._section("GD&T frame"))
+            elif issubclass(cls, DimensionItem):
+                self._add_dimension_rows(self._section("Dimension"))
             elif issubclass(cls, StampItem):
                 self._add_stamp_rows(self._section("Stamp"))
             elif issubclass(cls, FreehandItem):
@@ -417,6 +492,21 @@ class PropertiesDock(QDockWidget):
             lambda v: self.strokePicked.emit(float(v))
         )
         self._add_row(nxt, "Stroke", stroke, key=stroke.spin)
+
+        if self._doc_rows is not None:
+            doc = self._section("Document")
+            for label, value in self._doc_rows:
+                v = QLabel(value, doc)
+                v.setWordWrap(True)
+                v.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                self._add_row(doc, label, v)
+            more = QPushButton("Document properties", doc)
+            more.setObjectName("InspectorButton")
+            more.setIcon(line_icon("file", self._icon_color))
+            more.setToolTip("Pages, sizes and metadata (Alt+Enter)")
+            more.clicked.connect(self.documentPropertiesRequested)
+            doc.form.addRow(more)
+            self._fields["Document properties"] = more
 
         tips = self._section("Good to know")
         for key, text in _TIPS:
@@ -521,20 +611,24 @@ class PropertiesDock(QDockWidget):
 
     def _add_arrow_rows(self, sec: _Section) -> None:
         first = self._items[0]
+        # The start's previews are mirrored (decoration on the left),
+        # and each row carries the mark its handle has on the canvas.
         c1 = self._enum_combo(
-            _END_LABELS, first.start_end(), icon_for=end_icon
+            _END_LABELS,
+            first.start_end(),
+            icon_for=lambda st, color: end_icon(st, color=color, mirrored=True),
         )
         c1.currentIndexChanged.connect(
             lambda _i, c=c1: self._push_prop("start_end", c.currentData())
         )
-        self._add_row(sec, "Start", c1)
+        self._add_row(sec, "Start", c1, glyph="line-start")
         c2 = self._enum_combo(
             _END_LABELS, first.end_end(), icon_for=end_icon
         )
         c2.currentIndexChanged.connect(
             lambda _i, c=c2: self._push_prop("end_end", c.currentData())
         )
-        self._add_row(sec, "End", c2)
+        self._add_row(sec, "End", c2, glyph="line-end")
 
     # ------------------------------------------------------------------
     # kind-variant rows (Discussion #1, item 3: merged tools)
@@ -589,7 +683,10 @@ class PropertiesDock(QDockWidget):
             edit.setPlaceholderText("Optional")
             edit.setText(str(getattr(first, prop)()))
             self._wire_live_prop(edit, prop, is_line_edit=True, transform=str)
-            self._add_row(sec, title, edit)
+            self._add_row(
+                sec, title, edit,
+                glyph="line-start" if prop == "start_label" else "line-end",
+            )
             combo = self._enum_combo(
                 TEXT_BORDER_LABELS, getattr(first, border_prop)()
             )
@@ -703,6 +800,113 @@ class PropertiesDock(QDockWidget):
         size.setValue(int(first.font_size()))
         self._wire_live_prop(size, "font_size", transform=int)
         self._add_row(sec, "Size", size)
+
+    def _add_dimension_rows(self, sec: _Section) -> None:
+        """What is measured, the value (measured or typed), how it is
+        written, the ends and where the dimension line runs."""
+        first = self._items[0]
+        single = len(self._items) == 1
+        if single:
+            value = QLabel(f"{first.value_text()} mm", sec)
+            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            value.setToolTip(
+                "Length measured on the sheet between the two points"
+            )
+            self._add_row(sec, "Measured", value)
+            if not first.is_measured():
+                reset = QPushButton("Use measured value", sec)
+                reset.setObjectName("InspectorButton")
+                reset.setIcon(line_icon("dimension", self._icon_color))
+                reset.setToolTip(
+                    f"The text was typed by hand; show {first.value_text()} "
+                    "again (double-click the value to edit it)"
+                )
+                reset.clicked.connect(
+                    lambda _c=False, it=first: self._push_command(
+                        ChangePropsCommand(
+                            [(it, "value_runs", it.value_runs(),
+                              [dict(VALUE_RUN)])],
+                            label="Use measured value",
+                        )
+                    )
+                )
+                sec.form.addRow(reset)
+                self._fields["Use measured value"] = reset
+
+            seg = SegmentedControl(
+                [
+                    (o, {"Horizontal": "Horiz.", "Vertical": "Vert."}.get(
+                        label, label), None,
+                     f"{label}: " + {
+                         DimOrientation.ALIGNED: "the true distance",
+                         DimOrientation.HORIZONTAL: "the horizontal distance",
+                         DimOrientation.VERTICAL: "the vertical distance",
+                     }[o])
+                    for o, label in DIM_ORIENTATION_LABELS
+                ],
+                sec,
+            )
+            seg.set_value(first.orientation())
+            seg.valueChanged.connect(
+                lambda v, it=first: self._switch_dim_orientation(it, v)
+            )
+            self._add_row(sec, "Measure", seg)
+
+        mm = first.value_mm()
+        decimals = self._enum_combo(
+            [(n, format_mm(mm, n) if single else f"{n} decimals")
+             for n in range(4)],
+            None,
+        )
+        decimals.setCurrentIndex(first.decimals())
+        decimals.setToolTip("Decimal places of the measured value")
+        decimals.currentIndexChanged.connect(
+            lambda _i, c=decimals: self._push_prop("decimals", c.currentData())
+        )
+        self._add_row(sec, "Rounding", decimals)
+
+        ends = self._enum_combo(
+            DIM_END_LABELS, first.end_style(), icon_for=end_icon
+        )
+        ends.currentIndexChanged.connect(
+            lambda _i, c=ends: self._push_prop("end_style", c.currentData())
+        )
+        self._add_row(sec, "Ends", ends)
+
+        size = QSpinBox()
+        size.setRange(4, 96)
+        size.setSuffix(" pt")
+        size.setValue(int(first.font_size()))
+        self._wire_live_prop(size, "font_size", transform=int)
+        self._add_row(sec, "Text size", size)
+
+        if single:
+            gap = self._unit_spin(
+                px_to_pt(abs(first.offset())), minimum_pt=0.0,
+                maximum_pt=100000.0,
+            )
+            gap.setToolTip(
+                "Distance from the first point to the dimension line"
+            )
+            sign = -1.0 if first.offset() < 0 else 1.0
+            self._wire_live_geom(
+                gap,
+                lambda v, it=first, sg=sign: it.set_offset(
+                    sg * pt_to_px(self._to_pt(v))
+                ),
+                first.geom_snapshot,
+                lambda orig, it=first: self._commit_resize(it, orig),
+            )
+            self._add_row(sec, "Offset", gap)
+
+    def _switch_dim_orientation(self, item, orientation) -> None:  # noqa: ANN001
+        old = item.geom_snapshot()
+        item.switch_orientation(orientation)
+        new = item.geom_snapshot()
+        if new != old:
+            self._push_command(
+                ResizeCommand(item, old, new, label="Dimension orientation")
+            )
 
     def _add_gdt_rows(self, sec: _Section) -> None:
         first = self._items[0]
@@ -829,19 +1033,62 @@ class PropertiesDock(QDockWidget):
             )
             self._add_row(sec, "Height", h_spin)
 
+        if bend_radius.has_corners(item):
+            self._add_bend_radius_row(sec, item)
+
+    def _add_bend_radius_row(self, sec: _Section, item: AnnotationItem) -> None:
+        """One radius for every bend of the item (lines, polylines,
+        polygons, the leaders of texts and GD&T frames). When the bends
+        differ, the field shows the largest and a value typed here still
+        applies to all; a single bend's radius is set from its context
+        menu."""
+        common = bend_radius.common_radius(item)
+        shown = common if common is not None else max(bend_radius.radii(item))
+        spin = self._unit_spin(
+            px_to_pt(shown), minimum_pt=0.0, maximum_pt=1000.0
+        )
+        spin.setSingleStep(0.5 if self._unit == "mm" else 1.0)
+        if common is None:
+            spin.setToolTip(
+                "The bends have different radii; a value here applies to "
+                "every bend. Right-click a bend for its own radius."
+            )
+        else:
+            spin.setToolTip(
+                "Rounds every bend (0: sharp corners). Right-click a bend "
+                "for its own radius."
+            )
+        self._wire_live_geom(
+            spin,
+            lambda v: bend_radius.set_all_radii(
+                item, pt_to_px(self._to_pt(v))
+            ),
+            item.geom_snapshot,
+            lambda orig: self._commit_resize(item, orig),
+        )
+        self._add_row(sec, "Bend radius", spin)
+
     # ------------------------------------------------------------------
     # arrange + footer
     # ------------------------------------------------------------------
-    def _action_button(self, key: str, text: str, glyph: str) -> QPushButton | None:
+    def _action_button(
+        self, key: str, text: str, glyph: str, icon_only: bool = False
+    ) -> QPushButton | None:
+        """A button mirroring `self._actions[key]`; `text` also keys it in
+        `field()` when the button shows only its icon."""
         act = self._actions.get(key)
         if act is None:
             return None
-        b = QPushButton(text)
+        b = QPushButton("" if icon_only else text)
         b.setObjectName("InspectorButton")
         b.setIcon(line_icon(glyph, self._icon_color))
         b.setEnabled(act.isEnabled())
         tip = act.toolTip() or text
+        keys = act.shortcut().toString(QKeySequence.NativeText)
+        if keys:
+            tip = f"{tip} ({keys})"
         b.setToolTip(tip)
+        b.setAccessibleName(text)
         if act.isCheckable():
             b.setCheckable(True)
             b.setChecked(act.isChecked())
@@ -852,9 +1099,13 @@ class PropertiesDock(QDockWidget):
         return b
 
     def _add_arrange_section(self) -> None:
+        # Stacking order, bottom to top like the context menu's Order
+        # row: icon-only so the four fit on one line (tooltips name them).
         buttons = [
-            self._action_button("bring_front", "To front", "to-front"),
-            self._action_button("send_back", "To back", "to-back"),
+            self._action_button("send_back", "To back", "to-back", icon_only=True),
+            self._action_button("lower_one", "Backward", "lower", icon_only=True),
+            self._action_button("raise_one", "Forward", "raise", icon_only=True),
+            self._action_button("bring_front", "To front", "to-front", icon_only=True),
         ]
         painter = (
             self._action_button("format_painter", "Copy style", "brush")

@@ -293,18 +293,32 @@ def test_footer_and_gdt_edit_emit_signals(dock) -> None:
 def test_arrange_buttons_trigger_actions(dock) -> None:
     d, _stack = dock
     front, back = QAction("Bring to Front"), QAction("Send to Back")
+    up, down = QAction("Bring Forward"), QAction("Send Backward")
     painter = QAction("Format Painter")
     painter.setCheckable(True)
     fired: list[str] = []
     front.triggered.connect(lambda: fired.append("front"))
     back.triggered.connect(lambda: fired.append("back"))
-    d.set_actions(bring_front=front, send_back=back, format_painter=painter)
+    up.triggered.connect(lambda: fired.append("up"))
+    down.triggered.connect(lambda: fired.append("down"))
+    d.set_actions(
+        bring_front=front,
+        send_back=back,
+        raise_one=up,
+        lower_one=down,
+        format_painter=painter,
+    )
     d.set_items([RectangleItem(QRectF(0, 0, 9, 9))])
     d.field("To front").click()
     d.field("To back").click()
+    d.field("Forward").click()
+    d.field("Backward").click()
     d.field("Copy style").click()
-    assert fired == ["front", "back"]
+    assert fired == ["front", "back", "up", "down"]
     assert painter.isChecked()
+    # Icon-only buttons, named by their tooltip.
+    assert d.field("Forward").text() == ""
+    assert "Bring Forward" in d.field("Forward").toolTip()
 
 
 # ----------------------------------------------------------------------

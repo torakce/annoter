@@ -21,6 +21,7 @@ Standalone, install-free, single-user PDF annotator for **mechanical engineering
 - Base render DPI: **150 DPI** (good lisibility/RAM trade-off; ~3500x5000 px on A0, ~50 MB RGBA).
 - High-DPI re-render: **hysteretic** -- above 200 % zoom the page is re-rasterized at 300 DPI, below 150 % it drops back to base DPI. The supersampled pixmap carries a `devicePixelRatio` equal to the scale factor, so its *logical* scene size is unchanged: child annotations, undo history and the save path are unaffected. No re-parenting step needed.
 - LRU pixmap cache: **3 pages** (current + previous + next). Sufficient given drawings have few pages.
+- *Planned (2026-11, branch `perf/lire-engine`, awaiting validation)*: on-screen display moves to a native tiled engine taken from Lire; this PyMuPDF path stays as the fallback. See "Native display engine from Lire" below.
 
 ### Annotations
 - All annotation `QGraphicsItem`s are children of the current page's `QGraphicsPixmapItem` (page-local coordinates).
@@ -1882,6 +1883,371 @@ is geometry.
   menu, in-place value edit, inspector); `test_tool_rail.py` and
   `test_quick_styles.py` updated (the rail has 11 tools again). Full
   run: 687 passed.
+
+### Native display engine from Lire (2026-11) -- PROPOSAL, awaiting validation
+
+Branch `perf/lire-engine` (from v0.3.0, `e084bd7`). Goal: make page
+*display* as fast as the user's viewer Lire (public repo `torakce/Lire`
+v1.2.1, C + Win32 + OpenGL) by plugging Lire's rendering engine into
+Annoter. Annotation features do not change. **No code is written before
+the user validates this section** (tree, C API, steps).
+
+Approved exception to the stack rule (user, 2026-11-09): PyMuPDF is no
+longer mandated for **on-screen page display only**. It stays in charge
+of reading/writing annotations, saving, page operations, thumbnails,
+image export and everything else that is not performance-critical.
+
+#### Audit of the current display (v0.3.0)
+
+- **Path**: `PageRenderer.render()` rasterizes the whole page with
+  `page.get_pixmap()` on the UI thread, into a `QGraphicsPixmapItem`.
+  150 DPI below 200 % zoom, the whole page again at 300 DPI above it
+  (hysteresis down at 150 %), and past that a viewport-sized
+  `render_clip()` overlay re-rendered 150 ms after every zoom or pan.
+  The 3-page LRU holds full pages only.
+- **Cost on an A0 plan** (3370 x 2384 pt): 150 DPI = 7022 x 4967 px =
+  35 Mpx, about 133 MB once converted to a `QPixmap` (the "~3500 x 5000
+  px, ~50 MB" estimate in "Rendering & cache" above is A0 at ~75 DPI);
+  300 DPI = 139 Mpx, about 530 MB, rendered synchronously. Every render
+  and every overlay re-interprets the page content from scratch (no
+  display list is kept), so on a heavy CATIA page each pan stop at deep
+  zoom pays the full parse again. Page thumbnails (`render_thumbnail`)
+  also parse each page on the UI thread, one per event-loop tick.
+- **Annotations** (checked by running v0.3.0 offscreen on generated
+  PDFs, scripts kept out of the repo):
+  1. Pages are rendered with `annots=True` (PyMuPDF default) **and** every
+     annotation `read_annotations` understands is drawn again as an
+     editable Qt item on top. The two coincide only until the user edits:
+     moving or deleting an existing annotation leaves its rasterized copy
+     in place (a "ghost") until the next save.
+  2. Stroke widths are written to the PDF as points (`set_border(width=
+     item.stroke())`) but drawn by the items in scene units (150-DPI
+     pixels). After a save + reopen, the rasterized copy of a rectangle,
+     line, polygon... is therefore 150/72 = 2.08x thicker than the Qt
+     item drawn over it, and the thicker one is what the user sees.
+     Acrobat/Foxit show the thick version too. (Pre-existing persistence
+     issue, outside this work; listed here because hiding the raster copy
+     makes it visible.)
+  3. A foreign `Stamp` (e.g. Acrobat "Approved") shows both its own
+     appearance and Annoter's `StampItem` label, at different sizes.
+  4. Subtypes `read_annotations` does not map (Highlight, Underline,
+     StrikeOut, Squiggly, Caret, FileAttachment, Redact, form fields...)
+     are visible **only** through the page raster: the engine must keep
+     drawing them.
+- **Documents that exist only in memory**: Insert Pages, Move Page
+  and Resize Document change the `fitz.Document` in memory
+  (saved later); blank and image documents are scratch files. The engine
+  must therefore be able to load a document from a byte buffer.
+- **Windows file locking**: Save replaces the file after closing the
+  PyMuPDF document. An engine that kept the file open would make that
+  replace fail.
+
+#### What is reused from Lire
+
+`src/core.c` (engine part only; Lire's window, tabs, UI text and OpenGL
+drawing are dropped), `src/thread.h`, `patches/mupdf-1.28.6-lire.patch`,
+the build options of `build.sh` and the ideas of `tests/genpdf.py` and
+the "interactif" scenario of `tests/harness.c`:
+
+- MuPDF 1.28.6 with Lire's patch: direct drawing of thin and medium
+  strokes (8-10x faster), display-list replay without the global lock,
+  per-thread glyph cache, ~30 % faster parsing,
+  `fz_display_list_memory()`. ICC off, 64-level line anti-aliasing,
+  full text anti-aliasing (Lire's settings).
+- One display list per page, built once; pages analysed by several
+  loader threads, each with its own document instance, the displayed
+  page first.
+- 512 px tiles rendered in parallel on all cores (render threads below
+  normal priority), cancelled through `fz_cookie.abort` as soon as they
+  are no longer useful.
+- Zoom levels on the wheel grid (x 2^(1/3) per notch); fit page, 100 %
+  and zoom window rendered exactly.
+- Prefetch once the view is sharp: ring around the viewport, next and
+  previous zoom notch, rest of the page at the current level, then the
+  neighbouring pages.
+- Memory budgets proportional to RAM, eviction by age then by distance
+  to the current level / page.
+
+#### Decisions proposed
+
+- **D1 -- one native library, nothing else exported.** C, built with
+  mingw-w64 like Lire (`x86_64-w64-mingw32-gcc`, cross from Linux/WSL, or
+  MSYS2 on Windows), MuPDF and its third-party libraries linked
+  statically. Windows: exports limited by a `.def` file to the `ann_*`
+  functions. Linux build (for tests and CI): version script with
+  `ann_*` global and everything else local, plus
+  `-Wl,--exclude-libs,ALL`. A test loads PyMuPDF and the engine in the
+  same process and checks that both render, and that the library exports
+  nothing but `ann_*`.
+- **D2 -- two display lists per page.** *Content* (the page content
+  stream, expensive, built once) and *overlay* (annotations not drawn by
+  Annoter, then form widgets: MuPDF's own order). Changing which
+  annotations are hidden only rebuilds the cheap overlay list and the
+  tiles of that page.
+- **D3 -- annotation rule (to validate, see the question at the end).**
+  - *Option A (recommended)*: the engine draws the page plus every
+    annotation that does **not** become a Qt item; every annotation that
+    `read_annotations` turns into an item (and Annoter's companion
+    annotations) is hidden from the engine, by PDF object number
+    (`annot.xref`). No duplicates, no ghosts. On screen, each annotation
+    looks exactly as Annoter draws it while editing. Differences with
+    what v0.3.0 shows after a reopen: thinner strokes (finding 2) and
+    foreign stamps shown with Annoter's label only (finding 3).
+  - *Option B*: as A for Annoter's own annotations, but foreign
+    annotations keep their native appearance (drawn by the engine) until
+    the user modifies or deletes them; their Qt item only draws its
+    selection handles meanwhile. Closer to v0.3.0's look for Acrobat /
+    Foxit markups, more code in the item base class.
+- **D4 -- wheel zoom on the 2^(1/3) grid.** `ZOOM_STEP` 1.25 -> 2^(1/3)
+  (1.26), and Ctrl+wheel / Ctrl+plus / Ctrl+minus snap to the grid so a
+  notch lands on tiles already computed or prefetched. Fit page, 100 %
+  and zoom window stay exact. Same steps whichever renderer is active.
+- **D5 -- the engine never keeps the file open.** `ann_open_file` reads
+  the file into memory (one shared buffer for all loader instances);
+  Save can replace it. After Save / Save As the engine reloads (Annoter
+  reopens the document anyway); after an in-memory page operation it
+  reloads from `fitz.Document.tobytes()` (object numbers kept, so the
+  hidden-annotation lists stay valid).
+- **D6 -- the PyMuPDF path stays as a fallback** (library missing or
+  failing to load, document the engine cannot open, or environment
+  variable `ANNOTER_RENDERER=pymupdf`). It is also the "before" reference
+  for the measurements. `set_page_pixmap`, `PageRenderer`, the 150/300
+  DPI switch and the hi-res overlay are kept unchanged for that path
+  (24 test files build scenes with `set_page_pixmap`).
+- **D7 -- memory budgets**, start values to tune after measurement:
+  tiles RAM/12 (max 1 GB), display lists RAM/10 (max 2 GB), i.e. a bit
+  below Lire because Annoter and PyMuPDF also hold memory. 32 GB PC:
+  1 GB + 2 GB; 8 GB PC: 0.67 GB + 0.8 GB. Overridable by
+  `ANNOTER_ENGINE_TILE_MB` / `ANNOTER_ENGINE_LIST_MB` /
+  `ANNOTER_ENGINE_THREADS` (also used to emulate a modest PC).
+- **D8 -- MuPDF build options as Lire**: PDF only (no XPS/EPUB/HTML/SVG),
+  no JavaScript, no Noto fallback fonts. Risk: a PDF relying on
+  non-embedded CJK fonts would show missing glyphs where PyMuPDF has a
+  fallback. Checked in step 3; if it matters, the fallback fonts go back
+  in (larger library).
+- **D9 -- unchanged**: encrypted PDFs are still refused by `PdfDocument`
+  (the C API takes a password for later use), rotation stays view-only,
+  thumbnails, start page and image export keep using PyMuPDF (an engine
+  thumbnail path is an optional step, only if the measurements show the
+  thumbnail strip slowing the first display).
+
+#### File tree (proposal)
+
+New:
+
+    native/
+      include/annoter_engine.h      public C API: the only exported symbols (ann_*)
+      src/engine.c                  documents, page analysis, loader and render threads,
+                                    tile scheduler, prefetch, cache, eviction (from Lire core.c)
+      src/thread.h                  Win32 / POSIX threads (from Lire)
+      src/exports.def               Windows export list
+      src/exports.map               Linux version script
+      patches/mupdf-1.28.6-lire.patch   Lire's MuPDF patch, published as AGPL v3 requires
+      build_engine.py               fetch MuPDF 1.28.6, apply the patch, build MuPDF (PDF only)
+                                    and the engine: --target win64 | linux
+    src/annoter/engine/
+      __init__.py                   load_engine(): locate and load the library, None if unavailable
+      native.py                     ctypes declarations, NativeEngine / NativeDocument wrappers
+      bin/                          built library (gitignored; filled by build_engine.py or CI)
+    src/annoter/views/tiled_page_item.py      TiledPageItem: the page as tiles, same logical size
+    src/annoter/controllers/page_display.py   EngineDisplay: engine document, poll timer,
+                                              view requests, prefetch, reload, hidden annots
+    tools/genplans.py               synthetic heavy plans (from Lire tests/genpdf.py)
+    tools/bench_display.py          before/after scenario, prints the comparison table
+    tests/test_engine_native.py     ctypes interface
+    tests/test_tiled_page_item.py   tiled page item
+    tests/test_engine_annots.py     annotation rule and visual parity
+
+Modified: `views/main_window.py` (wiring), `views/pdf_scene.py` (accept a
+tiled page item next to `set_page_pixmap`), `views/pdf_view.py` (zoom
+grid), `services/pdf_export.py` (`read_annotations` also reports the
+object numbers it turned into items), `config.py`, `build.py`,
+`.github/workflows/release.yml`, `.gitignore`, `CLAUDE.md`, `PLAN.md`.
+
+#### C API (proposal)
+
+All calls come from one thread (Qt's UI thread). The engine's threads
+never call back: Qt polls with a `QTimer` that runs only while the
+engine reports work in progress. ctypes releases the GIL during calls.
+
+    #define ANN_API_VERSION 1
+    enum { ANN_OK = 0, ANN_ERR_ARG = -1, ANN_ERR_OPEN = -2, ANN_ERR_PASSWORD = -3,
+           ANN_ERR_MEMORY = -4, ANN_ERR_PAGE = -5 };
+    enum { ANN_FLAG_GRAYSCALE = 1 };
+
+    typedef struct ann_engine ann_engine;   /* threads, budgets (one per process) */
+    typedef struct ann_doc ann_doc;         /* one open document */
+
+    typedef struct {
+        int render_threads;                 /* 0 = auto: cores - 1, at least 1 */
+        int loader_threads;                 /* 0 = auto: cores / 4, 1 to 3 */
+        long long tile_budget;              /* bytes, 0 = auto (RAM-proportional) */
+        long long list_budget;              /* bytes, 0 = auto */
+    } ann_config;
+
+    int         ann_api_version(void);
+    ann_engine *ann_engine_new(const ann_config *cfg);    /* NULL on failure */
+    void        ann_engine_free(ann_engine *e);           /* aborts work, joins threads */
+
+    /* Open: the file is read into memory and never kept open. */
+    ann_doc *ann_open_file(ann_engine *e, const char *utf8_path, const char *password, int *status);
+    ann_doc *ann_open_memory(ann_engine *e, const void *data, size_t size,
+                             const char *password, int *status);           /* data is copied */
+    int  ann_reload_file(ann_doc *d, const char *utf8_path, const char *password);  /* after Save */
+    int  ann_reload_memory(ann_doc *d, const void *data, size_t size, const char *password);
+    void ann_close(ann_doc *d);
+
+    int  ann_page_count(ann_doc *d);
+    int  ann_page_bounds(ann_doc *d, int page, float rect[4]);  /* points, frame of PyMuPDF page.rect */
+
+    /* Annotations Annoter draws as Qt items (PDF object numbers): never rasterized. */
+    int  ann_set_hidden_annots(ann_doc *d, int page, const int *xrefs, int count);
+    int  ann_set_flags(ann_doc *d, int flags);                 /* drops the tiles */
+
+    /* What is on screen. Replaces the previous request; work no longer useful is aborted. */
+    typedef struct {
+        int    page;
+        int    rotation;            /* view rotation 0/90/180/270, on top of /Rotate */
+        double scale;               /* device pixels per PDF point, as displayed */
+        double grid_base;           /* device px per point at 100 % (devicePixelRatio) */
+        int    exact;               /* 1: render exactly at scale (fit, 100 %, zoom window) */
+        float  visible[4];          /* visible part, points, rotated page frame */
+        int    prefetch_pages[2];   /* neighbours to prepare, -1 = none */
+    } ann_view;
+    typedef struct {
+        int    level;               /* tile level actually rendered for this view */
+        double scale;               /* its device pixels per point */
+        int    box[4];              /* page box at that level, pixels (tile grid origin) */
+        int    tile_size;           /* 512 */
+    } ann_target;
+    int  ann_request_view(ann_doc *d, const ann_view *v, ann_target *out);
+
+    /* Finished tiles, most urgent first: premultiplied BGRA, opaque. Qt copies the
+       pixels into a QPixmap, then releases the buffer. The engine keeps the
+       bookkeeping (what exists, budget, eviction) and reports evicted tiles. */
+    typedef struct {
+        long long id;
+        int      page, level, rotation, tx, ty;
+        unsigned epoch;             /* bumped by reload / hidden annots / flags */
+        int      x0, y0, x1, y1;    /* pixels of the rotated page at `scale` */
+        double   scale;
+        int      stride;
+        const unsigned char *pixels;  /* valid until ann_release_tile */
+    } ann_tile;
+    int  ann_poll(ann_doc *d, ann_tile *out, int max);
+    void ann_release_tile(ann_doc *d, long long id);
+    int  ann_poll_evicted(ann_doc *d, long long *ids, int max);
+
+    int  ann_busy(ann_doc *d);            /* 1 while anything is pending, prefetch included */
+    int  ann_view_complete(ann_doc *d);   /* 1 when every visible tile is sharp */
+    void ann_cancel(ann_doc *d);          /* drop queued work, abort renders, keep the cache */
+    void ann_stats(ann_doc *d, char *buf, int size);   /* diagnostics */
+
+#### Qt side
+
+- **`TiledPageItem(QGraphicsItem)`** replaces the `QGraphicsPixmapItem` of
+  the page when the engine is active, and is reused across pages like
+  the pixmap item today. `boundingRect()` is exactly the logical rect of
+  the old pixmap (page box at 150 DPI, rotated, rounded like
+  `get_pixmap`): scene units stay 150-DPI pixels. It keeps the tiles
+  handed over by the engine (`QPixmap`, keyed by page / level / tile /
+  epoch) and, in `paint()`, draws for the exposed rect: white page, then
+  -- only where the target level is incomplete -- the low-resolution
+  preview and the tiles of other levels stretched (furthest level first,
+  closest on top), then the sharp tiles, aligned on device pixels. No
+  mouse handling of its own (same as the pixmap item).
+- **`EngineDisplay(QObject)`** owns the engine document of the open
+  file, builds the view request from `PdfView` (zoom, scroll, viewport,
+  devicePixelRatio, rotation), asks for the previous / next page as
+  prefetch, polls while the engine is busy, updates only the rects of
+  the tiles that arrived, forgets evicted tiles, reloads after Save and
+  after page operations, passes the grayscale flag and the hidden
+  annotations.
+- **Invariants of CLAUDE.md**:
+
+  | Invariant | With the engine |
+  |---|---|
+  | Annotations are children of the page item, page-local coordinates | unchanged: `TiledPageItem` is that parent; `detach_children` / `attach_children` unchanged |
+  | `factor = 1.0` is real size; view scale = `factor * 72 / render_dpi` | unchanged (`render_dpi` stays `BASE_RENDER_DPI` = scene unit) |
+  | DPI changes never swap the page item nor rescale geometry | holds trivially: no DPI switch at all, tiles are placed in logical coordinates |
+  | Every scene mutation goes through a `QUndoCommand` | untouched |
+  | Save path (`write_annotations(..., BASE_RENDER_DPI)`) | untouched |
+  | Rotation is view-only | unchanged (engine renders the rotated page, annotations do not follow, as today) |
+
+#### Steps (each ends with a validation by the user)
+
+0. *Done*: folders compared (Annoter-V2 = GitHub v0.3.0 chosen), audit
+   above, branch created, this proposal.
+1. **Scaffold and "before"**: empty / docstring-only files of the tree;
+   `tools/genplans.py` (15 A0 pages, about 2 MB per page, CATIA-like:
+   polylines, circles, hatching, dimensions, lots of small text; plus a
+   copy carrying Annoter and foreign annotations) and
+   `tools/bench_display.py`; pytest baseline on Python 3.12; "before"
+   measurements on the PyMuPDF path (in my environment and on the
+   user's PC). *Validation: tree in place, before table.*
+2. **Engine in C** (`native/`), Windows DLL and Linux library builds,
+   symbol check, C-level pixel check against PyMuPDF.
+3. **ctypes interface** + `tests/test_engine_native.py`: open / close,
+   page count and bounds equal to PyMuPDF's, tile pixels close to
+   PyMuPDF's render of the same area, hidden annotations, reload,
+   cancel, errors (missing file, wrong password, damaged PDF), PyMuPDF
+   and engine in the same process. *Validation: engine usable from
+   Python.*
+4. **Tiled page item and wiring**: `TiledPageItem`, `EngineDisplay`,
+   `MainWindow` / `PdfScene` / `PdfView` changes, zoom grid, fallback.
+   `tests/test_tiled_page_item.py` (geometry identical to the pixmap
+   item for several sizes and rotations, children and coordinates,
+   undo, save, stretched fallback while tiles arrive, tile placement).
+   The existing suite passes with the engine and with
+   `ANNOTER_RENDERER=pymupdf`. *Validation: the user tries it on real
+   plans.*
+5. **Annotations**: hidden-annotation rule per the chosen option,
+   `tests/test_engine_annots.py` (screen render with items compared to
+   v0.3.0's, differences limited to the documented ones; unmapped
+   subtypes still drawn; no ghost after move / delete). *Validation:
+   visual check.*
+6. **Packaging**: `build.py` bundles the library (onefile and onedir),
+   `--smoke` reports which renderer started; `release.yml` gains a job
+   that builds the DLL (Ubuntu, mingw-w64, MuPDF sources cached) and
+   hands it to the Windows job; the MuPDF patch is in `native/patches/`.
+   *Validation: a manual workflow run on the branch (needs the branch on
+   GitHub).*
+7. **"After" measurements and tuning** (budgets, threads), comparison
+   table, `CLAUDE.md` invariants and this section rewritten as decisions
+   taken. *Validation: merge into master -- asked, never done without
+   the user's go; same for any release.*
+
+#### Measurement protocol
+
+Same scenario on the PyMuPDF path ("before") and the engine ("after"),
+same build, real window. After each action the bench waits for the view
+to settle (prefetch included) before the next one, like someone reading
+the plan, as Lire's "interactif" scenario. Measured: time until the
+visible area is sharp, and the longest UI freeze.
+
+| Action | Detail |
+|---|---|
+| Open -> sharp page | file opened, page 1 at "fit page" |
+| 1 wheel notch | Ctrl+wheel at a detail, from ~300 % |
+| Pan | drag of 800 x 400 px at that zoom |
+| Next page | PageDown at that zoom |
+| Back to whole page | Ctrl+0 |
+
+Runs: synthetic plans in my environment (2 slow cores), then on the
+user's PC (full core count, and limited to 2 threads / 8 GB budgets to
+stand in for a modest PC). Real plans stay on the user's PC.
+
+#### Open points for the user
+
+- D3: option A or B for foreign annotations.
+- D4: wheel step 1.25 -> 1.26 with snapping (needed for instant notches).
+- Licence: the engine links MuPDF (AGPL v3) like PyMuPDF already does;
+  the repository is public and the patch will be published. The
+  `license = "Proprietary"` field of `pyproject.toml` predates this work
+  and is worth a look on the user's side.
+- My Python 3.13 environment crashes in `test_canvas_handles.py` with
+  v0.3.0 unchanged; step 1 re-runs the baseline on Python 3.12, the
+  version the project targets.
 
 ### Known remaining issues
 

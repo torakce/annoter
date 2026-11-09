@@ -10,11 +10,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Annoter** is a Windows-first (portable to Linux/macOS) standalone PDF annotation tool for **mechanical engineering drawings** (A0/A1 plans, files >100 MB). Single-user, local, no install, no admin rights. Annotations are persisted **directly inside the PDF using standard PDF annotation types** (no sidecar file) so they open in Acrobat/Foxit. Ships as a PyInstaller `--onefile` `.exe` and a `--onedir` portable zip.
 
-## Stack (mandated — do not substitute)
+## Stack (mandated — do not substitute, except the display exception below)
 
 - Python 3.12 (CPython embedded for packaging)
 - PySide6 (Qt 6, LGPL)
-- PyMuPDF (`fitz`) — both rendering and annotation I/O
+- PyMuPDF (`fitz`) — annotation I/O, saving, page operations, thumbnails, image export, and the fallback page display
+- **Display exception (approved by the user, 2026-11-09)**: on-screen page display may go through a native engine taken from the user's viewer Lire (C, MuPDF 1.28.6 with Lire's patches, statically linked in one library exporting only `ann_*`, loaded with ctypes). The exception covers display only; PyMuPDF keeps everything else. Design and status: PLAN.md, "Native display engine from Lire" (branch `perf/lire-engine`).
 - Pillow (image utilities)
 - PyInstaller — both `--onefile` and `--onedir`
 - pytest

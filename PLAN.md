@@ -21,7 +21,7 @@ Standalone, install-free, single-user PDF annotator for **mechanical engineering
 - Base render DPI: **150 DPI** (good lisibility/RAM trade-off; ~3500x5000 px on A0, ~50 MB RGBA).
 - High-DPI re-render: **hysteretic** -- above 200 % zoom the page is re-rasterized at 300 DPI, below 150 % it drops back to base DPI. The supersampled pixmap carries a `devicePixelRatio` equal to the scale factor, so its *logical* scene size is unchanged: child annotations, undo history and the save path are unaffected. No re-parenting step needed.
 - LRU pixmap cache: **3 pages** (current + previous + next). Sufficient given drawings have few pages.
-- *Planned (2026-11, branch `perf/lire-engine`, awaiting validation)*: on-screen display moves to a native tiled engine taken from Lire; this PyMuPDF path stays as the fallback. See "Native display engine from Lire" below.
+- *Planned (2026-11, branch `perf/lire-engine`, validated 2026-11-23, in progress)*: on-screen display moves to a native tiled engine taken from Lire; this PyMuPDF path stays as the fallback. See "Native display engine from Lire" below.
 
 ### Annotations
 - All annotation `QGraphicsItem`s are children of the current page's `QGraphicsPixmapItem` (page-local coordinates).
@@ -1884,13 +1884,15 @@ is geometry.
   `test_quick_styles.py` updated (the rail has 11 tools again). Full
   run: 687 passed.
 
-### Native display engine from Lire (2026-11) -- PROPOSAL, awaiting validation
+### Native display engine from Lire (2026-11) -- validated, in progress
 
 Branch `perf/lire-engine` (from v0.3.0, `e084bd7`). Goal: make page
 *display* as fast as the user's viewer Lire (public repo `torakce/Lire`
 v1.2.1, C + Win32 + OpenGL) by plugging Lire's rendering engine into
-Annoter. Annotation features do not change. **No code is written before
-the user validates this section** (tree, C API, steps).
+Annoter. Annotation features do not change.
+
+**Validated by the user on 2026-11-23**: file tree, C API and steps as
+below; D3 = option A; D4 accepted (wheel step 2^(1/3) with snapping).
 
 Approved exception to the stack rule (user, 2026-11-09): PyMuPDF is no
 longer mandated for **on-screen page display only**. It stays in charge
@@ -1984,7 +1986,7 @@ the "interactif" scenario of `tests/harness.c`:
   Annoter, then form widgets: MuPDF's own order). Changing which
   annotations are hidden only rebuilds the cheap overlay list and the
   tiles of that page.
-- **D3 -- annotation rule (to validate, see the question at the end).**
+- **D3 -- annotation rule: option A chosen (2026-11-23).**
   - *Option A (recommended)*: the engine draws the page plus every
     annotation that does **not** become a Qt item; every annotation that
     `read_annotations` turns into an item (and Annoter's companion
@@ -1998,7 +2000,7 @@ the "interactif" scenario of `tests/harness.c`:
     the user modifies or deletes them; their Qt item only draws its
     selection handles meanwhile. Closer to v0.3.0's look for Acrobat /
     Foxit markups, more code in the item base class.
-- **D4 -- wheel zoom on the 2^(1/3) grid.** `ZOOM_STEP` 1.25 -> 2^(1/3)
+- **D4 -- wheel zoom on the 2^(1/3) grid (accepted 2026-11-23).** `ZOOM_STEP` 1.25 -> 2^(1/3)
   (1.26), and Ctrl+wheel / Ctrl+plus / Ctrl+minus snap to the grid so a
   notch lands on tiles already computed or prefetched. Fit page, 100 %
   and zoom window stay exact. Same steps whichever renderer is active.
@@ -2237,10 +2239,55 @@ Runs: synthetic plans in my environment (2 slow cores), then on the
 user's PC (full core count, and limited to 2 threads / 8 GB budgets to
 stand in for a modest PC). Real plans stay on the user's PC.
 
+#### Progress
+
+- **Step 0** (2026-11-09): done.
+- **Step 1** (2026-11-23): done in my environment; the run on the user's
+  PC is pending.
+  - Scaffold: every file of the tree exists. Modules and new tests hold
+    only their docstring; `annoter_engine.h` holds the validated
+    declarations, `exports.def` / `exports.map` the export lists, and
+    `native/patches/mupdf-1.28.6-lire.patch` is Lire's patch unchanged
+    under an English header (checked: it still applies to MuPDF 1.28.6).
+  - `tools/genplans.py`: 15 A0 pages, 31 MB (about 2.1 MB per page, a
+    7 MB content stream each, 4 to 6 views per sheet). `--annotated`
+    writes a copy with 7 Annoter annotations on page 1 and 9 foreign ones
+    (stamp, highlight, underline, sticky note...) on page 2.
+  - `tools/bench_display.py`: the measurement protocol plus a "zoom to
+    detail" row (fit -> 300 %, the step that brings the 300 DPI page on
+    the PyMuPDF path).
+  - pytest baseline (v0.3.0 code, Linux, Python 3.12.3, offscreen): 687
+    tests, 683 pass. Four fail in this environment only:
+    `test_bend_radius.py::test_radius_row_on_a_line_bend` and
+    `::test_escape_restores_the_radius`,
+    `test_context_menu.py::test_right_click_on_a_hidden_selected_line_keeps_its_rows`,
+    and a segmentation fault in
+    `test_canvas_handles.py::test_end_handles_name_themselves` (a Qt hover
+    event built by hand); same under Python 3.13. In this environment,
+    "no regression" means no failure beyond these four; the user's
+    Windows run is the reference.
+  - "Before", PyMuPDF path, my environment (2 slow cores, Linux,
+    offscreen window of 1600 x 1000 device pixels; DPR 1.5 emulated with
+    `QT_SCALE_FACTOR`, i.e. a 150 % Windows display, window 1067 x 667):
+
+  | Action | DPR 1.0: sharp | DPR 1.0: longest freeze | DPR 1.5: sharp | DPR 1.5: longest freeze |
+  |---|---:|---:|---:|---:|
+  | Open -> sharp page (fit) | 4.28 s | 3.97 s | 4.56 s | 4.21 s |
+  | Zoom to detail (fit -> 300 %) | 7.65 s | 7.50 s | 7.44 s | 6.95 s |
+  | 1 wheel notch | 0.15 s | 0.01 s | 0.48 s | 0.35 s |
+  | Pan 800 x 400 px | 0.35 s | 0.01 s | 0.59 s | 0.30 s |
+  | Next page | 7.31 s | 7.17 s | 7.90 s | 7.48 s |
+  | Back to whole page | 3.73 s | 3.58 s | 3.64 s | 3.50 s |
+  | Peak memory of the process | 2149 MB | | 2163 MB | |
+
+    Every full-page render freezes the UI for its whole duration. Notch
+    and pan are cheap only because the whole page is already rendered at
+    300 DPI (about 530 MB); at DPR 1.5 the hi-res overlay comes back on
+    each of them. Next page at detail zoom re-renders the whole next page
+    at 300 DPI.
+
 #### Open points for the user
 
-- D3: option A or B for foreign annotations.
-- D4: wheel step 1.25 -> 1.26 with snapping (needed for instant notches).
 - Licence: the engine links MuPDF (AGPL v3) like PyMuPDF already does;
   the repository is public and the patch will be published. The
   `license = "Proprietary"` field of `pyproject.toml` predates this work

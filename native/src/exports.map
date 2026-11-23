@@ -1,0 +1,8 @@
+/* exports.map -- Linux version script: ann_* is the whole public surface,
+   MuPDF and its third-party libraries stay local to the library. */
+{
+	global:
+		ann_*;
+	local:
+		*;
+};

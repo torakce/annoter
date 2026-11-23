@@ -42,3 +42,10 @@ build_*.log
 
 # Cowork session outputs
 Claude outputs/
+
+# Native display engine: built library and MuPDF sources (native/build_engine.py)
+src/annoter/engine/bin/
+native/deps/
+
+# Synthetic plans and bench results (tools/genplans.py, tools/bench_display.py)
+/bench/

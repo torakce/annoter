@@ -2312,6 +2312,34 @@ stand in for a modest PC). Real plans stay on the user's PC.
   - First figure (my environment, 1 render thread): whole page at
     0.45 px/pt sharp in 0.3 s, against 4.3 s for the 150 DPI page on the
     PyMuPDF path.
+- **Step 3** (2026-11-24): done in my environment; the run on the user's
+  PC is pending (the DLL is copied into his `src/annoter/engine/bin/`).
+  - `annoter.engine`: `load_engine()` finds the library
+    (`ANNOTER_ENGINE_PATH`, PyInstaller's `_MEIPASS`, then `bin/`), checks
+    the API version, starts the process-wide engine with the
+    `ANNOTER_ENGINE_*` settings, stops it at exit, and returns None with a
+    reason when unavailable or when `ANNOTER_RENDERER=pymupdf`.
+    `annoter.engine.native`: ctypes mirror of the header, `NativeEngine`,
+    `NativeDocument` (tiles come back as bytes; the engine's buffer is
+    released right after the copy), `EngineError` / `PasswordError`.
+    No Qt import.
+  - Engine change found by the tests: `ann_cancel` now holds the work
+    until the next `ann_request_view` (a poll used to restart it).
+  - `tests/test_engine_native.py`, 19 tests: bounds equal PyMuPDF's
+    (A3, /Rotate 90, MediaBox not at the origin), whole-page pixels at
+    0, 90, 180 and 270 degrees, partial view on the wheel grid, exact vs
+    grid levels, hidden annotations (square gone, highlight kept, old
+    tiles reported evicted, back when unhidden), grayscale, reload from
+    memory and from a replaced file, cancel, Unicode path, errors
+    (missing, not a PDF, password missing / wrong / right), page out of
+    range, PyMuPDF renders unchanged around engine use. Pixels are
+    compared with PyMuPDF set to the engine's anti-aliasing; the only
+    remaining difference is Lire's direct drawing of opaque 1-3 px
+    strokes, a few edge pixels (mean below 2 / 255; exact with
+    `LIRE_NOHL=1`).
+  - Whole suite in my environment: 703 passed, plus the 3 failures of
+    the baseline; `test_canvas_handles.py` passed this time, so its
+    segmentation fault is intermittent here.
 
 #### Open points for the user
 

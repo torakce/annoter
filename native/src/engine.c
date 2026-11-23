@@ -117,6 +117,7 @@ struct ann_doc {
 	int prefetch[2];
 	unsigned epoch, last_gen;
 	int need_schedule;
+	int cancelled;                     /* ann_cancel: no work until the next view request */
 
 	int *lq, *lq_old, nlq, nlq_old, lq_pos;
 
@@ -1095,7 +1096,7 @@ static void schedule(ann_doc *d)
 	double vw, vh;
 	size_t limit = e->tex_budget / 10 * 7;
 	d->need_schedule = 0;
-	if (!d->has_view || d->npages <= 0 || e->active != d) return;
+	if (!d->has_view || d->cancelled || d->npages <= 0 || e->active != d) return;
 	e->gen++;
 	d->last_gen = e->gen;
 	e->wq_next.n = 0;
@@ -1541,6 +1542,7 @@ int ann_request_view(ann_doc *d, const ann_view *v, ann_target *out)
 	d->prefetch[0] = v->prefetch_pages[0];
 	d->prefetch[1] = v->prefetch_pages[1];
 	d->has_view = 1;
+	d->cancelled = 0;
 	schedule(d);
 	if (out) {
 		R = render_level(d, L);
@@ -1669,7 +1671,8 @@ int ann_busy(ann_doc *d)
 	if (!d) return 0;
 	e = d->eng;
 	mutex_lock(&e->mu);
-	busy = d->done_head != NULL || d->need_schedule || (e->resched && e->active == d) || any_loader_busy(e, d);
+	busy = d->done_head != NULL || any_loader_busy(e, d) ||
+		(!d->cancelled && (d->need_schedule || (e->resched && e->active == d)));
 	for (k = 0; !busy && k < e->nworkers; k++)
 		if (e->running[k] && e->running[k]->doc == d) busy = 1;
 	for (k = e->wq_pos; !busy && k < e->wq.n; k++)
@@ -1713,6 +1716,7 @@ void ann_cancel(ann_doc *d)
 	mutex_lock(&e->mu);
 	stop_doc_work(d);
 	d->need_schedule = 0;
+	d->cancelled = 1;
 	mutex_unlock(&e->mu);
 }
 

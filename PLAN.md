@@ -2242,8 +2242,7 @@ stand in for a modest PC). Real plans stay on the user's PC.
 #### Progress
 
 - **Step 0** (2026-11-09): done.
-- **Step 1** (2026-11-23): done in my environment; the run on the user's
-  PC is pending.
+- **Step 1** (2026-11-23): done.
   - Scaffold: every file of the tree exists. Modules and new tests hold
     only their docstring; `annoter_engine.h` holds the validated
     declarations, `exports.def` / `exports.map` the export lists, and
@@ -2285,6 +2284,34 @@ stand in for a modest PC). Real plans stay on the user's PC.
     300 DPI (about 530 MB); at DPR 1.5 the hi-res overlay comes back on
     each of them. Next page at detail zoom re-renders the whole next page
     at 300 DPI.
+  - "Before" on the user's PC (Windows 11, 20 logical CPUs, devicePixelRatio
+    1.25, real window 1600 x 1000, same plan): open 2.74 s (freeze 2.48 s),
+    zoom to detail 4.67 s (4.51 s), 1 notch 0.55 s (0.39 s), pan 0.78 s
+    (0.50 s), next page 5.01 s (4.44 s), back to whole page 2.32 s
+    (2.17 s); peak memory 2.2 GB.
+- **Step 2** (2026-11-24): done.
+  - `native/src/engine.c` (Lire's engine adapted to the C API: documents
+    in memory, content + overlay lists, loaders, workers, scheduling,
+    prefetch, budgets, eviction, hand-over and eviction reports, hidden
+    annotations, grayscale), `native/src/thread.h` (Lire's),
+    `native/build_engine.py`.
+  - Builds: `annoter_engine.dll` (mingw-w64 13, 9.0 MB, imports only
+    kernel32 / msvcrt / advapi32) and `libannoter_engine.so` (9.4 MB); each
+    exports exactly the 20 `ann_*` functions (checked by the build).
+  - Checks (throwaway ctypes script, formal tests come with step 3):
+    page bounds equal PyMuPDF's `page.rect`; tiles are pixel-identical to
+    PyMuPDF rendering with anti-aliasing level 6 (mean difference 0.00),
+    including at 90 degrees; against PyMuPDF's default level 8 the mean
+    difference is 4.4 / 255, from line anti-aliasing only (Lire's
+    64-level choice, about 1.6x faster); hidden annotations disappear
+    while Highlight / Underline stay; grayscale, reload from memory, wrong
+    password, and PyMuPDF still working in the same process. Random-call
+    stress test (requests, polls, hidden sets, flags, cancel, reloads,
+    reopen, small budgets) under AddressSanitizer + UBSan: no error, no
+    leak.
+  - First figure (my environment, 1 render thread): whole page at
+    0.45 px/pt sharp in 0.3 s, against 4.3 s for the 150 DPI page on the
+    PyMuPDF path.
 
 #### Open points for the user
 

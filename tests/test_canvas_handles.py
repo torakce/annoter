@@ -14,8 +14,8 @@ import pytest
 
 pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPixmap  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
@@ -53,6 +53,18 @@ def canvas(qapp):
     view.setScene(scene)
     view.resize(900, 700)
     view.show()
+    # Qt 6.11: when the view lies under the mouse cursor, unsetCursor() on
+    # an item reads the view's last mouse event; a view that never received
+    # one crashes there (access violation on Windows, segfault on Linux).
+    # In the app the view always has a real mouse event by then.
+    vp = view.viewport()
+    QApplication.sendEvent(
+        vp,
+        QMouseEvent(
+            QEvent.MouseMove, QPointF(1, 1), QPointF(vp.mapToGlobal(QPoint(1, 1))),
+            Qt.NoButton, Qt.NoButton, Qt.NoModifier,
+        ),
+    )
     yield scene, view
     view.close()
 

@@ -2338,8 +2338,14 @@ stand in for a modest PC). Real plans stay on the user's PC.
     strokes, a few edge pixels (mean below 2 / 255; exact with
     `LIRE_NOHL=1`).
   - Whole suite in my environment: 703 passed, plus the 3 failures of
-    the baseline; `test_canvas_handles.py` passed this time, so its
-    segmentation fault is intermittent here.
+    the baseline.
+  - The `test_canvas_handles.py` crash also stops the suite on the user's
+    PC ("Windows fatal exception: access violation"), before the engine
+    tests run. Cause (gdb): with PySide6 6.11, `QGraphicsItem.unsetCursor()`
+    on an item under the cursor makes the view re-read its last mouse
+    event, and a view that never received one dereferences an empty event
+    point. The test's `canvas` fixture now sends one mouse move to the view
+    (test-only change; in the app the view always has a real mouse event).
 
 #### Open points for the user
 

@@ -2544,7 +2544,13 @@ stand in for a modest PC). Real plans stay on the user's PC.
     differently. `build_engine.py` now reads the export and import
     directories straight from the PE file (no objdump), checked on the
     DLL built here and on a MinGW runtime DLL (extra exports and a
-    non-system import are caught). Second run pending.
+    non-system import are caught). Second run (#4, 5 min 13 s): green.
+    `engine` job: DLL built, 21 exports, imports kernel32 / msvcrt /
+    advapi32 only. `windows` job: `tests/test_engine_native.py` 23 passed
+    on Windows; onefile `Annoter.exe` 60 MB (start-up 6.9 s, page display:
+    engine), onedir 135 MB (start-up 1.3 s, page display: engine),
+    `Annoter-portable.zip` 60.4 MB; both kept with the run as artifacts,
+    nothing published.
   - Final before / after, same machine and same day (my environment: 2
     slow cores, so 1 render thread and 1 loader; offscreen window 1600 x
     1000, DPR 1.0; engine figures are the median of 3 runs; longest UI

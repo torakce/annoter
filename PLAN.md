@@ -2460,6 +2460,29 @@ stand in for a modest PC). Real plans stay on the user's PC.
   - Whole suite here: 728 passed with the engine, 692 passed + 36
     skipped with `ANNOTER_RENDERER=pymupdf`, plus the 3 baseline failures.
 
+- **Step 6** (2026-11-24): done here; the first run of the workflow on
+  the branch is pending (manual "Run workflow": this session cannot call
+  the GitHub API).
+  - `build.py`: the engine library (`src/annoter/engine/bin/`, platform
+    name) goes into the PyInstaller binaries next to the executable
+    (`sys._MEIPASS`, where `annoter.engine` looks first after
+    `ANNOTER_ENGINE_PATH`); `--smoke` now also prints which page display
+    each build uses, read from a report the app writes with
+    `--smoke-test` when `ANNOTER_SMOKE_REPORT` is set; `--require-engine`
+    fails when the library is missing or a build does not use it.
+    Without the library, build.py warns and the build uses the PyMuPDF
+    display.
+  - Checked here with a Linux onedir build: `libannoter_engine.so` lands
+    in `_internal/`, the frozen app starts in 0.5 s and reports "page
+    display: engine".
+  - `release.yml`: new `engine` job (Ubuntu, mingw-w64, `native/deps`
+    cached on the patch and the build script) uploads
+    `annoter_engine.dll`; the `windows` job needs it, downloads it into
+    `src/annoter/engine/bin/`, runs `tests/test_engine_native.py`, and
+    builds with `--smoke --require-engine`. Publishing is unchanged (tags
+    only). AGPL: the MuPDF patch is in `native/patches/`; the next release
+    notes should say the executable contains MuPDF (AGPL v3) with it.
+
 #### Open points for the user
 
 - Licence: the engine links MuPDF (AGPL v3) like PyMuPDF already does;

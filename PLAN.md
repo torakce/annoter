@@ -2312,8 +2312,9 @@ stand in for a modest PC). Real plans stay on the user's PC.
   - First figure (my environment, 1 render thread): whole page at
     0.45 px/pt sharp in 0.3 s, against 4.3 s for the 150 DPI page on the
     PyMuPDF path.
-- **Step 3** (2026-11-24): done in my environment; the run on the user's
-  PC is pending (the DLL is copied into his `src/annoter/engine/bin/`).
+- **Step 3** (2026-11-24): done. On the user's PC (Windows 11, the
+  mingw-w64 DLL built here): `tests/test_engine_native.py` 19 passed in
+  7 s.
   - `annoter.engine`: `load_engine()` finds the library
     (`ANNOTER_ENGINE_PATH`, PyInstaller's `_MEIPASS`, then `bin/`), checks
     the API version, starts the process-wide engine with the
@@ -2346,6 +2347,12 @@ stand in for a modest PC). Real plans stay on the user's PC.
     event, and a view that never received one dereferences an empty event
     point. The test's `canvas` fixture now sends one mouse move to the view
     (test-only change; in the app the view always has a real mouse event).
+  - Full suite on the user's PC, interrupted at 20 % (about 140 tests in
+    7 minutes, against 4 minutes for the whole suite here): failures in
+    `test_bend_radius.py` (2) and `test_context_menu.py` (1), as here, and
+    one in `test_canvas_overlays.py` seen on Windows only. To look at
+    (durations and that failure) in a later full run; all are in code this
+    work does not touch.
 
 #### Open points for the user
 

@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Python 3.12 (CPython embedded for packaging)
 - PySide6 (Qt 6, LGPL)
 - PyMuPDF (`fitz`) — annotation I/O, saving, page operations, start-page thumbnails, image export, and the fallback page display (page view and page-list thumbnails when the engine is unavailable)
-- **Display exception (approved by the user, 2026-11-09)**: on-screen page display may go through a native engine taken from the user's viewer Lire (C, MuPDF 1.28.6 with Lire's patches, statically linked in one library exporting only `ann_*`, loaded with ctypes). The exception covers on-screen display only (the page view and the page-list thumbnails); PyMuPDF keeps everything else and remains the fallback (`ANNOTER_RENDERER=pymupdf`, library missing, document refused). Design, decisions and measurements: PLAN.md, "Native display engine from Lire" (branch `perf/lire-engine`).
+- **Display exception (approved by the user, 2026-11-09)**: on-screen page display may go through a native engine taken from the user's viewer Lire (C, MuPDF 1.28.6 with Lire's patches, statically linked in one library exporting only `ann_*`, loaded with ctypes). The exception covers on-screen display only (the page view and the page-list thumbnails); PyMuPDF keeps everything else and remains the fallback (`ANNOTER_RENDERER=pymupdf`, library missing, document refused). Design, decisions and measurements: PLAN.md, "Native display engine from Lire" (in master since v0.4.0).
 - Pillow (image utilities)
 - PyInstaller — both `--onefile` and `--onedir`
 - pytest

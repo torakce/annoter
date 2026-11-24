@@ -1499,6 +1499,13 @@ From v0.2.0 a GitHub Actions workflow does it
   with `core.autocrlf=input` (five files had CRLF on disk, the
   repository stores LF); the tag push is done from the Windows side
   (GitHub credentials live there).
+- v0.4.0 (2026-11-24) = the native display engine from Lire (branch
+  `perf/lire-engine`, steps 0 to 7 of "Native display engine from
+  Lire"): tiled background display, page-list thumbnails by the engine,
+  annotations drawn once (no ghost after a move or delete), zoom on the
+  2^(1/3) grid. The workflow now builds `annoter_engine.dll` first (job
+  `engine`) and the Windows job requires the builds to use it. The
+  notes give the before / after table measured on the user's PC.
 
 ### Canvas UX batch (2026-09-26) -- lots J to M
 
@@ -1884,7 +1891,7 @@ is geometry.
   `test_quick_styles.py` updated (the rail has 11 tools again). Full
   run: 687 passed.
 
-### Native display engine from Lire (2026-11) -- done on the branch, merge pending
+### Native display engine from Lire (2026-11) -- done, released in v0.4.0
 
 Branch `perf/lire-engine` (from v0.3.0, `e084bd7`). Goal: make page
 *display* as fast as the user's viewer Lire (public repo `torakce/Lire`
@@ -1893,8 +1900,9 @@ Annoter. Annotation features do not change.
 
 **Validated by the user on 2026-11-23**: file tree, C API and steps as
 below; D3 = option A; D4 accepted (wheel step 2^(1/3) with snapping).
-Steps 0 to 7 are done (see "Progress"); merging into master and any
-release wait for the user's go.
+Steps 0 to 7 are done (see "Progress"). With the user's go
+(2026-11-24), the branch was fast-forwarded into master and released as
+v0.4.0.
 
 Approved exception to the stack rule (user, 2026-11-09): PyMuPDF is no
 longer mandated for **on-screen page display only** (the page view and,

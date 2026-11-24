@@ -2502,8 +2502,7 @@ stand in for a modest PC). Real plans stay on the user's PC.
     only). AGPL: the MuPDF patch is in `native/patches/`; the next release
     notes should say the executable contains MuPDF (AGPL v3) with it.
 
-- **Step 7** (2026-11-24): done here; the user's run of
-  `tools/check_windows.cmd` with the new library is pending.
+- **Step 7** (2026-11-24): done, checked on the user's PC.
   - Where the open time went (cloud, 2 cores, timestamps of each phase):
     the engine document opened in 25 ms with a warm disk cache (the 1.4 s
     seen once was a cold cache), the first view request left at 60 ms,
@@ -2569,6 +2568,20 @@ stand in for a modest PC). Real plans stay on the user's PC.
     The step-4 column was measured on another day; the detail zoom moves
     between 0.13 and 0.21 s from one day to the next on this shared
     machine, with or without thumbnails (checked by switching them off).
+
+  - On the user's PC (`tools/check_windows.cmd`: Windows 11, 20 logical
+    CPUs, devicePixelRatio 1.25, real window 1600 x 1000, same plan),
+    engine tests 49 passed, and:
+
+    | Action | PyMuPDF | engine, step 4 | engine, step 7 |
+    |---|---:|---:|---:|
+    | Open -> sharp page (fit) | 2.66 s (2.40 s) | 1.43 s (0.24 s) | 0.61 s (0.05 s) |
+    | Zoom to detail (fit -> 300 %) | 4.72 s (4.57 s) | 0.06 s (0.04 s) | 0.08 s (0.03 s) |
+    | 1 wheel notch | 0.16 s (0.01 s) | 0.01 s (0.02 s) | 0.01 s (0.02 s) |
+    | Pan 800 x 400 px | 0.22 s (0.01 s) | 0.10 s (0.01 s) | 0.12 s (0.01 s) |
+    | Next page | 4.63 s (4.48 s) | 0.01 s (0.01 s) | 0.02 s (0.02 s) |
+    | Back to whole page | 2.31 s (2.16 s) | 0.03 s (0.03 s) | 0.02 s (0.02 s) |
+    | Peak memory of the process | 2173 MB | 1459 MB | 1192 MB |
 
 #### Open points for the user
 

@@ -1234,21 +1234,55 @@ def _set_rasterized_appearance(
 # read
 # ----------------------------------------------------------------------
 def read_annotations(
-    doc: fitz.Document, dpi: int
+    doc: fitz.Document,
+    dpi: int,
+    managed: dict[int, list[int]] | None = None,
 ) -> dict[int, list[AnnotationItem]]:
     """Reconstruct items from each page's PDF annotations.
 
     Foreign annotations (created by Acrobat etc.) are mapped by type
     when possible. Unknown subtypes are silently skipped in v1.
+
+    When `managed` is given, it receives, per page, the PDF object numbers
+    (`annot.xref`) of the annotations Annoter draws itself: those turned
+    into items, and Annoter's companion annotations (whose content the
+    owning item draws). The native display engine must not rasterize them
+    (PLAN.md, D3 option A); the others (highlights, form fields...) stay
+    visible through the page raster.
     """
     out: dict[int, list[AnnotationItem]] = {}
     for page_index in range(doc.page_count):
         page = doc[page_index]
         items: list[AnnotationItem] = []
         for annot in page.annots() or []:
-            items.extend(_annot_to_items(annot, dpi))
+            got = _annot_to_items(annot, dpi)
+            items.extend(got)
+            if managed is not None and (got or _is_companion(annot)):
+                managed.setdefault(page_index, []).append(annot.xref)
         out[page_index] = items
     return out
+
+
+def managed_annot_xrefs(doc: fitz.Document, dpi: int) -> dict[int, list[int]]:
+    """Per page, the object numbers of the annotations Annoter draws as Qt
+    items (see `read_annotations`). Used after in-memory page operations,
+    when the pages and their annotations have moved."""
+    managed: dict[int, list[int]] = {}
+    read_annotations(doc, dpi, managed)
+    return managed
+
+
+def _is_companion(annot: fitz.Annot) -> bool:
+    """An annotation Annoter writes only for external viewers (e.g. a line
+    label's FreeText twin); its owning item draws the content."""
+    info = annot.info or {}
+    if not (info.get("title", "") or "").startswith(_OWNER_TAG):
+        return False
+    try:
+        props = json.loads(info.get("subject", "") or "{}")
+    except ValueError:
+        return False
+    return isinstance(props, dict) and bool(props.get("companion"))
 
 
 def _polygon_has_cloud_border(annot: fitz.Annot) -> bool:

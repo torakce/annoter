@@ -84,6 +84,7 @@ from annoter.model.styles import (
     HandleRole,
 )
 from annoter.services.pdf_export import (
+    managed_annot_xrefs,
     read_annotations,
     write_annotations,
 )
@@ -1260,10 +1261,14 @@ class MainWindow(QMainWindow):
         self._page_stacks = {}
         # Reconstruct any annotations the PDF already contains so they
         # appear as editable items on first display of each page.
+        managed: dict[int, list[int]] = {}
         try:
-            self._page_items = read_annotations(doc.raw, BASE_RENDER_DPI)
+            self._page_items = read_annotations(doc.raw, BASE_RENDER_DPI, managed)
         except Exception:
             self._page_items = {}
+        # Native display: the annotations drawn as items are not
+        # rasterized (no duplicate, no ghost when one moves).
+        self._apply_hidden_annots(managed)
         # Re-attach the edit callbacks that read_annotations could not
         # know about.
         for items in self._page_items.values():
@@ -1281,6 +1286,15 @@ class MainWindow(QMainWindow):
         # Defer fit to let the layout settle when called during startup.
         QTimer.singleShot(0, self._view.zoom_to_fit)
         self._update_actions_enabled()
+
+    def _apply_hidden_annots(self, managed: dict[int, list[int]]) -> None:
+        """Tell the native engine which annotations Annoter draws itself
+        (PLAN.md, D3 option A). No-op on the PyMuPDF display path."""
+        if self._display is None:
+            return
+        for page, xrefs in managed.items():
+            if 0 <= page < self._display.page_count():
+                self._display.set_hidden_annots(page, xrefs)
 
     def _start_engine_display(self, path: str) -> EngineDisplay | None:
         """Native-engine display for `path`, or None to keep the PyMuPDF
@@ -1542,9 +1556,16 @@ class MainWindow(QMainWindow):
     def _refresh_after_structure_change(self, show_index: int) -> None:
         self._renderer.clear_cache()
         if self._display is not None:
-            # The engine reads the document as it now is in memory (object
-            # numbers kept: tobytes() does not renumber).
+            # The engine reads the document as it now is in memory, then
+            # learns again which annotations Annoter draws (pages moved,
+            # inserted pages bring their own).
             self._display.reload_bytes(self._doc.raw.tobytes())
+            try:
+                self._apply_hidden_annots(
+                    managed_annot_xrefs(self._doc.raw, BASE_RENDER_DPI)
+                )
+            except Exception as e:  # noqa: BLE001 -- display detail, never block the edit
+                _log.warning("hidden annotations not updated: %s", e)
         self._mark_structure_dirty()
         self._page_list.set_document(
             self._renderer, self._doc.page_count

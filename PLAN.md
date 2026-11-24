@@ -2435,6 +2435,31 @@ stand in for a modest PC). Real plans stay on the user's PC.
     zoom before "fit", analysis of the first page, thumbnails on the UI
     thread).
 
+- **Step 5** (2026-11-24): done in my environment; the user's visual
+  check is pending.
+  - `read_annotations(doc, dpi, managed)` also reports, per page, the
+    object numbers of the annotations turned into items and of Annoter's
+    companion annotations; `managed_annot_xrefs()` gives the same after
+    in-memory page operations. `MainWindow._apply_hidden_annots()` hands
+    them to the engine at open and after every page operation (inserted
+    pages bring their own annotations).
+  - Result (option A): no duplicate, no ghost when an annotation is moved
+    or deleted before saving, foreign stamps drawn once (Annoter's
+    `StampItem`), highlights / underlines / form fields still drawn by the
+    engine. As announced, after a reopen the shapes look as Annoter draws
+    them while editing (thinner than v0.3.0's rasterized copy, finding 2
+    of the audit, unchanged in the file).
+  - `tests/test_engine_annots.py`, 5 tests: managed set (the squares and
+    the stamp, not the highlight); no ghost after a move and a delete, on
+    two pages; highlight drawn and stamp drawn once; screen identical to
+    v0.3.0's outside the managed annotations (mean difference below 1 /
+    255); inserted pages have no ghost either. The ghost and double-stamp
+    tests fail on the PyMuPDF path, as expected.
+  - Checked on a real viewport grab that text is as crisp as on the
+    PyMuPDF path at 100 %.
+  - Whole suite here: 728 passed with the engine, 692 passed + 36
+    skipped with `ANNOTER_RENDERER=pymupdf`, plus the 3 baseline failures.
+
 #### Open points for the user
 
 - Licence: the engine links MuPDF (AGPL v3) like PyMuPDF already does;

@@ -2538,9 +2538,13 @@ stand in for a modest PC). Real plans stay on the user's PC.
     page operation, and `PageRenderer.render_thumbnail` is never called).
     Whole suite here: 733 passed with the engine, 692 passed + 41 skipped
     with `ANNOTER_RENDERER=pymupdf`, plus the 3 baseline failures in both.
-  - Still pending from step 6: the first run of the release workflow on
-    the branch (manual "Run workflow" on GitHub; this session is not
-    allowed to start it).
+  - First run of the release workflow on the branch (run #3, started by
+    the user): the `engine` job built the DLL, then its export check
+    failed because the runner's newer binutils prints `objdump -p`
+    differently. `build_engine.py` now reads the export and import
+    directories straight from the PE file (no objdump), checked on the
+    DLL built here and on a MinGW runtime DLL (extra exports and a
+    non-system import are caught). Second run pending.
   - Final before / after, same machine and same day (my environment: 2
     slow cores, so 1 render thread and 1 loader; offscreen window 1600 x
     1000, DPR 1.0; engine figures are the median of 3 runs; longest UI

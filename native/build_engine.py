@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -149,25 +148,62 @@ def build_engine(src: Path, libdir: Path, target: str, out: Path) -> Path:
     return so
 
 
+def pe_exports_imports(path: Path) -> tuple[set[str], set[str]]:
+    """Exported function names and imported DLL names of a PE32+ file, read
+    from its export and import directories (no dependence on the output
+    format of a given objdump version)."""
+    data = path.read_bytes()
+
+    def u16(o: int) -> int:
+        return int.from_bytes(data[o:o + 2], "little")
+
+    def u32(o: int) -> int:
+        return int.from_bytes(data[o:o + 4], "little")
+
+    pe = u32(0x3C)
+    if data[pe:pe + 4] != b"PE\0\0":
+        raise SystemExit(f"{path.name}: not a PE file")
+    nsections, opt_size = u16(pe + 6), u16(pe + 20)
+    opt = pe + 24
+    if u16(opt) != 0x20B:
+        raise SystemExit(f"{path.name}: not a 64-bit (PE32+) library")
+    dirs = opt + 112                       # data directories of PE32+
+    sections = [
+        (u32(sh + 12), max(u32(sh + 8), u32(sh + 16)), u32(sh + 20))  # RVA, size, file offset
+        for sh in (opt + opt_size + 40 * k for k in range(nsections))
+    ]
+
+    def off(rva: int) -> int:
+        for va, size, raw in sections:
+            if va <= rva < va + size:
+                return raw + rva - va
+        raise SystemExit(f"{path.name}: RVA {rva:#x} outside the sections")
+
+    def cstr(rva: int) -> str:
+        o = off(rva)
+        return data[o:data.index(b"\0", o)].decode("ascii")
+
+    exports: set[str] = set()
+    exp_rva = u32(dirs)
+    if exp_rva:
+        e = off(exp_rva)
+        names = off(u32(e + 32))
+        exports = {cstr(u32(names + 4 * k)) for k in range(u32(e + 24))}
+    imports: set[str] = set()
+    imp_rva = u32(dirs + 8)
+    if imp_rva:
+        d = off(imp_rva)
+        while any(data[d:d + 20]):
+            imports.add(cstr(u32(d + 12)).lower())
+            d += 20
+    return exports, imports
+
+
 def check(lib: Path, target: str) -> None:
     """The library exports exactly the API, and (Windows) imports only
     system DLLs."""
     if target == "win64":
-        dump = "objdump" if sys.platform == "win32" else "x86_64-w64-mingw32-objdump"
-        text = subprocess.run([dump, "-p", str(lib)], capture_output=True, text=True, check=True).stdout
-        exports = set()
-        in_table = False
-        for line in text.splitlines():
-            if "[Ordinal/Name Pointer] Table" in line:
-                in_table = True
-                continue
-            if in_table:
-                m = re.match(r"\s*\[\s*\d+\]\s+(\S+)", line)
-                if m:
-                    exports.add(m.group(1))
-                elif line.strip() == "" and exports:
-                    in_table = False
-        dlls = {m.lower() for m in re.findall(r"DLL Name: (\S+)", text)}
+        exports, dlls = pe_exports_imports(lib)
         extra = dlls - SYSTEM_DLLS
         if extra:
             raise SystemExit(f"{lib.name} needs non-system DLLs: {sorted(extra)}")

@@ -6,6 +6,7 @@ window), pan, page rotation, drag&drop, status bar. No annotations.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QPointF, Qt, QSettings, QTimer
@@ -89,6 +90,8 @@ from annoter.services.pdf_export import (
 from annoter.services import doc_info
 from annoter.services.command_usage import CommandUsage
 from annoter.services.pdf_render import PageRenderer
+from annoter.engine import EngineError, load_engine
+from annoter.controllers.page_display import EngineDisplay
 from annoter.services.recent_files import RecentFiles
 from annoter.services.thumbnail_cache import ThumbnailCache
 from annoter.services.theme import Theme, apply as apply_theme
@@ -175,6 +178,8 @@ _PAINTABLE_PROPS: tuple[str, ...] = (
 _WINDOW_STATE_VERSION = 2
 
 
+_log = logging.getLogger(__name__)
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -199,6 +204,9 @@ class MainWindow(QMainWindow):
         # keeps the unsaved-changes prompt honest about them.
         self._doc_structure_dirty: bool = False
         self._renderer: PageRenderer | None = None
+        # Native display engine for the open document (None: the PyMuPDF
+        # path draws the page, as before).
+        self._display: EngineDisplay | None = None
         self._page_index: int = 0
         self._page_rotation: int = 0  # multiples of 90, in [0, 360)
         # Supersampling factor for the current render (1.0 = base DPI).
@@ -1245,6 +1253,7 @@ class MainWindow(QMainWindow):
             doc, BASE_RENDER_DPI, PIXMAP_CACHE_PAGES
         )
         self._renderer.set_grayscale(self.act_grayscale.isChecked())
+        self._display = self._start_engine_display(path)
         self._page_index = 0
         self._page_rotation = 0
         self._render_scale = 1.0
@@ -1272,6 +1281,24 @@ class MainWindow(QMainWindow):
         # Defer fit to let the layout settle when called during startup.
         QTimer.singleShot(0, self._view.zoom_to_fit)
         self._update_actions_enabled()
+
+    def _start_engine_display(self, path: str) -> EngineDisplay | None:
+        """Native-engine display for `path`, or None to keep the PyMuPDF
+        path (library unavailable, ANNOTER_RENDERER=pymupdf, or a document
+        the engine cannot open)."""
+        engine = load_engine()
+        if engine is None:
+            return None
+        display = EngineDisplay(engine, self._view, self)
+        try:
+            display.open(path)
+        except EngineError as e:
+            _log.warning("native display unavailable for %s: %s", path, e)
+            display.close()
+            display.deleteLater()
+            return None
+        display.set_grayscale(self.act_grayscale.isChecked())
+        return display
 
     def _hook_item_callbacks(self, item: AnnotationItem) -> None:
         """Attach the per-item hooks an item's origin cannot know about.
@@ -1472,6 +1499,11 @@ class MainWindow(QMainWindow):
         self._cancel_gdt_editor()
         self._cancel_note_editor()
         self._close_edit_toolbar()
+        if self._display is not None:
+            # Before clear_page() deletes its item.
+            self._display.close()
+            self._display.deleteLater()
+            self._display = None
         if self._doc is not None:
             self._doc.close()
         self._doc = None
@@ -1509,6 +1541,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_after_structure_change(self, show_index: int) -> None:
         self._renderer.clear_cache()
+        if self._display is not None:
+            # The engine reads the document as it now is in memory (object
+            # numbers kept: tobytes() does not renumber).
+            self._display.reload_bytes(self._doc.raw.tobytes())
         self._mark_structure_dirty()
         self._page_list.set_document(
             self._renderer, self._doc.page_count
@@ -1727,6 +1763,8 @@ class MainWindow(QMainWindow):
         )
 
     def _on_grayscale_toggled(self, checked: bool) -> None:
+        if self._display is not None:
+            self._display.set_grayscale(checked)
         if self._renderer is not None:
             self._renderer.set_grayscale(checked)
             self._stash_current_page_items()
@@ -1816,10 +1854,14 @@ class MainWindow(QMainWindow):
             self._page_items[self._page_index] = self._scene.detach_children()
 
         self._page_index = index
-        pixmap = self._renderer.render(
-            index, self._page_rotation, self._render_scale
-        )
-        self._scene.set_page_pixmap(pixmap)
+        if self._display is not None:
+            self._display.show_page(index, self._page_rotation)
+            self._scene.set_tiled_page(self._display.item)
+        else:
+            pixmap = self._renderer.render(
+                index, self._page_rotation, self._render_scale
+            )
+            self._scene.set_page_pixmap(pixmap)
 
         # Activate the page's undo stack (creating it on first visit).
         stack = self._page_stacks.get(index)
@@ -1884,6 +1926,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _on_zoom_changed(self, factor: float) -> None:
         self._nav_pill.set_zoom(factor)
+        if self._display is not None:
+            self._display.view_changed()
         self._maybe_rerender_for_zoom(factor)
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
@@ -1892,6 +1936,8 @@ class MainWindow(QMainWindow):
         self._position_edit_toolbar()
 
     def _on_view_scrolled(self, _value: int) -> None:
+        if self._display is not None:
+            self._display.view_changed()
         if hasattr(self, "_hires_timer"):
             self._hires_timer.start()
         self._position_gdt_editor()
@@ -1906,7 +1952,7 @@ class MainWindow(QMainWindow):
         base DPI. The pixmap's devicePixelRatio keeps logical geometry
         constant, so child annotations and undo history are untouched.
         """
-        if self._renderer is None or self._doc is None:
+        if self._renderer is None or self._doc is None or self._display is not None:
             return
         target = self._render_scale
         if factor >= HIGH_DPI_ZOOM_THRESHOLD:
@@ -1929,7 +1975,7 @@ class MainWindow(QMainWindow):
         memory cost is bounded even on A0 plans at maximum zoom. When the
         full-page pixmap is already sharp enough, the overlay is removed.
         """
-        if self._renderer is None or self._doc is None:
+        if self._renderer is None or self._doc is None or self._display is not None:
             return
         page = self._scene.page_item()
         if page is None:

@@ -21,6 +21,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
@@ -118,7 +119,9 @@ class PdfScene(QGraphicsScene):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._page_item: QGraphicsPixmapItem | None = None
+        # The page: a QGraphicsPixmapItem (PyMuPDF display) or a
+        # TiledPageItem (native engine); annotations are its children.
+        self._page_item: QGraphicsItem | None = None
         # Scene units per on-screen pixel, pushed by the view on every
         # zoom change: handles and hit areas are sized in screen pixels.
         self._screen_px: float = 1.0
@@ -361,8 +364,20 @@ class PdfScene(QGraphicsScene):
         self.clear_hires_overlay()
         self.setSceneRect(self._page_item.boundingRect())
 
-    def page_item(self) -> QGraphicsPixmapItem | None:
+    def page_item(self) -> QGraphicsItem | None:
         return self._page_item
+
+    def set_tiled_page(self, item: QGraphicsItem) -> None:
+        """Native-engine display: `item` (a TiledPageItem, reused across
+        pages like the pixmap item) is the page; call again after its
+        geometry changed so the scene rect follows."""
+        if self._page_item is not item:
+            if self._page_item is not None and self._page_item.scene() is self:
+                self.removeItem(self._page_item)
+            self._page_item = item
+            self.addItem(item)
+        self.clear_hires_overlay()
+        self.setSceneRect(item.boundingRect())
 
     def set_hires_overlay(self, pixmap: QPixmap, pos: QPointF) -> None:
         """Show `pixmap` at `pos` (page-local logical coords) over the page."""

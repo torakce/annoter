@@ -10,6 +10,8 @@ Zoom convention (locked across the codebase):
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QPoint, QPointF, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QContextMenuEvent,
@@ -23,9 +25,10 @@ from PySide6.QtWidgets import QGraphicsView, QRubberBand
 
 from annoter.config import (
     BASE_RENDER_DPI,
+    ZOOM_LEVELS_PER_OCTAVE,
     ZOOM_MAX,
     ZOOM_MIN,
-    ZOOM_STEP,
+    ZOOM_NOTCHES_PER_OCTAVE,
 )
 from annoter.controllers.geometry import px_to_pt
 from annoter.controllers.tools import Tool
@@ -56,6 +59,9 @@ class PdfView(QGraphicsView):
         self.setMouseTracking(True)
 
         self._zoom: float = 1.0
+        # Last zoom set "exactly" (fit, 100 %, preset, zoom window): notches
+        # go back to it when they cross it, so in-then-out returns there.
+        self._zoom_anchor: float | None = None
         self._render_dpi: int = BASE_RENDER_DPI
 
         self._space_held: bool = False
@@ -81,16 +87,48 @@ class PdfView(QGraphicsView):
 
     def set_zoom(self, factor: float) -> None:
         """Absolute zoom (1.0 = 100 %), clamped to the zoom limits."""
-        self._apply_zoom(float(factor))
+        self._apply_exact_zoom(float(factor))
 
     def zoom_in(self) -> None:
-        self._apply_zoom(self._zoom * ZOOM_STEP)
+        """One notch in, onto the notch grid (or back to the exact zoom
+        the notches started from, when crossing it)."""
+        self._apply_zoom(self._next_notch(+1))
 
     def zoom_out(self) -> None:
-        self._apply_zoom(self._zoom / ZOOM_STEP)
+        self._apply_zoom(self._next_notch(-1))
 
     def zoom_to_actual(self) -> None:
-        self._apply_zoom(1.0)
+        self._apply_exact_zoom(1.0)
+
+    def zoom_is_exact(self) -> bool:
+        """True when the zoom was set exactly (fit, 100 %, preset, zoom
+        window) rather than by notches: the engine then renders that very
+        level instead of the notch grid."""
+        return self._zoom_anchor is not None and self._zoom == self._zoom_anchor
+
+    def _next_notch(self, direction: int) -> float:
+        n = ZOOM_NOTCHES_PER_OCTAVE
+        k = math.log2(self._zoom) * n
+        k = math.floor(k + 1e-6) + 1 if direction > 0 else math.ceil(k - 1e-6) - 1
+        target = 2.0 ** (k / n)
+        a = self._zoom_anchor
+        if a is not None and min(self._zoom, target) < a < max(self._zoom, target) and not (
+            math.isclose(a, self._zoom, rel_tol=1e-9)
+        ):
+            return a
+        return target
+
+    @staticmethod
+    def _quantize(factor: float) -> float:
+        """Nearest power of 2^(1/768): the engine's level grid."""
+        q = ZOOM_LEVELS_PER_OCTAVE
+        return 2.0 ** (round(math.log2(factor) * q) / q)
+
+    def _apply_exact_zoom(self, factor: float) -> None:
+        factor = self._quantize(max(ZOOM_MIN, min(ZOOM_MAX, factor)))
+        factor = max(ZOOM_MIN, min(ZOOM_MAX, factor))
+        self._zoom_anchor = factor
+        self._apply_zoom(factor)
 
     def zoom_to_fit(self) -> None:
         scene = self.scene()
@@ -104,7 +142,7 @@ class PdfView(QGraphicsView):
         avail_w = max(1, vp.width() - margin_px)
         avail_h = max(1, vp.height() - margin_px)
         view_scale = min(avail_w / rect.width(), avail_h / rect.height())
-        self._apply_zoom(view_scale * self._render_dpi / 72.0)
+        self._apply_exact_zoom(view_scale * self._render_dpi / 72.0)
         self.centerOn(rect.center())
 
     def arm_zoom_window(self) -> None:
@@ -157,7 +195,8 @@ class PdfView(QGraphicsView):
             self.viewport().setCursor(cursor)
 
     def _apply_zoom(self, factor: float) -> None:
-        factor = max(ZOOM_MIN, min(ZOOM_MAX, factor))
+        factor = self._quantize(max(ZOOM_MIN, min(ZOOM_MAX, factor)))
+        factor = max(ZOOM_MIN, min(ZOOM_MAX, factor))  # the grid may step past a limit
         self._zoom = factor
         view_scale = factor * 72.0 / self._render_dpi
         t = QTransform()
@@ -410,7 +449,7 @@ class PdfView(QGraphicsView):
                         vp.width() / target.width(),
                         vp.height() / target.height(),
                     )
-                    self._apply_zoom(view_scale * self._render_dpi / 72.0)
+                    self._apply_exact_zoom(view_scale * self._render_dpi / 72.0)
                     self.centerOn(target.center())
             # Restore the tool cursor now that zoom-window is finished.
             self.viewport().setCursor(self._tool_cursor)

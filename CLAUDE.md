@@ -26,9 +26,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The full target tree is in `PROMPT_RESTART.md` §4. Load-bearing invariants future Claude instances must respect:
 
-- **Annotations are children of their page's `QGraphicsPixmapItem`.** Their coordinates are page-local; moving/rotating a page moves its annotations automatically.
+- **Annotations are children of their page item** -- a `QGraphicsPixmapItem` on the PyMuPDF display path, a `TiledPageItem` with the native engine (same logical rect, see `page_box_150()`). Their coordinates are page-local; moving/rotating a page moves its annotations automatically.
 - **Zoom convention:** `_apply_zoom(factor)` where `factor=1.0` means 1 screen pixel per PDF point (real size). The actual `QGraphicsView` scale is `factor * 72 / render_dpi`.
-- **Re-render at higher DPI** is hysteretic (`HIGH_DPI_ZOOM_THRESHOLD` up, `HIGH_DPI_ZOOM_EXIT` down) and implemented via the pixmap's `devicePixelRatio`: the supersampled pixmap keeps the same *logical* scene size, so child annotations, undo history and the save path are untouched. Never swap the page item or rescale item geometry for DPI purposes.
+- **Zoom grid (native engine, 2026-11):** every zoom factor is a power of 2^(1/768) and wheel notches land on powers of 2^(1/3); keep it so (see PLAN.md, D4) -- the engine renders exactly those levels.
+- **Re-render at higher DPI** (PyMuPDF display path only) is hysteretic (`HIGH_DPI_ZOOM_THRESHOLD` up, `HIGH_DPI_ZOOM_EXIT` down) and implemented via the pixmap's `devicePixelRatio`: the supersampled pixmap keeps the same *logical* scene size, so child annotations, undo history and the save path are untouched. Never swap the page item or rescale item geometry for DPI purposes.
 - **Every scene mutation goes through a `QUndoCommand`** (`Add`, `Delete`, `Move`, `ChangeColor`, `ChangeStroke`, `ChangeGdt`). Widgets must never mutate the scene directly.
 - **`ToolController(QObject)` is the single source of truth** for current tool/color/stroke. Views subscribe to its signals — no direct view-to-view coupling.
 - **GD&T feature control frames** are composite items laid out from `QFontMetricsF` (symbol cell + tolerance cell + datum cells), with modifiers Ⓜ/Ⓛ/Ⓟ/Ⓔ as Unicode enclosed characters.

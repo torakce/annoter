@@ -122,10 +122,12 @@ def test_close_clears_state(qapp, sample_pdf: Path) -> None:
         win.close()
 
 
-def test_high_dpi_rerender_hysteresis(qapp, sample_pdf: Path) -> None:
+def test_high_dpi_rerender_hysteresis(qapp, sample_pdf: Path, monkeypatch) -> None:
     """Zooming past the threshold supersamples the page pixmap without
     changing its logical (scene) geometry; dropping back below the exit
-    threshold returns to base DPI. In between, the scale is sticky."""
+    threshold returns to base DPI. In between, the scale is sticky.
+    PyMuPDF display path only (the native engine has no DPI switch)."""
+    monkeypatch.setenv("ANNOTER_RENDERER", "pymupdf")
     win = MainWindow()
     try:
         win.open_path(sample_pdf)

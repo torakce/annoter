@@ -20,10 +20,9 @@ Options: --size 1600x1000 (window size), --zoom 3.0 (detail zoom),
 --json FILE (raw results), --threads N / --ram-gb N (engine limits, to
 stand in for a modest PC; ignored by the PyMuPDF path).
 
-The renderer is chosen through ANNOTER_RENDERER (pymupdf / engine),
-honoured by the app once the engine is wired (step 4 of the plan); until
-then every run uses the PyMuPDF path, and `--renderer engine` stops with
-a message.
+The renderer is chosen through ANNOTER_RENDERER (pymupdf / engine);
+`--renderer engine` stops with a message when the engine library is not
+available (the app would fall back to PyMuPDF).
 """
 
 from __future__ import annotations
@@ -186,9 +185,9 @@ def run_scenario(args: argparse.Namespace) -> dict:
         """True once the visible area is as sharp as the renderer makes it."""
         if win._doc is None or win._scene.page_item() is None:
             return False
-        display = getattr(win, "_engine_display", None)
+        display = getattr(win, "_display", None)
         if display is not None and renderer_name() == "engine":
-            return bool(display.settled())  # EngineDisplay, step 4
+            return bool(display.settled())
         # PyMuPDF path: renders are synchronous; the only deferred work
         # is the hi-res overlay, behind its debounce timer.
         return not win._hires_timer.isActive()
@@ -360,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"== {args.renderer} on {Path(args.pdf).name}")
     run = run_scenario(args)
     if args.renderer == "engine" and run["info"]["renderer"] != "engine":
-        print("the engine is not active yet (it is wired at step 4 of the plan)", file=sys.stderr)
+        print("the native engine is not available: the app used the PyMuPDF path", file=sys.stderr)
         return 3
     if args.json:
         Path(args.json).write_text(json.dumps(run, indent=2), encoding="utf-8")

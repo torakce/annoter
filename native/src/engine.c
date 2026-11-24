@@ -1249,6 +1249,18 @@ static void schedule(ann_doc *d)
 
 int ann_api_version(void) { return ANN_API_VERSION; }
 
+/* MuPDF prints warnings and errors on stderr (e.g. "items left on stack"
+   when a render is aborted on purpose). Silent unless ANNOTER_ENGINE_VERBOSE
+   is set; failures still come back through the API's status codes. */
+static void quiet_message(void *user, const char *message) { (void)user; (void)message; }
+
+static void quiet(fz_context *c)
+{
+	if (getenv("ANNOTER_ENGINE_VERBOSE")) return;
+	fz_set_warning_callback(c, quiet_message, NULL);
+	fz_set_error_callback(c, quiet_message, NULL);
+}
+
 static int register_handlers(fz_context *c)
 {
 	int ok = 1;
@@ -1286,6 +1298,7 @@ ann_engine *ann_engine_new(const ann_config *cfg)
 	/* Colour management off: much faster, no visible difference on plans.
 	   Lines anti-aliased on 64 levels (visually identical, ~1.6x faster);
 	   text keeps the full anti-aliasing. (Lire's settings.) */
+	quiet(e->ctx);
 	fz_disable_icc(e->ctx);
 	fz_set_graphics_aa_level(e->ctx, 6);
 	fz_set_text_aa_level(e->ctx, 8);
@@ -1305,10 +1318,12 @@ ann_engine *ann_engine_new(const ann_config *cfg)
 	e->nloaders = clampi(nl, 1, MAX_LOADERS);
 	for (i = 0; i < e->nloaders; i++) {
 		e->lctx[i] = fz_clone_context(e->ctx);
+		quiet(e->lctx[i]);
 		e->loader_page[i] = -1;
 	}
 	for (i = 0; i < e->nworkers; i++) {
 		e->wctx[i] = fz_clone_context(e->ctx);
+		quiet(e->wctx[i]);
 		fz_set_graphics_aa_level(e->wctx[i], 6);
 		fz_set_text_aa_level(e->wctx[i], 8);
 	}

@@ -2354,6 +2354,70 @@ stand in for a modest PC). Real plans stay on the user's PC.
     (durations and that failure) in a later full run; all are in code this
     work does not touch.
 
+- **Step 4** (2026-11-24): done in my environment; the user's try on
+  real plans is pending.
+  - `views/tiled_page_item.py`: `TiledPageItem` (see "Qt side" above);
+    `page_box_150()` gives the logical rect of the page item, rounded
+    like `get_pixmap`, whichever renderer draws. Target-level tiles are
+    drawn one tile pixel per device pixel; other levels and the preview
+    are stretched underneath only where the target level is incomplete.
+  - `controllers/page_display.py`: `EngineDisplay` (request coalesced to
+    one per event-loop pass; viewport resize watched by an event filter;
+    8 ms poll timer that stops when the engine is idle; at most 8 ms of
+    tile integration per tick; neighbour pages as prefetch).
+  - `MainWindow`: `_start_engine_display()` at open (None keeps the
+    PyMuPDF path: library missing, `ANNOTER_RENDERER=pymupdf`, or a
+    document the engine refuses); `_show_page`, zoom / scroll handlers,
+    grayscale and page operations (`tobytes()` reload) branch on it; the
+    150/300 DPI switch and the hi-res overlay run only on the PyMuPDF path.
+    `PdfScene.set_tiled_page()` installs the item. `PageRenderer` stays
+    for thumbnails and export.
+  - Zoom (D4): `ZOOM_STEP` = 2^(1/3); notches land on the powers of
+    2^(1/3) (100 % included); every zoom is a power of 2^(1/768), the
+    engine's level grid, so the view shows exactly the rendered scale.
+    The last zoom set exactly (fit, 100 %, preset, zoom window) is an
+    anchor: notches crossing it stop on it, so in-then-out returns to
+    it (and its tiles are still cached). `PdfView.zoom_is_exact()` tells
+    the engine to render that level rather than the notch grid.
+  - Engine: MuPDF's own warnings ("items left on stack" when a render is
+    aborted on purpose) are silenced unless `ANNOTER_ENGINE_VERBOSE` is set.
+  - Tests: `tests/test_tiled_page_item.py`, 20 tests (page box equal to the
+    pixmap size for 4 pages x 4 rotations; same item geometry in both
+    renderers; annotations stay children across pages, undo and save
+    with the same `rect_pt`; tiles land where PyMuPDF draws, pages and
+    rotations; stretched fallback then sharp tiles then eviction on a
+    synthetic item; notch grid and anchor; grayscale; page operation
+    reload; fallback; requests follow zoom, scroll and resize).
+    `test_high_dpi_rerender_hysteresis` now forces the PyMuPDF path (it
+    tests that path). Whole suite here: 723 passed with the engine, 692
+    passed + 31 skipped with `ANNOTER_RENDERER=pymupdf`, plus the 3
+    baseline failures in both.
+  - Slow suite on Windows explained: `test_main_window_wiring.py` takes
+    about 50 s here too, before and after this work. Each `MainWindow`
+    calls `QApplication.setStyleSheet`, which re-polishes every widget
+    still alive, and the windows of earlier tests are not deleted, so each
+    test gets slower (46 of the 52 s are in `setStyleSheet`). Pre-existing;
+    a conftest fixture deleting the windows would fix it.
+  - Before / after in my environment (2 slow cores: the engine has 1
+    render thread and 1 loader; offscreen window of 1600 x 1000 device
+    pixels; time to sharp, longest UI freeze in brackets). Checked
+    separately that "sharp" is real: the viewport image is unchanged 2 s
+    after the engine reports the view complete.
+
+    | Action | PyMuPDF, DPR 1.0 | engine, DPR 1.0 | PyMuPDF, DPR 1.5 | engine, DPR 1.5 |
+    |---|---:|---:|---:|---:|
+    | Open -> sharp page (fit) | 4.09 s (3.78 s) | 1.58 s (0.47 s) | 4.56 s (4.21 s) | 1.55 s (0.41 s) |
+    | Zoom to detail (fit -> 300 %) | 7.50 s (7.36 s) | 0.13 s (0.01 s) | 7.44 s (6.95 s) | 0.13 s (0.01 s) |
+    | 1 wheel notch | 0.17 s (0.02 s) | 0.01 s (0.01 s) | 0.48 s (0.35 s) | 0.01 s (0.01 s) |
+    | Pan 800 x 400 px | 0.34 s (0.01 s) | 0.07 s (0.01 s) | 0.59 s (0.30 s) | 0.05 s (0.01 s) |
+    | Next page | 7.62 s (7.47 s) | 0.01 s (0.02 s) | 7.90 s (7.48 s) | 0.02 s (0.02 s) |
+    | Back to whole page | 3.64 s (3.50 s) | 0.02 s (0.02 s) | 3.64 s (3.50 s) | 0.01 s (0.01 s) |
+    | Peak memory of the process | 2137 MB | 742 MB | 2163 MB | 759 MB |
+
+  - `tools/check_windows.cmd`: double-click (or drop a real PDF on it) to
+    run the engine tests and the before / after bench on the user's PC;
+    results in `bench/check_windows.txt`.
+
 #### Open points for the user
 
 - Licence: the engine links MuPDF (AGPL v3) like PyMuPDF already does;

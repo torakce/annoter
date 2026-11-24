@@ -25,7 +25,14 @@ HIRES_DEBOUNCE_MS = 150
 # Zoom
 ZOOM_MIN = 0.1
 ZOOM_MAX = 16.0
-ZOOM_STEP = 1.25  # Multiplicative step for Ctrl+wheel and Ctrl+/-.
+# Ctrl+wheel and Ctrl+/- move by one notch of 2^(1/3) and land on the
+# notch grid (powers of 2^(1/3), 100 % included): the native display
+# engine renders and prefetches exactly those levels (PLAN.md, D4).
+ZOOM_NOTCHES_PER_OCTAVE = 3
+ZOOM_STEP = 2.0 ** (1.0 / ZOOM_NOTCHES_PER_OCTAVE)
+# Every zoom factor is a power of 2^(1/768) (0.09 % steps), the engine's
+# level grid, so tiles are drawn 1:1 on screen.
+ZOOM_LEVELS_PER_OCTAVE = 768
 
 # Cache
 PIXMAP_CACHE_PAGES = 3  # Current + previous + next.

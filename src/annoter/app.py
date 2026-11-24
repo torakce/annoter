@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -44,6 +45,24 @@ def close_splash() -> None:
         pass
 
 
+def write_smoke_report(path: str) -> None:
+    """`--smoke-test` with ANNOTER_SMOKE_REPORT set: say which page
+    display this build uses (build.py --smoke reads it; a windowed .exe
+    has no console to print to)."""
+    from annoter.engine import library_path, load_engine, unavailable_reason
+
+    engine = load_engine()
+    lines = [
+        f"renderer={'engine' if engine is not None else 'pymupdf'}",
+        f"library={library_path()}",
+        f"reason={unavailable_reason()}",
+    ]
+    try:
+        Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     """Start Annoter. Returns the Qt exit code."""
     QCoreApplication.setOrganizationName("Annoter")
@@ -69,5 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         win.open_path(args[1])
 
     if smoke:
+        report = os.environ.get("ANNOTER_SMOKE_REPORT")
+        if report:
+            write_smoke_report(report)
         QTimer.singleShot(0, app.quit)
     return app.exec()

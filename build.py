@@ -8,6 +8,9 @@ Usage:
     python build.py --no-splash    # skip the launch splash screen
     python build.py --smoke        # after building, launch each build
                                    # once and report its start-up time
+                                   # and which page display it uses
+    python build.py --require-engine   # fail if the native display
+                                   # engine library is missing (CI)
 
 Outputs land in `dist-onefile/` and `dist-onedir/` respectively. Each
 build keeps its own work directory under `build-onefile/` /
@@ -32,6 +35,7 @@ the remaining unpacking time; the app closes it once its window is up.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -108,6 +112,27 @@ def _datas() -> list[tuple[str, str]]:
     return out
 
 
+def engine_library() -> Path | None:
+    """The native display engine built for this platform
+    (native/build_engine.py copies it into src/annoter/engine/bin), or
+    None: the build then falls back to the PyMuPDF display."""
+    if sys.platform.startswith("win"):
+        name = "annoter_engine.dll"
+    elif sys.platform == "darwin":
+        name = "libannoter_engine.dylib"
+    else:
+        name = "libannoter_engine.so"
+    lib = ROOT / "src" / "annoter" / "engine" / "bin" / name
+    return lib if lib.is_file() else None
+
+
+def _binaries() -> list[tuple[str, str]]:
+    """Extra binaries as (source, dest dir): the engine library lands
+    next to the executable (sys._MEIPASS), where annoter.engine looks."""
+    lib = engine_library()
+    return [(str(lib), ".")] if lib is not None else []
+
+
 def splash_available() -> bool:
     """PyInstaller's splash needs Tcl/Tk in the building Python."""
     if not SPLASH_IMAGE.is_file():
@@ -139,6 +164,7 @@ def make_spec(onefile: bool, splash: bool) -> str:
         f"    [{str(ENTRY)!r}],",
         f"    pathex=[{str(ROOT / 'src')!r}],",
         f"    datas={_datas()!r},",
+        f"    binaries={_binaries()!r},",
         f"    excludes={list(EXCLUDED_MODULES)!r},",
         ")",
         "a.binaries = [e for e in a.binaries if _keep(e)]",
@@ -231,18 +257,29 @@ def executable(onefile: bool) -> Path:
     return ROOT / "dist-onedir" / APP_NAME / f"{APP_NAME}{suffix}"
 
 
-def smoke(onefile: bool) -> int:
+def smoke(onefile: bool, require_engine: bool = False) -> int:
     """Launch a build with --smoke-test (it quits once its window is
-    shown) and report the wall-clock start-up time."""
+    shown), report the wall-clock start-up time and which page display
+    the build uses; with `require_engine`, fail unless it is the native
+    engine."""
     exe = executable(onefile)
     if not exe.is_file():
         print(f"!! {exe} not found")
         return 1
+    report = (ROOT / f"build-{'onefile' if onefile else 'onedir'}" / "smoke-report.txt")
+    report.unlink(missing_ok=True)
+    env = dict(os.environ, ANNOTER_SMOKE_REPORT=str(report))
     start = time.perf_counter()
-    rc = subprocess.call([str(exe), "--smoke-test"], timeout=300)
+    rc = subprocess.call([str(exe), "--smoke-test"], timeout=300, env=env)
     took = time.perf_counter() - start
     kind = "onefile" if onefile else "onedir"
     print(f">> {kind} start-up: {took:.1f} s (exit code {rc})")
+    info = report.read_text(encoding="utf-8").split() if report.is_file() else []
+    renderer = next((x.split("=", 1)[1] for x in info if x.startswith("renderer=")), "unknown")
+    print(f">> {kind} page display: {renderer}")
+    if rc == 0 and require_engine and renderer != "engine":
+        print(f"!! {kind}: the native display engine did not load ({' '.join(info)})")
+        return 1
     return rc
 
 
@@ -304,7 +341,27 @@ def main() -> int:
         action="store_true",
         help="Launch each build once and report its start-up time.",
     )
+    ap.add_argument(
+        "--require-engine",
+        action="store_true",
+        help="Fail if the native display engine library is missing "
+        "(and, with --smoke, if a build does not use it).",
+    )
     args = ap.parse_args()
+
+    lib = engine_library()
+    if lib is None:
+        msg = (
+            "no native display engine in src/annoter/engine/bin (build it "
+            "with native/build_engine.py): the builds will use the "
+            "PyMuPDF display."
+        )
+        if args.require_engine:
+            print(f"!! {msg}")
+            return 1
+        print(f"!! {msg}")
+    else:
+        print(f">> native display engine: {lib.name} ({lib.stat().st_size / 1e6:.1f} MB)")
 
     do_one = args.onefile
     do_dir = args.onedir or args.zip_onedir
@@ -323,13 +380,13 @@ def main() -> int:
         rc = build_onefile(splash)
         if rc != 0:
             return rc
-        if args.smoke and smoke(True) != 0:
+        if args.smoke and smoke(True, args.require_engine) != 0:
             return 1
     if do_dir:
         rc = build_onedir(splash)
         if rc != 0:
             return rc
-        if args.smoke and smoke(False) != 0:
+        if args.smoke and smoke(False, args.require_engine) != 0:
             return 1
     if args.zip_onedir:
         rc = zip_onedir()

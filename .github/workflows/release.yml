@@ -6,10 +6,14 @@
 #   2. write the notes in .github/release-notes/vX.Y.Z.md;
 #   3. commit, then: git tag -a vX.Y.Z -m "Annoter vX.Y.Z"
 #                    git push origin master vX.Y.Z
-# Pushing the tag runs this workflow: it builds the single .exe and the
-# portable zip on Windows, launches each once (build.py --smoke), and
-# attaches both to the release. "Run workflow" (manual) builds without
-# publishing; the files are then in the run's artifacts.
+# Pushing the tag runs this workflow: it builds the native display engine
+# (annoter_engine.dll, MuPDF 1.28.6 with Lire's patch, cross-compiled with
+# mingw-w64 on Ubuntu, see native/build_engine.py), then on Windows runs
+# the engine tests, builds the single .exe and the portable zip with the
+# DLL inside, launches each once (build.py --smoke --require-engine: the
+# build must use the engine), and attaches both to the release.
+# "Run workflow" (manual) builds without publishing; the files are then in
+# the run's artifacts.
 
 name: Release
 
@@ -22,11 +26,41 @@ permissions:
   contents: write
 
 jobs:
+  engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      # MuPDF sources and their static build: about 10 minutes when cold.
+      - uses: actions/cache@v4
+        with:
+          path: native/deps
+          key: mupdf-1.28.6-win64-${{ hashFiles('native/patches/*.patch', 'native/build_engine.py') }}
+
+      - name: Build the display engine DLL
+        run: python3 native/build_engine.py --target win64 --no-copy
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: annoter-engine-win64
+          path: native/build/engine/win64/annoter_engine.dll
+          if-no-files-found: error
+
   windows:
+    needs: engine
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: annoter-engine-win64
+          path: src/annoter/engine/bin
 
       - uses: actions/setup-python@v5
         with:
@@ -59,8 +93,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r .github/requirements-release.txt
 
+      - name: Test the display engine on Windows
+        env:
+          PYTHONPATH: src
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pip install pytest
+          python -m pytest tests/test_engine_native.py -q -p no:cacheprovider
+
       - name: Build the .exe and the portable zip, launch each once
-        run: python build.py --onefile --zip-onedir --smoke
+        run: python build.py --onefile --zip-onedir --smoke --require-engine
 
       - name: Keep the files with the run
         uses: actions/upload-artifact@v4

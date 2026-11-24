@@ -2354,8 +2354,8 @@ stand in for a modest PC). Real plans stay on the user's PC.
     (durations and that failure) in a later full run; all are in code this
     work does not touch.
 
-- **Step 4** (2026-11-24): done in my environment; the user's try on
-  real plans is pending.
+- **Step 4** (2026-11-24): done; validated by the user on his PC
+  ("the performance looks good").
   - `views/tiled_page_item.py`: `TiledPageItem` (see "Qt side" above);
     `page_box_150()` gives the logical rect of the page item, rounded
     like `get_pixmap`, whichever renderer draws. Target-level tiles are
@@ -2417,6 +2417,23 @@ stand in for a modest PC). Real plans stay on the user's PC.
   - `tools/check_windows.cmd`: double-click (or drop a real PDF on it) to
     run the engine tests and the before / after bench on the user's PC;
     results in `bench/check_windows.txt`.
+  - On the user's PC (Windows 11, 20 logical CPUs, devicePixelRatio 1.25,
+    real window 1600 x 1000, same plan), engine tests 39 passed, and:
+
+    | Action | PyMuPDF | engine |
+    |---|---:|---:|
+    | Open -> sharp page (fit) | 2.72 s (2.47 s) | 1.43 s (0.24 s) |
+    | Zoom to detail (fit -> 300 %) | 4.59 s (4.45 s) | 0.06 s (0.04 s) |
+    | 1 wheel notch | 0.16 s (0.01 s) | 0.01 s (0.02 s) |
+    | Pan 800 x 400 px | 0.27 s (0.01 s) | 0.10 s (0.01 s) |
+    | Next page | 4.56 s (4.41 s) | 0.01 s (0.01 s) |
+    | Back to whole page | 2.31 s (2.15 s) | 0.03 s (0.03 s) |
+    | Peak memory of the process | 2179 MB | 1459 MB |
+
+    Opening still takes 1.4 s while the UI stays free (longest freeze
+    0.24 s): to look at in step 7 (first request made at the previous
+    zoom before "fit", analysis of the first page, thumbnails on the UI
+    thread).
 
 #### Open points for the user
 

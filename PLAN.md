@@ -2536,6 +2536,11 @@ stand in for a modest PC). Real plans stay on the user's PC.
     subprocess with `ANNOTER_ENGINE_LIST_MB=1`), `tests/test_tiled_page_item.py`
     +1 (the page list gets its 4 thumbnails from the engine, again after a
     page operation, and `PageRenderer.render_thumbnail` is never called).
+    Whole suite here: 733 passed with the engine, 692 passed + 41 skipped
+    with `ANNOTER_RENDERER=pymupdf`, plus the 3 baseline failures in both.
+  - Still pending from step 6: the first run of the release workflow on
+    the branch (manual "Run workflow" on GitHub; this session is not
+    allowed to start it).
   - Final before / after, same machine and same day (my environment: 2
     slow cores, so 1 render thread and 1 loader; offscreen window 1600 x
     1000, DPR 1.0; engine figures are the median of 3 runs; longest UI

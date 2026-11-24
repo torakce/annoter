@@ -1506,6 +1506,12 @@ From v0.2.0 a GitHub Actions workflow does it
   2^(1/3) grid. The workflow now builds `annoter_engine.dll` first (job
   `engine`) and the Windows job requires the builds to use it. The
   notes give the before / after table measured on the user's PC.
+  Master fast-forwarded from this session; the tag was pushed from the
+  user's Windows terminal (neither this cloud session nor the Cowork VM
+  may push tags). Run 45412487125 green (engine 2 min 29 s, windows
+  3 min 37 s, 23 engine tests passed on Windows, both builds display with
+  the engine); release published 2026-11-24 with `Annoter-portable.zip`
+  (60.4 MB) and `Annoter.exe` (60.3 MB).
 
 ### Canvas UX batch (2026-09-26) -- lots J to M
 

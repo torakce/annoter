@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-API_VERSION = 1
+API_VERSION = 2
 
 ANN_OK = 0
 ANN_ERR_ARG = -1
@@ -28,6 +28,7 @@ ANN_ERR_PASSWORD = -3
 ANN_ERR_MEMORY = -4
 ANN_ERR_PAGE = -5
 ANN_FLAG_GRAYSCALE = 1
+THUMB_LEVEL = -2147483647  # ANN_THUMB_LEVEL: page thumbnails
 
 _POLL_BATCH = 64
 
@@ -122,6 +123,7 @@ def _declare(lib: C.CDLL) -> None:
         "ann_page_bounds": (i, [p, i, C.c_float * 4]),
         "ann_set_hidden_annots": (i, [p, i, C.POINTER(i), i]),
         "ann_set_flags": (i, [p, i]),
+        "ann_set_thumbnails": (i, [p, i]),
         "ann_request_view": (i, [p, C.POINTER(_View), C.POINTER(_Target)]),
         "ann_poll": (i, [p, C.POINTER(_Tile), i]),
         "ann_release_tile": (None, [p, C.c_longlong]),
@@ -325,6 +327,13 @@ class NativeDocument:
     def set_grayscale(self, enabled: bool) -> None:
         flags = ANN_FLAG_GRAYSCALE if enabled else 0
         _raise_for(self._lib.ann_set_flags(self._handle(), flags), "flags")
+
+    def set_thumbnails(self, max_px: int) -> None:
+        """Render every page as a thumbnail fitting a `max_px` square, in
+        the background after the view (0 = none). They arrive through
+        `poll()` as tiles of level `THUMB_LEVEL` (rotation 0, every
+        annotation drawn, as the PDF is saved)."""
+        _raise_for(self._lib.ann_set_thumbnails(self._handle(), int(max_px)), "thumbnails")
 
     # -- view and tiles ---------------------------------------------------------
     def request_view(

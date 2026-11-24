@@ -14,8 +14,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Python 3.12 (CPython embedded for packaging)
 - PySide6 (Qt 6, LGPL)
-- PyMuPDF (`fitz`) — annotation I/O, saving, page operations, thumbnails, image export, and the fallback page display
-- **Display exception (approved by the user, 2026-11-09)**: on-screen page display may go through a native engine taken from the user's viewer Lire (C, MuPDF 1.28.6 with Lire's patches, statically linked in one library exporting only `ann_*`, loaded with ctypes). The exception covers display only; PyMuPDF keeps everything else. Design and status: PLAN.md, "Native display engine from Lire" (branch `perf/lire-engine`).
+- PyMuPDF (`fitz`) — annotation I/O, saving, page operations, start-page thumbnails, image export, and the fallback page display (page view and page-list thumbnails when the engine is unavailable)
+- **Display exception (approved by the user, 2026-11-09)**: on-screen page display may go through a native engine taken from the user's viewer Lire (C, MuPDF 1.28.6 with Lire's patches, statically linked in one library exporting only `ann_*`, loaded with ctypes). The exception covers on-screen display only (the page view and the page-list thumbnails); PyMuPDF keeps everything else and remains the fallback (`ANNOTER_RENDERER=pymupdf`, library missing, document refused). Design, decisions and measurements: PLAN.md, "Native display engine from Lire" (branch `perf/lire-engine`).
 - Pillow (image utilities)
 - PyInstaller — both `--onefile` and `--onedir`
 - pytest
@@ -29,6 +29,7 @@ The full target tree is in `PROMPT_RESTART.md` §4. Load-bearing invariants futu
 - **Annotations are children of their page item** -- a `QGraphicsPixmapItem` on the PyMuPDF display path, a `TiledPageItem` with the native engine (same logical rect, see `page_box_150()`). Their coordinates are page-local; moving/rotating a page moves its annotations automatically.
 - **Zoom convention:** `_apply_zoom(factor)` where `factor=1.0` means 1 screen pixel per PDF point (real size). The actual `QGraphicsView` scale is `factor * 72 / render_dpi`.
 - **Zoom grid (native engine, 2026-11):** every zoom factor is a power of 2^(1/768) and wheel notches land on powers of 2^(1/3); keep it so (see PLAN.md, D4) -- the engine renders exactly those levels.
+- **Native engine rules (`native/`, `annoter.engine`, `EngineDisplay`):** every `ann_*` call comes from the UI thread and the engine's threads never call back -- Qt polls with a `QTimer` that runs only while `ann_busy()`; the library exports nothing but `ann_*` (checked by `native/build_engine.py`); the engine never keeps the PDF file open (Save replaces it, then the engine reloads; page operations reload from `tobytes()`); every annotation Annoter turns into a Qt item is hidden from the engine by xref (`managed_annot_xrefs`), so nothing is drawn twice. A change to `annoter_engine.h` bumps `ANN_API_VERSION` and `native.API_VERSION` together.
 - **Re-render at higher DPI** (PyMuPDF display path only) is hysteretic (`HIGH_DPI_ZOOM_THRESHOLD` up, `HIGH_DPI_ZOOM_EXIT` down) and implemented via the pixmap's `devicePixelRatio`: the supersampled pixmap keeps the same *logical* scene size, so child annotations, undo history and the save path are untouched. Never swap the page item or rescale item geometry for DPI purposes.
 - **Every scene mutation goes through a `QUndoCommand`** (`Add`, `Delete`, `Move`, `ChangeColor`, `ChangeStroke`, `ChangeGdt`). Widgets must never mutate the scene directly.
 - **`ToolController(QObject)` is the single source of truth** for current tool/color/stroke. Views subscribe to its signals — no direct view-to-view coupling.

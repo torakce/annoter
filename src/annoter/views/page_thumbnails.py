@@ -177,9 +177,16 @@ class PageThumbnailList(QWidget):
         return self._list.count()
 
     def set_document(
-        self, renderer: PageRenderer | None, page_count: int = 0
+        self,
+        renderer: PageRenderer | None,
+        page_count: int = 0,
+        render: bool = True,
     ) -> None:
-        """Rebuild the list for a new document (None clears it)."""
+        """Rebuild the list for a new document (None clears it).
+
+        `render=False`: the thumbnails are pushed with `set_thumbnail`
+        (the native display engine renders them off the UI thread); the
+        placeholders stay until then."""
         self._timer.stop()
         self._pending = []
         self._renderer = renderer
@@ -192,8 +199,14 @@ class PageThumbnailList(QWidget):
             item.setToolTip(f"Page {i + 1}")
             item.setData(_ROLE_COUNT, 0)
             self._list.addItem(item)
-        self._pending = list(range(page_count))
-        self._timer.start()
+        if render:
+            self._pending = list(range(page_count))
+            self._timer.start()
+
+    def set_thumbnail(self, index: int, pixmap: QPixmap) -> None:
+        """Thumbnail of page `index`, rendered elsewhere."""
+        if 0 <= index < self._list.count() and not pixmap.isNull():
+            self._list.item(index).setIcon(QIcon(pixmap))
 
     def set_current_page(self, index: int) -> None:
         if 0 <= index < self._list.count():

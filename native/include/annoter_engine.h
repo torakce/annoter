@@ -17,7 +17,7 @@
  *  - the PDF file is read into memory and never kept open.
  *
  * Status: declarations validated on 2026-11-23; implementation in
- * native/src/engine.c (step 2 of the plan).
+ * native/src/engine.c. API version 2 (2026-11-24) adds the thumbnails.
  */
 #ifndef ANNOTER_ENGINE_H
 #define ANNOTER_ENGINE_H
@@ -36,7 +36,11 @@ extern "C" {
 #define ANN_API
 #endif
 
-#define ANN_API_VERSION 1
+#define ANN_API_VERSION 2
+
+/* Level of the page thumbnails (ann_set_thumbnails): whole page, view
+   rotation 0, every annotation drawn (thumbnails show the PDF as saved). */
+#define ANN_THUMB_LEVEL (-2147483647)
 
 /* Status codes. */
 enum {
@@ -86,6 +90,11 @@ ANN_API int  ann_page_bounds(ann_doc *d, int page, float rect[4]);  /* points, f
    annot.xref): never rasterized. Rebuilds the page's overlay list only. */
 ANN_API int  ann_set_hidden_annots(ann_doc *d, int page, const int *xrefs, int count);
 ANN_API int  ann_set_flags(ann_doc *d, int flags);            /* drops the tiles */
+
+/* Page thumbnails fitting a max_px square, rendered in the background
+   after the view and its prefetch (0 = none). They come through ann_poll
+   as tiles of level ANN_THUMB_LEVEL and are never evicted for budget. */
+ANN_API int  ann_set_thumbnails(ann_doc *d, int max_px);
 
 /* What is on screen. Replaces the previous request; work no longer useful
    is aborted. */

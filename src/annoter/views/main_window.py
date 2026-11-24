@@ -93,6 +93,7 @@ from annoter.services.command_usage import CommandUsage
 from annoter.services.pdf_render import PageRenderer
 from annoter.engine import EngineError, load_engine
 from annoter.controllers.page_display import EngineDisplay
+from annoter.views.page_thumbnails import THUMB_MAX_PX
 from annoter.services.recent_files import RecentFiles
 from annoter.services.thumbnail_cache import ThumbnailCache
 from annoter.services.theme import Theme, apply as apply_theme
@@ -1279,7 +1280,11 @@ class MainWindow(QMainWindow):
         if add_to_recent:
             self._recent.add(path)
         self._refresh_window_title()
-        self._page_list.set_document(self._renderer, doc.page_count)
+        # With the engine, thumbnails are rendered off the UI thread and
+        # pushed through EngineDisplay.thumbnailReady.
+        self._page_list.set_document(
+            self._renderer, doc.page_count, render=self._display is None
+        )
         self._central.setCurrentWidget(self._view)
         self._set_welcome_mode(False)
         self._show_page(0, _is_initial=True)
@@ -1312,6 +1317,8 @@ class MainWindow(QMainWindow):
             display.deleteLater()
             return None
         display.set_grayscale(self.act_grayscale.isChecked())
+        display.thumbnailReady.connect(self._page_list.set_thumbnail)
+        display.enable_thumbnails(THUMB_MAX_PX)
         return display
 
     def _hook_item_callbacks(self, item: AnnotationItem) -> None:
@@ -1568,7 +1575,7 @@ class MainWindow(QMainWindow):
                 _log.warning("hidden annotations not updated: %s", e)
         self._mark_structure_dirty()
         self._page_list.set_document(
-            self._renderer, self._doc.page_count
+            self._renderer, self._doc.page_count, render=self._display is None
         )
         self._show_page(show_index, _is_initial=True)
 
@@ -1790,7 +1797,7 @@ class MainWindow(QMainWindow):
             self._renderer.set_grayscale(checked)
             self._stash_current_page_items()
             self._page_list.set_document(
-                self._renderer, self._doc.page_count
+                self._renderer, self._doc.page_count, render=self._display is None
             )
             self._show_page(self._page_index, _is_initial=True)
 

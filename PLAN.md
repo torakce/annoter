@@ -1884,7 +1884,7 @@ is geometry.
   `test_quick_styles.py` updated (the rail has 11 tools again). Full
   run: 687 passed.
 
-### Native display engine from Lire (2026-11) -- validated, in progress
+### Native display engine from Lire (2026-11) -- done on the branch, merge pending
 
 Branch `perf/lire-engine` (from v0.3.0, `e084bd7`). Goal: make page
 *display* as fast as the user's viewer Lire (public repo `torakce/Lire`
@@ -1893,11 +1893,16 @@ Annoter. Annotation features do not change.
 
 **Validated by the user on 2026-11-23**: file tree, C API and steps as
 below; D3 = option A; D4 accepted (wheel step 2^(1/3) with snapping).
+Steps 0 to 7 are done (see "Progress"); merging into master and any
+release wait for the user's go.
 
 Approved exception to the stack rule (user, 2026-11-09): PyMuPDF is no
-longer mandated for **on-screen page display only**. It stays in charge
-of reading/writing annotations, saving, page operations, thumbnails,
-image export and everything else that is not performance-critical.
+longer mandated for **on-screen page display only** (the page view and,
+since step 7, the page-list thumbnails, which are on-screen display
+too). It stays in charge of reading/writing annotations, saving, page
+operations, start-page thumbnails, image export and everything else
+that is not performance-critical, and of the whole display when the
+engine is unavailable.
 
 #### Audit of the current display (v0.3.0)
 
@@ -1970,7 +1975,7 @@ the "interactif" scenario of `tests/harness.c`:
 - Memory budgets proportional to RAM, eviction by age then by distance
   to the current level / page.
 
-#### Decisions proposed
+#### Decisions (validated 2026-11-23, as built)
 
 - **D1 -- one native library, nothing else exported.** C, built with
   mingw-w64 like Lire (`x86_64-w64-mingw32-gcc`, cross from Linux/WSL, or
@@ -1985,7 +1990,8 @@ the "interactif" scenario of `tests/harness.c`:
   stream, expensive, built once) and *overlay* (annotations not drawn by
   Annoter, then form widgets: MuPDF's own order). Changing which
   annotations are hidden only rebuilds the cheap overlay list and the
-  tiles of that page.
+  tiles of that page. Step 7 adds a third, shared with the overlay when
+  nothing is hidden: *all annotations*, for the thumbnails (D9).
 - **D3 -- annotation rule: option A chosen (2026-11-23).**
   - *Option A (recommended)*: the engine draws the page plus every
     annotation that does **not** become a Qt item; every annotation that
@@ -2029,11 +2035,19 @@ the "interactif" scenario of `tests/harness.c`:
   in (larger library).
 - **D9 -- unchanged**: encrypted PDFs are still refused by `PdfDocument`
   (the C API takes a password for later use), rotation stays view-only,
-  thumbnails, start page and image export keep using PyMuPDF (an engine
-  thumbnail path is an optional step, only if the measurements show the
-  thumbnail strip slowing the first display).
+  start page and image export keep using PyMuPDF. **Page-list
+  thumbnails** (decided in step 7, after the measurements showed them
+  delaying the first sharp view by about 2 s on 2 cores: each PyMuPDF
+  thumbnail of an A0 page froze the UI 0.3 to 0.5 s): rendered by the
+  engine after the view and its prefetch, whole page at view rotation 0
+  with every annotation (the PDF as saved, as before), never evicted for
+  budget, kept across view rotations and hidden-annotation changes. A
+  running thumbnail gives way to visible tiles. Pages beyond the
+  display-list budget are analysed for their thumbnail only: the loader
+  renders it from the lists it just built and frees them at once. On the
+  PyMuPDF path thumbnails are unchanged.
 
-#### File tree (proposal)
+#### File tree (as built)
 
 New:
 
@@ -2066,13 +2080,14 @@ grid), `services/pdf_export.py` (`read_annotations` also reports the
 object numbers it turned into items), `config.py`, `build.py`,
 `.github/workflows/release.yml`, `.gitignore`, `CLAUDE.md`, `PLAN.md`.
 
-#### C API (proposal)
+#### C API (as built: `native/include/annoter_engine.h`, version 2)
 
 All calls come from one thread (Qt's UI thread). The engine's threads
 never call back: Qt polls with a `QTimer` that runs only while the
 engine reports work in progress. ctypes releases the GIL during calls.
 
-    #define ANN_API_VERSION 1
+    #define ANN_API_VERSION 2                  /* 2 (step 7): thumbnails */
+    #define ANN_THUMB_LEVEL (-2147483647)      /* level of the thumbnail tiles */
     enum { ANN_OK = 0, ANN_ERR_ARG = -1, ANN_ERR_OPEN = -2, ANN_ERR_PASSWORD = -3,
            ANN_ERR_MEMORY = -4, ANN_ERR_PAGE = -5 };
     enum { ANN_FLAG_GRAYSCALE = 1 };
@@ -2105,6 +2120,9 @@ engine reports work in progress. ctypes releases the GIL during calls.
     /* Annotations Annoter draws as Qt items (PDF object numbers): never rasterized. */
     int  ann_set_hidden_annots(ann_doc *d, int page, const int *xrefs, int count);
     int  ann_set_flags(ann_doc *d, int flags);                 /* drops the tiles */
+    /* Thumbnails fitting a max_px square, after the view and its prefetch (0 = none);
+       they come through ann_poll as tiles of level ANN_THUMB_LEVEL. */
+    int  ann_set_thumbnails(ann_doc *d, int max_px);
 
     /* What is on screen. Replaces the previous request; work no longer useful is aborted. */
     typedef struct {
@@ -2164,7 +2182,8 @@ engine reports work in progress. ctypes releases the GIL during calls.
   prefetch, polls while the engine is busy, updates only the rects of
   the tiles that arrived, forgets evicted tiles, reloads after Save and
   after page operations, passes the grayscale flag and the hidden
-  annotations.
+  annotations, and relays the engine's thumbnails to the page list
+  (`thumbnailReady`).
 - **Invariants of CLAUDE.md**:
 
   | Invariant | With the engine |
@@ -2483,6 +2502,59 @@ stand in for a modest PC). Real plans stay on the user's PC.
     only). AGPL: the MuPDF patch is in `native/patches/`; the next release
     notes should say the executable contains MuPDF (AGPL v3) with it.
 
+- **Step 7** (2026-11-24): done here; the user's run of
+  `tools/check_windows.cmd` with the new library is pending.
+  - Where the open time went (cloud, 2 cores, timestamps of each phase):
+    the engine document opened in 25 ms with a warm disk cache (the 1.4 s
+    seen once was a cold cache), the first view request left at 60 ms,
+    but the first poll only ran at 2.1 s and the view was sharp at 3.3 s:
+    the page list rendered its thumbnails with PyMuPDF on the UI thread,
+    0.3 to 0.5 s per A0 page, one per event-loop tick, in between.
+  - Engine API 2: `ann_set_thumbnails(doc, max_px)` and
+    `ANN_THUMB_LEVEL` (see D9 for the rules). `EngineDisplay` emits
+    `thumbnailReady(page, QPixmap)`; `PageThumbnailList.set_document(...,
+    render=False)` keeps the placeholders until `set_thumbnail()` fills
+    them. PyMuPDF thumbnails remain on the fallback path.
+  - Found and fixed with the random-call stress test (AddressSanitizer +
+    UBSan, now also switching thumbnails on and off and with a list
+    budget below one page set): changing the thumbnail size freed queued
+    jobs still in the work queue (use after free), and the loaders kept
+    interrupting each other's thumbnail-only analyses (endless work).
+    Clean afterwards on 7 seeds, small and normal budgets, 10-page and
+    15 x A0 documents.
+  - Tuning: render threads cores - 1, loaders cores / 4 (1 to 3), tiles
+    RAM / 12 (max 1 GB), lists RAM / 10 (max 2 GB) kept. With
+    `--threads 1 --ram-gb 4` and `--ram-gb 2` the scenario stays within
+    the figures below (open 0.26 to 0.35 s, detail 0.17 s, every other
+    action under 0.1 s; peak memory 661 and 526 MB). With a list budget of
+    60 MB (5 of the 15 pages kept), all 15 thumbnails still arrive within
+    2 s.
+  - Tests: `tests/test_engine_native.py` +4 (thumbnails of every page:
+    rotation 0 whatever the view's, scale, pixels against PyMuPDF, handed
+    once and kept across a view rotation; hidden annotations shown in
+    thumbnails; grayscale; thumbnails beyond the list budget, in a
+    subprocess with `ANNOTER_ENGINE_LIST_MB=1`), `tests/test_tiled_page_item.py`
+    +1 (the page list gets its 4 thumbnails from the engine, again after a
+    page operation, and `PageRenderer.render_thumbnail` is never called).
+  - Final before / after, same machine and same day (my environment: 2
+    slow cores, so 1 render thread and 1 loader; offscreen window 1600 x
+    1000, DPR 1.0; engine figures are the median of 3 runs; longest UI
+    freeze in brackets):
+
+    | Action | PyMuPDF (v0.3.0 path) | engine, step 4 | engine, step 7 |
+    |---|---:|---:|---:|
+    | Open -> sharp page (fit) | 3.58 s (3.31 s) | 1.58 s (0.47 s) | 0.34 s (0.06 s) |
+    | Zoom to detail (fit -> 300 %) | 6.53 s (6.38 s) | 0.13 s (0.01 s) | 0.19 s (0.01 s) |
+    | 1 wheel notch | 0.15 s (0.01 s) | 0.01 s (0.01 s) | 0.01 s (0.01 s) |
+    | Pan 800 x 400 px | 0.33 s (0.01 s) | 0.07 s (0.01 s) | 0.06 s (0.01 s) |
+    | Next page | 6.77 s (6.63 s) | 0.01 s (0.02 s) | 0.01 s (0.01 s) |
+    | Back to whole page | 3.34 s (3.19 s) | 0.02 s (0.02 s) | 0.03 s (0.02 s) |
+    | Peak memory of the process | 2136 MB | 742 MB | 716 MB |
+
+    The step-4 column was measured on another day; the detail zoom moves
+    between 0.13 and 0.21 s from one day to the next on this shared
+    machine, with or without thumbnails (checked by switching them off).
+
 #### Open points for the user
 
 - Licence: the engine links MuPDF (AGPL v3) like PyMuPDF already does;
@@ -2492,12 +2564,15 @@ stand in for a modest PC). Real plans stay on the user's PC.
 - My Python 3.13 environment crashes in `test_canvas_handles.py` with
   v0.3.0 unchanged; step 1 re-runs the baseline on Python 3.12, the
   version the project targets.
+- Pre-existing, outside this work, worth a later fix: the slow suite
+  (windows of earlier tests never deleted, see step 4) and the
+  Windows-only failure in `test_canvas_overlays.py`.
 
 ### Known remaining issues
 
 - Page rotation is still view-only (see M4 notes).
-- `PageRenderer` renders pages with `annots=True`, so saved annotations are baked into the page pixmap *and* drawn again as editable items on top. The two coincide exactly, so this is invisible in practice, but rendering with `annots=False` would require keeping unknown foreign annot types visible some other way.
-- Rendering is synchronous on the UI thread; an A0 page render blocks the UI for its duration. A background-render + progressive-display pass is the next perf candidate for >100 MB files.
+- PyMuPDF display path only (fallback): `PageRenderer` renders pages with `annots=True`, so saved annotations are baked into the page pixmap *and* drawn again as editable items on top; a moved or deleted annotation leaves a ghost until the next save. The native engine hides every annotation Annoter turns into an item (D3, option A), so it has neither problem.
+- PyMuPDF display path only (fallback): rendering is synchronous on the UI thread; an A0 page render blocks the UI for its duration. The native engine ("Native display engine from Lire") renders in the background, by tiles.
 - Callout leaders are not drawn by MuPDF-based viewers (only Acrobat-class viewers honor `/CL`); making the leader visible everywhere would require authoring the FreeText `/AP` stream (text + line) with an expanded BBox, as the GD&T appearance does.
 - Groups (Ctrl+G) are session-only: membership lives in `PdfScene._groups`, not in the PDF, so it does not survive a save/reopen cycle. Persisting it would need a new JSON key (e.g. a shared group id in each member's `/Subject` payload) plus reconstruction in `read_annotations`.
 - Smart guides only engage for a single selected item; group drags get axis-lock but not guide-snapping (snapping each item of a group independently could pull its relative layout apart).

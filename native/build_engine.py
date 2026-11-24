@@ -69,7 +69,7 @@ MUPDF_OPTIONS = [
 API = (
     "ann_api_version", "ann_engine_new", "ann_engine_free",
     "ann_open_file", "ann_open_memory", "ann_reload_file", "ann_reload_memory", "ann_close",
-    "ann_page_count", "ann_page_bounds", "ann_set_hidden_annots", "ann_set_flags",
+    "ann_page_count", "ann_page_bounds", "ann_set_hidden_annots", "ann_set_flags", "ann_set_thumbnails",
     "ann_request_view", "ann_poll", "ann_release_tile", "ann_poll_evicted",
     "ann_busy", "ann_view_complete", "ann_cancel", "ann_stats",
 )

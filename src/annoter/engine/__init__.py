@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 from annoter.engine.native import (
+    THUMB_LEVEL,
     EngineError,
     NativeDocument,
     NativeEngine,
@@ -34,6 +35,7 @@ from annoter.engine.native import (
 )
 
 __all__ = [
+    "THUMB_LEVEL",
     "EngineError",
     "NativeDocument",
     "NativeEngine",

@@ -47,6 +47,7 @@
 #define HASH_SIZE 8192
 #define TILE_BYTES ((size_t)TILE * TILE * 4)
 #define PREVIEW_LEVEL INT_MIN
+#define THUMB_LEVEL ANN_THUMB_LEVEL
 
 enum { L_NONE, L_QUEUED, L_BUILDING, L_READY, L_ERROR };
 enum { J_IDLE, J_QUEUED, J_RUNNING, J_DONE, J_READY, J_FAILED };
@@ -78,12 +79,14 @@ typedef struct {
 	fz_rect bounds;         /* page bounds (points), without the view rotation */
 	fz_display_list *list;  /* page content */
 	fz_display_list *olist; /* overlay: annotations not drawn by the host, then widgets */
+	fz_display_list *alist; /* every annotation, then widgets (thumbnails) */
 	int lstate;             /* L_READY when both lists exist */
 	unsigned lused;
 	fz_cookie lcookie;
 	fz_rect lbounds;        /* bounds measured when the page was loaded */
 	int bounds_differ;
 	int urgent;
+	int thumb_only;         /* analysed for its thumbnail only: lists freed at once */
 	size_t lbytes;
 	int *hidden, nhidden;   /* sorted object numbers of hidden annotations */
 	unsigned epoch;
@@ -111,6 +114,7 @@ struct ann_doc {
 
 	/* view */
 	int has_view, page, rot, flags;
+	int thumb_px;                      /* 0: no thumbnails */
 	double grid_base, scale;
 	int level, exact_level, min_level, max_level;
 	fz_rect vis;                       /* viewport, points of the rotated page frame */
@@ -163,7 +167,7 @@ static int grid_floor(int L) { return floor_div(L, GRID) * GRID; }
 static int grid_ceil(int L) { return -grid_floor(-L); }
 static double level_scale(ann_doc *d, int L)
 {
-	return L == PREVIEW_LEVEL ? 0 : d->grid_base * exp2((double)L / LPO);
+	return L == PREVIEW_LEVEL || L == THUMB_LEVEL ? 0 : d->grid_base * exp2((double)L / LPO);
 }
 static fz_matrix view_ctm(int r, double s) { return fz_concat(fz_rotate((float)r), fz_scale((float)s, (float)s)); }
 static fz_irect page_pbox(Page *p, int r, double s) { return fz_round_rect(fz_transform_rect(p->bounds, view_ctm(r, s))); }
@@ -315,6 +319,22 @@ static Job *get_preview(ann_doc *d, int i)
 	return j;
 }
 
+/* whole page, rotation 0, fitting a thumb_px square */
+static Job *get_thumb(ann_doc *d, int i)
+{
+	Job *j = hget(d, i, THUMB_LEVEL, 0, 0);
+	if (j->scale == 0) {
+		Page *p = &d->pages[i];
+		double w = p->bounds.x1 - p->bounds.x0, h = p->bounds.y1 - p->bounds.y0;
+		double s = fmin(d->thumb_px / fmax(w, 1), d->thumb_px / fmax(h, 1));
+		j->scale = s;
+		j->ctm = view_ctm(0, s);
+		j->rect = page_pbox(p, 0, s);
+		if (j->rect.x1 <= j->rect.x0 || j->rect.y1 <= j->rect.y0) j->state = J_FAILED;
+	}
+	return j;
+}
+
 /* ---------- worker threads ---------- */
 
 static void to_gray(fz_context *c, fz_pixmap *pix)
@@ -331,22 +351,23 @@ static void to_gray(fz_context *c, fz_pixmap *pix)
 	}
 }
 
-static fz_pixmap *render_job(fz_context *c, Job *j, fz_display_list *list, fz_display_list *olist)
+static fz_pixmap *render_area(fz_context *c, fz_irect rect, fz_matrix ctm, fz_display_list *list,
+		fz_display_list *olist, fz_cookie *cookie, int gray)
 {
 	fz_pixmap *pix = NULL;
 	fz_device *dev = NULL;
 	fz_var(pix);
 	fz_var(dev);
 	fz_try(c) {
-		fz_rect area = fz_rect_from_irect(j->rect);
-		pix = fz_new_pixmap_with_bbox(c, fz_device_bgr(c), j->rect, NULL, 1);
+		fz_rect area = fz_rect_from_irect(rect);
+		pix = fz_new_pixmap_with_bbox(c, fz_device_bgr(c), rect, NULL, 1);
 		fz_clear_pixmap_with_value(c, pix, 0xff);
 		dev = fz_new_draw_device(c, fz_identity, pix);
-		fz_run_display_list(c, list, dev, j->ctm, area, &j->cookie);
-		if (olist && !j->cookie.abort)
-			fz_run_display_list(c, olist, dev, j->ctm, area, &j->cookie);
+		fz_run_display_list(c, list, dev, ctm, area, cookie);
+		if (olist && !cookie->abort)
+			fz_run_display_list(c, olist, dev, ctm, area, cookie);
 		fz_close_device(c, dev);
-		if (j->gray) to_gray(c, pix);
+		if (gray) to_gray(c, pix);
 	}
 	fz_always(c)
 		fz_drop_device(c, dev);
@@ -355,6 +376,11 @@ static fz_pixmap *render_job(fz_context *c, Job *j, fz_display_list *list, fz_di
 		pix = NULL;
 	}
 	return pix;
+}
+
+static fz_pixmap *render_job(fz_context *c, Job *j, fz_display_list *list, fz_display_list *olist)
+{
+	return render_area(c, j->rect, j->ctm, list, olist, &j->cookie, j->gray);
 }
 
 static void worker_main(void *arg)
@@ -377,7 +403,7 @@ static void worker_main(void *arg)
 		p = &j->doc->pages[j->page];
 		if (p->lstate != L_READY || !p->list) { j->state = J_IDLE; e->resched = 1; continue; }
 		list = fz_keep_display_list(c, p->list);
-		olist = fz_keep_display_list(c, p->olist);
+		olist = fz_keep_display_list(c, j->level == THUMB_LEVEL ? p->alist : p->olist);
 		j->state = J_RUNNING;
 		j->epoch = p->epoch;
 		j->gray = (j->doc->flags & ANN_FLAG_GRAYSCALE) != 0;
@@ -429,16 +455,18 @@ static int hidden_has(const int *v, int n, int num)
 /* Builds the content list (unless `*list` is already there) and the overlay
    list of page i. Returns 0 on success. */
 static int build_lists(fz_context *c, fz_document *doc, int i, fz_cookie *cookie, fz_rect *bounds,
-		fz_display_list **list, fz_display_list **olist, const int *hidden, int nhidden)
+		fz_display_list **list, fz_display_list **olist, fz_display_list **alist,
+		const int *hidden, int nhidden)
 {
 	fz_page *page = NULL;
 	fz_device *dev = NULL;
-	fz_display_list *l = NULL, *o = NULL;
+	fz_display_list *l = NULL, *o = NULL, *a = NULL;
 	int ok = 0;
 	fz_var(page);
 	fz_var(dev);
 	fz_var(l);
 	fz_var(o);
+	fz_var(a);
 	fz_var(ok);
 	fz_try(c) {
 		pdf_page *pp;
@@ -467,6 +495,20 @@ static int build_lists(fz_context *c, fz_document *doc, int i, fz_cookie *cookie
 		}
 		fz_run_page_widgets(c, page, dev, fz_identity, cookie);
 		fz_close_device(c, dev);
+		fz_drop_device(c, dev);
+		dev = NULL;
+		/* thumbnails show every annotation: same list when none is hidden */
+		if (!*alist) {
+			if (!nhidden) {
+				a = fz_keep_display_list(c, o);
+			} else {
+				a = fz_new_display_list(c, *bounds);
+				dev = fz_new_list_device(c, a);
+				fz_run_page_annots(c, page, dev, fz_identity, cookie);
+				fz_run_page_widgets(c, page, dev, fz_identity, cookie);
+				fz_close_device(c, dev);
+			}
+		}
 		ok = 1;
 	}
 	fz_always(c) {
@@ -479,10 +521,12 @@ static int build_lists(fz_context *c, fz_document *doc, int i, fz_cookie *cookie
 	if (!ok) {
 		fz_drop_display_list(c, l);
 		fz_drop_display_list(c, o);
+		fz_drop_display_list(c, a);
 		return -1;
 	}
 	if (l) *list = l;
 	*olist = o;
+	if (a) *alist = a;
 	return 0;
 }
 
@@ -523,6 +567,8 @@ static int any_loader_busy(ann_engine *e, ann_doc *d)
 	return 0;
 }
 
+static void drop_list(ann_doc *d, Page *p);
+
 static void loader_main(void *arg)
 {
 	ann_engine *e = ((ThreadArg *)arg)->e;
@@ -533,10 +579,14 @@ static void loader_main(void *arg)
 		ann_doc *d = e->active;
 		int i = -1, nh, *hidden = NULL;
 		Page *p;
-		fz_display_list *list, *olist = NULL;
+		fz_display_list *list, *olist = NULL, *alist;
 		fz_document *doc;
 		fz_rect lb;
-		int r;
+		int r, thumb = 0, tgray = 0;
+		fz_irect trect = fz_empty_irect;
+		fz_matrix tctm = fz_identity;
+		unsigned tepoch = 0;
+		fz_pixmap *tpix = NULL;
 		if (e->paused || !d || !d->doc || !d->pages || !queued_page(d)) {
 			cond_wait(&e->cv_load, &e->mu);
 			continue;
@@ -577,14 +627,29 @@ static void loader_main(void *arg)
 		e->loader_doc[k] = d;
 		lb = p->bounds;
 		list = p->list;              /* content list kept when only the overlay changed */
+		alist = p->alist;            /* does not depend on the hidden annotations */
 		nh = p->nhidden;
 		if (nh) {
 			hidden = malloc(nh * sizeof *hidden);
 			memcpy(hidden, p->hidden, nh * sizeof *hidden);
 		}
+		if (p->thumb_only && d->thumb_px > 0) {
+			/* beyond the list budget: render the thumbnail here, from the
+			   lists just built, then free them */
+			Job *tj = get_thumb(d, i);
+			if (tj->state == J_IDLE) {
+				thumb = 1;
+				trect = tj->rect;
+				tctm = tj->ctm;
+				tepoch = p->epoch;
+				tgray = (d->flags & ANN_FLAG_GRAYSCALE) != 0;
+			}
+		}
 		mutex_unlock(&e->mu);
-		r = build_lists(c, doc, i, &p->lcookie, &lb, &list, &olist, hidden, nh);
+		r = build_lists(c, doc, i, &p->lcookie, &lb, &list, &olist, &alist, hidden, nh);
 		free(hidden);
+		if (r == 0 && thumb && !p->lcookie.abort)
+			tpix = render_area(c, trect, tctm, list, alist, &p->lcookie, tgray);
 
 		mutex_lock(&e->mu);
 		e->loader_busy[k] = 0;
@@ -592,7 +657,9 @@ static void loader_main(void *arg)
 		e->loader_doc[k] = NULL;
 		if (p->lcookie.abort) {
 			if (list != p->list) fz_drop_display_list(c, list);
+			if (alist != p->alist) fz_drop_display_list(c, alist);
 			fz_drop_display_list(c, olist);
+			fz_drop_pixmap(c, tpix);
 			p->lstate = L_NONE;
 		} else if (r == 0) {
 			if (!fz_is_empty_rect(lb) &&
@@ -604,12 +671,32 @@ static void loader_main(void *arg)
 			d->list_bytes -= p->lbytes;
 			p->list = list;
 			p->olist = olist;
-			p->lbytes = fz_display_list_memory(c, list) + fz_display_list_memory(c, olist);
+			p->alist = alist;
+			p->lbytes = fz_display_list_memory(c, list) + fz_display_list_memory(c, olist) +
+				(alist != olist ? fz_display_list_memory(c, alist) : 0);
 			d->list_bytes += p->lbytes;
 			p->lstate = L_READY;
+			if (tpix) {
+				Job *tj = get_thumb(d, i);
+				if (tj->state == J_IDLE && p->epoch == tepoch &&
+						tj->rect.x0 == trect.x0 && tj->rect.y0 == trect.y0 &&
+						tj->rect.x1 == trect.x1 && tj->rect.y1 == trect.y1) {
+					tj->pix = tpix;
+					tj->epoch = tepoch;
+					tj->state = J_DONE;
+					tj->dnext = d->done_head;
+					d->done_head = tj;
+				} else {
+					fz_drop_pixmap(c, tpix);
+				}
+			}
+			if (p->thumb_only)       /* nobody else wants this page now */
+				drop_list(d, p);
 		} else {
+			fz_drop_pixmap(c, tpix);
 			p->lstate = L_ERROR;
 		}
+		p->thumb_only = 0;
 		e->resched = 1;
 		cond_broadcast(&e->cv_idle);
 	}
@@ -624,7 +711,8 @@ static void drop_list(ann_doc *d, Page *p)
 	fz_context *c = d->eng->ctx;
 	fz_drop_display_list(c, p->list);
 	fz_drop_display_list(c, p->olist);
-	p->list = p->olist = NULL;
+	fz_drop_display_list(c, p->alist);
+	p->list = p->olist = p->alist = NULL;
 	d->list_bytes -= p->lbytes;
 	p->lbytes = 0;
 	p->lstate = L_NONE;
@@ -637,7 +725,7 @@ static void drop_overlay(ann_doc *d, Page *p)
 	size_t before = p->lbytes;
 	fz_drop_display_list(c, p->olist);
 	p->olist = NULL;
-	p->lbytes = p->list ? fz_display_list_memory(c, p->list) : 0;
+	p->lbytes = (p->list ? fz_display_list_memory(c, p->list) : 0) + (p->alist ? fz_display_list_memory(c, p->alist) : 0);
 	d->list_bytes = d->list_bytes - before + p->lbytes;
 	if (p->lstate == L_READY) p->lstate = L_NONE;
 }
@@ -715,8 +803,10 @@ static void drop_job(Job *j)
 	}
 }
 
-/* (under mu) empties the tile cache of a document (page = -1) or of one page */
-static void flush_jobs(ann_doc *d, int page)
+/* (under mu) empties the tile cache of a document (page = -1) or of one
+   page; the thumbnails stay when `keep_thumbs` (they depend neither on the
+   view rotation nor on the hidden annotations) */
+static void flush_jobs(ann_doc *d, int page, int keep_thumbs)
 {
 	int h;
 	if (d->eng->active == d) clear_wq(d->eng);     /* only the active document has queued jobs */
@@ -724,7 +814,8 @@ static void flush_jobs(ann_doc *d, int page)
 		Job *j = d->htab[h];
 		while (j) {
 			Job *next = j->hnext;
-			if (page < 0 || j->page == page) drop_job(j);
+			if ((page < 0 || j->page == page) && !(keep_thumbs && j->level == THUMB_LEVEL))
+				drop_job(j);
 			j = next;
 		}
 	}
@@ -750,12 +841,13 @@ static void doc_clear(ann_doc *d)
 	fz_context *c = d->eng->ctx;
 	int i;
 	mutex_lock(&d->eng->mu);
-	flush_jobs(d, -1);
+	flush_jobs(d, -1, 0);
 	drop_done(d);
 	mutex_unlock(&d->eng->mu);
 	for (i = 0; i < d->npages; i++) {
 		fz_drop_display_list(c, d->pages[i].list);
 		fz_drop_display_list(c, d->pages[i].olist);
+		fz_drop_display_list(c, d->pages[i].alist);
 		free(d->pages[i].hidden);
 	}
 	free(d->pages);
@@ -1067,7 +1159,8 @@ static void evict(ann_doc *d)
 	for (h = 0; h < HASH_SIZE; h++) {
 		Job *j;
 		for (j = d->htab[h]; j; j = j->hnext)
-			if (j->used != e->gen && (j->state == J_READY || j->state == J_IDLE || j->state == J_FAILED))
+			if (j->used != e->gen && j->level != THUMB_LEVEL &&
+					(j->state == J_READY || j->state == J_IDLE || j->state == J_FAILED))
 				cand[n++] = j;
 	}
 	if (n > 1) qsort(cand, n, sizeof *cand, cmp_used);
@@ -1085,8 +1178,20 @@ static void queue_page(ann_doc *d, int i, int urgent)
 	Page *p = &d->pages[i];
 	p->lused = d->eng->gen;
 	p->urgent = urgent;
+	p->thumb_only = 0;
 	if (p->lstate == L_NONE) p->lstate = L_QUEUED;
 	if (p->lstate == L_QUEUED) d->lq[d->nlq++] = i;
+}
+
+/* (under mu) a page beyond the list budget, analysed for its thumbnail only */
+static void queue_thumb(ann_doc *d, int i)
+{
+	Page *p = &d->pages[i];
+	p->lused = d->eng->gen;
+	p->urgent = 0;
+	p->thumb_only = 1;
+	p->lstate = L_QUEUED;
+	d->lq[d->nlq++] = i;
 }
 
 static void schedule(ann_doc *d)
@@ -1205,6 +1310,33 @@ static void schedule(ann_doc *d)
 		}
 	}
 
+	/* pass 5: thumbnails, closest first, last of all: rendered by the
+	   workers for the analysed pages, by the loaders for the pages beyond
+	   the list budget (whose lists are freed at once) */
+	if (d->thumb_px > 0)
+		for (dist = 0; dist < d->npages; dist++) {
+			int side;
+			for (side = 0; side < (dist ? 2 : 1); side++) {
+				Page *p;
+				Job *tj;
+				i = side ? cur - dist : cur + dist;
+				if (i < 0 || i >= d->npages) continue;
+				p = &d->pages[i];
+				if (p->lstate == L_READY) {
+					want(e, get_thumb(d, i), 7e9 + dist);
+					continue;
+				}
+				if (p->lstate == L_BUILDING) {
+					if (p->thumb_only) p->lused = e->gen;   /* still wanted: not interrupted */
+					continue;
+				}
+				tj = hfind(d, i, THUMB_LEVEL, 0, 0);
+				if (all_ready && (!tj || tj->state == J_IDLE) &&
+						(p->lstate == L_NONE || (p->lstate == L_QUEUED && p->lused != e->gen)))
+					queue_thumb(d, i);
+			}
+		}
+
 	/* pages no longer wanted */
 	for (k = 0; k < d->nlq_old; k++) {
 		Page *p = &d->pages[d->lq_old[k]];
@@ -1238,6 +1370,11 @@ static void schedule(ann_doc *d)
 	e->wq_pos = 0;
 	for (k = 0; k < e->nworkers; k++)
 		if (e->running[k] && e->running[k]->used != e->gen) e->running[k]->cookie.abort = 1;
+	/* a thumbnail is a whole-page render: it gives way to visible tiles
+	   (taken up again afterwards); matters with few cores */
+	if (e->wq.n > 0 && e->wq.v[0]->key < 2e9)
+		for (k = 0; k < e->nworkers; k++)
+			if (e->running[k] && e->running[k]->level == THUMB_LEVEL) e->running[k]->cookie.abort = 1;
 	cond_broadcast(&e->cv_work);
 	cond_broadcast(&e->cv_load);
 	mutex_unlock(&e->mu);
@@ -1499,7 +1636,7 @@ int ann_set_hidden_annots(ann_doc *d, int page, const int *xrefs, int count)
 	if (p->lstate == L_BUILDING) p->lcookie.abort = 1;     /* rebuilt with the new list */
 	else if (p->olist || p->lstate == L_READY) drop_overlay(d, p);
 	p->epoch = ++d->epoch;
-	flush_jobs(d, page);
+	flush_jobs(d, page, 1);
 	mutex_unlock(&e->mu);
 	return ANN_OK;
 }
@@ -1516,7 +1653,28 @@ int ann_set_flags(ann_doc *d, int flags)
 		int i;
 		for (i = 0; i < d->npages; i++) d->pages[i].epoch = d->epoch;
 	}
-	flush_jobs(d, -1);
+	flush_jobs(d, -1, 0);
+	mutex_unlock(&d->eng->mu);
+	return ANN_OK;
+}
+
+int ann_set_thumbnails(ann_doc *d, int max_px)
+{
+	int h;
+	if (!d || max_px < 0) return ANN_ERR_ARG;
+	if (max_px == d->thumb_px) return ANN_OK;
+	mutex_lock(&d->eng->mu);
+	d->thumb_px = max_px;
+	if (d->eng->active == d) clear_wq(d->eng);     /* queued thumbnails are about to go */
+	for (h = 0; h < HASH_SIZE; h++) {
+		Job *j = d->htab[h];
+		while (j) {
+			Job *next = j->hnext;
+			if (j->level == THUMB_LEVEL) drop_job(j);
+			j = next;
+		}
+	}
+	d->need_schedule = 1;
 	mutex_unlock(&d->eng->mu);
 	return ANN_OK;
 }
@@ -1539,7 +1697,7 @@ int ann_request_view(ann_doc *d, const ann_view *v, ann_target *out)
 	}
 	if (rot != d->rot || fabs(v->grid_base - d->grid_base) > 1e-9) {
 		/* levels or orientation change meaning: start afresh */
-		flush_jobs(d, -1);
+		flush_jobs(d, -1, 1);
 		d->rot = rot;
 		d->grid_base = v->grid_base;
 	}
@@ -1593,7 +1751,7 @@ int ann_poll(ann_doc *d, ann_tile *out, int max)
 			relayout = 1;
 		}
 	if (relayout) {
-		flush_jobs(d, -1);
+		flush_jobs(d, -1, 0);
 		compute_level_limits(d);
 	}
 	list = d->done_head;
@@ -1630,7 +1788,7 @@ int ann_poll(ann_doc *d, ann_tile *out, int max)
 		out[n].id = j->id;
 		out[n].page = j->page;
 		out[n].level = j->level;
-		out[n].rotation = d->rot;
+		out[n].rotation = j->level == THUMB_LEVEL ? 0 : d->rot;
 		out[n].tx = j->tx;
 		out[n].ty = j->ty;
 		out[n].epoch = j->epoch;

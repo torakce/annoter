@@ -2,21 +2,24 @@
 
 Open / close, page count and bounds equal to PyMuPDF's, tile pixels equal
 to PyMuPDF's render of the same area, rotations, hidden annotations,
-grayscale, reloads, cancel, errors, and PyMuPDF plus the engine in the
-same process. Headless: PyMuPDF and ctypes only, no Qt. Skipped when the
+grayscale, thumbnails (also beyond the page-analysis budget), reloads,
+cancel, errors, and PyMuPDF plus the engine in the same process. Headless: PyMuPDF and ctypes only, no Qt. Skipped when the
 library is not built (`python native/build_engine.py`).
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import textwrap
 import time
 from pathlib import Path
 
 import fitz
 import pytest
 
-from annoter.engine import EngineError, PasswordError, load_engine
+from annoter.engine import THUMB_LEVEL, EngineError, PasswordError, load_engine
 
 ENGINE = None if os.environ.get("ANNOTER_RENDERER") == "pymupdf" else load_engine()
 pytestmark = pytest.mark.skipif(ENGINE is None, reason="native engine library not built")
@@ -117,6 +120,28 @@ def _render(d, page, scale, rotation=0, visible=None, exact=True, timeout=60.0):
         assert time.monotonic() - t0 < timeout, d.stats()
         time.sleep(0.002)
     return target, tiles, seen, evicted
+
+
+def _thumbnails(d, timeout=60.0) -> dict:
+    """Poll until the engine is idle; returns the thumbnails by page."""
+    thumbs = {}
+    t0 = time.monotonic()
+    while True:
+        got = d.poll()
+        for t in got:
+            if t.level == THUMB_LEVEL:
+                assert t.page not in thumbs, "thumbnail handed twice"
+                thumbs[t.page] = t
+        d.evicted()
+        if not got and not d.busy():
+            return thumbs
+        assert time.monotonic() - t0 < timeout, d.stats()
+        time.sleep(0.002)
+
+
+def _tile_pixmap(t) -> fitz.Pixmap:
+    """One tile as an RGB pixmap at its own origin."""
+    return _assemble(type("T", (), {"box": t.rect})(), {(0, 0): t})
 
 
 def _assemble(target, tiles) -> fitz.Pixmap:
@@ -362,3 +387,119 @@ def test_pymupdf_and_engine_side_by_side(plan) -> None:
             _render(d, 2, 0.4)
         after = ref[0].get_pixmap(matrix=fitz.Matrix(0.2, 0.2)).samples
     assert before == middle == after
+
+
+def test_thumbnails_of_every_page(doc, plan, aa6) -> None:
+    """Whole page fitting the square, rotation 0 whatever the view's, same
+    pixels as PyMuPDF's thumbnail; handed once, after the view."""
+    doc.set_thumbnails(128)
+    try:
+        doc.request_view(0, 0.5, (0, 0, 400, 400), rotation=90)
+        thumbs = _thumbnails(doc)
+        assert sorted(thumbs) == [0, 1, 2]
+        with fitz.open(str(plan)) as ref:
+            for i, t in thumbs.items():
+                rect = ref[i].rect
+                assert t.rotation == 0
+                assert t.scale == pytest.approx(128 / max(rect.width, rect.height), rel=1e-6)
+                expected = ref[i].get_pixmap(matrix=fitz.Matrix(t.scale, t.scale), alpha=False)
+                got = _tile_pixmap(t)
+                assert got.irect == expected.irect
+                mean, off = _diff(got, expected)
+                # exact with LIRE_NOHL=1; Lire's direct drawing of thin
+                # strokes shows more at this scale (every line is thin)
+                limit = (0.5, 0.001) if os.environ.get("LIRE_NOHL") == "1" else (6.0, 0.04)
+                assert mean < limit[0] and off < limit[1], (i, mean, off)
+        # nothing more to do: the thumbnails are kept, never re-rendered
+        doc.request_view(1, 0.5, (0, 0, 400, 400))
+        assert not _thumbnails(doc)
+    finally:
+        doc.set_thumbnails(0)
+
+
+def test_thumbnails_show_every_annotation(annotated) -> None:
+    """The page list shows the PDF as saved: hidden annotations included."""
+    with fitz.open(str(annotated)) as ref:
+        square = [a.xref for a in ref[0].annots() if a.type[1] == "Square"]
+    d = ENGINE.open_file(annotated)
+    try:
+        d.set_hidden_annots(0, square)
+        d.set_thumbnails(300)
+        d.request_view(0, 1.0, (0, 0, 600, 400))
+        t = _thumbnails(d)[0]
+        px = _tile_pixmap(t).pixel(int(150 * t.scale), int(100 * t.scale))
+        assert px[0] > 200 and px[1] < 80, px
+    finally:
+        d.close()
+
+
+def test_thumbnails_and_grayscale(doc) -> None:
+    doc.set_thumbnails(64)
+    try:
+        doc.request_view(0, 0.5, (0, 0, 400, 400))
+        _thumbnails(doc)
+        doc.set_grayscale(True)
+        doc.request_view(0, 0.5, (0, 0, 400, 400))
+        thumbs = _thumbnails(doc)
+        assert sorted(thumbs) == [0, 1, 2]  # rendered again, in gray
+        s = thumbs[0].pixels
+        assert all(s[i] == s[i + 1] == s[i + 2] for i in range(0, len(s), 4 * 7))
+    finally:
+        doc.set_grayscale(False)
+        doc.set_thumbnails(0)
+
+
+def test_thumbnails_beyond_the_list_budget(tmp_path) -> None:
+    """Pages the analysis budget cannot keep still get their thumbnail (the
+    loaders render it, then free the page's lists at once). Own process:
+    the budget is fixed when the engine starts."""
+    path = tmp_path / "many.pdf"
+    doc = fitz.open()
+    for k in range(10):
+        page = doc.new_page(width=1191, height=842)
+        shape = page.new_shape()
+        for n in range(4000):
+            x = 20 + (n * 37) % 1150
+            y = 20 + (n * 53) % 800
+            shape.draw_line((x, y), (x + 15, y + 9))
+            shape.finish(color=((n % 7) / 7, 0, 0), width=0.2 + (n % 5) / 10)
+        shape.commit()
+        page.insert_text((60, 60), f"PAGE {k}", fontsize=40)
+    doc.save(str(path))
+    doc.close()
+    script = textwrap.dedent(
+        f"""
+        import re, sys, time
+        from annoter.engine import THUMB_LEVEL, load_engine
+        e = load_engine()
+        assert e is not None
+        d = e.open_file({str(path)!r})
+        d.set_thumbnails(96)
+        d.request_view(0, 0.3, (0, 0, 1191, 842))
+        thumbs, peak, t0 = set(), 0.0, time.monotonic()
+        while True:
+            got = d.poll()
+            thumbs |= {{t.page for t in got if t.level == THUMB_LEVEL}}
+            d.evicted()
+            peak = max(peak, float(re.search(r"lists=\\d+ \\(([0-9.]+) MB", d.stats()).group(1)))
+            if not got and not d.busy():
+                break
+            assert time.monotonic() - t0 < 120, d.stats()
+            time.sleep(0.002)
+        print("THUMBS", sorted(thumbs))
+        print("PEAK", peak)
+        print("STATS", d.stats())
+        d.close()
+        """
+    )
+    env = dict(os.environ, ANNOTER_ENGINE_LIST_MB="1", ANNOTER_ENGINE_THREADS="2")
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+    out = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True,
+                         timeout=180)
+    assert out.returncode == 0, out.stderr
+    lines = dict(line.split(" ", 1) for line in out.stdout.splitlines() if " " in line)
+    assert lines["THUMBS"] == str(list(range(10))), out.stdout
+    stats = lines["STATS"]
+    kept = int(stats.split("lists=")[1].split()[0])
+    assert kept < 10, stats  # most pages' lists were not kept

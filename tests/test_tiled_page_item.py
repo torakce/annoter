@@ -3,8 +3,8 @@
 Geometry identical to the 150-DPI pixmap item for several page sizes and
 rotations, annotation children and their coordinates, undo, save, tile
 placement against PyMuPDF, stretched fallback while tiles arrive, the
-notch grid of the zoom, grayscale, page operations, and the PyMuPDF
-fallback. Engine-dependent tests are skipped when the library is not
+notch grid of the zoom, grayscale, page operations, page-list thumbnails
+rendered by the engine, and the PyMuPDF fallback. Engine-dependent tests are skipped when the library is not
 built.
 """
 
@@ -39,6 +39,7 @@ from annoter.model.document import PdfDocument  # noqa: E402
 from annoter.services.pdf_render import PageRenderer  # noqa: E402
 from annoter.views.items import RectangleItem  # noqa: E402
 from annoter.views.main_window import MainWindow  # noqa: E402
+from annoter.views.page_thumbnails import THUMB_MAX_PX  # noqa: E402
 from annoter.views.pdf_view import PdfView  # noqa: E402
 from annoter.views.tiled_page_item import PREVIEW_LEVEL, TiledPageItem, page_box_150  # noqa: E402
 
@@ -391,3 +392,40 @@ def test_tiled_item_takes_no_mouse_of_its_own(qapp) -> None:
     assert not (item.flags() & QGraphicsItem.ItemIsSelectable)
     assert not (item.flags() & QGraphicsItem.ItemIsMovable)
     assert item.acceptedMouseButtons() == QGraphicsPixmapItem().acceptedMouseButtons()
+
+
+@needs_engine
+def test_page_list_thumbnails_come_from_the_engine(qapp, pdf, tmp_path, monkeypatch) -> None:
+    """The page list gets every thumbnail from the engine's threads, never
+    from PyMuPDF on the UI thread, again after a page operation."""
+    calls = []
+    original = PageRenderer.render_thumbnail
+
+    def counting(self, *args, **kwargs):
+        calls.append(args)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PageRenderer, "render_thumbnail", counting)
+    path = tmp_path / "thumbs.pdf"
+    path.write_bytes(pdf.read_bytes())
+    win = _window(qapp, path)
+    got: dict[int, tuple[int, int]] = {}
+    try:
+        win._display.thumbnailReady.connect(lambda i, pm: got.__setitem__(i, (pm.width(), pm.height())))
+        _pump_until(qapp, lambda: len(got) == 4)
+        with fitz.open(str(path)) as ref:
+            for i, (w, h) in got.items():
+                r = ref[i].rect
+                assert abs(max(w, h) - THUMB_MAX_PX) <= 1, (i, w, h)
+                assert (w > h) == (r.width > r.height), i
+        icon = win._page_list._list.item(1).icon()
+        assert not icon.isNull()
+        got.clear()
+        win._stash_current_page_items()
+        win._doc.raw.move_page(1, 0)
+        win._refresh_after_structure_change(0)
+        _pump_until(qapp, lambda: len(got) == 4)
+        assert got[0][0] > got[0][1]  # the landscape page is first now
+        assert calls == []
+    finally:
+        _close(win)

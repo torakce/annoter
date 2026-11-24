@@ -6,8 +6,9 @@ viewport size, devicePixelRatio, rotation), asks for the previous and
 next page as prefetch, polls with a `QTimer` that runs only while the
 engine has work in progress, hands finished tiles to the item and
 repaints only their area, forgets evicted ones, reloads after page
-operations, and passes the grayscale flag and the hidden annotations
-(option A of D3: every annotation Annoter draws as a Qt item).
+operations, passes the grayscale flag and the hidden annotations
+(option A of D3: every annotation Annoter draws as a Qt item), and
+relays the page thumbnails the engine renders after the view.
 
 The engine's threads never call back: everything here runs on the UI
 thread, from Qt signals and timers.
@@ -19,10 +20,11 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QRectF, QTimer
+from PySide6.QtCore import QEvent, QObject, QRectF, QTimer, Signal
+from PySide6.QtGui import QImage, QPixmap
 
 from annoter.config import BASE_RENDER_DPI
-from annoter.engine import NativeDocument, NativeEngine
+from annoter.engine import THUMB_LEVEL, NativeDocument, NativeEngine
 from annoter.views.pdf_view import PdfView
 from annoter.views.tiled_page_item import TiledPageItem, page_box_150
 
@@ -33,6 +35,10 @@ POLL_BATCH = 32
 
 class EngineDisplay(QObject):
     """See module docstring. One instance per open document."""
+
+    # Page index, thumbnail (after the view: the page list stays off the
+    # UI thread's rendering path).
+    thumbnailReady = Signal(int, QPixmap)
 
     def __init__(self, engine: NativeEngine, view: PdfView, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -122,6 +128,15 @@ class EngineDisplay(QObject):
         self._integrate_evictions()
         self.view_changed()
 
+    def enable_thumbnails(self, max_px: int) -> None:
+        """Have the engine render every page's thumbnail (in the
+        background, after the view) and emit `thumbnailReady`."""
+        if self._doc is None:
+            return
+        self._doc.set_thumbnails(max_px)
+        if not self._poll_timer.isActive():
+            self._poll_timer.start()
+
     def set_hidden_annots(self, page: int, xrefs: Iterable[int]) -> None:
         """Annotations of `page` Annoter draws itself: not rasterized."""
         if self._doc is None:
@@ -197,6 +212,10 @@ class EngineDisplay(QObject):
             tiles = self._doc.poll(POLL_BATCH)
             got += len(tiles)
             for tile in tiles:
+                if tile.level == THUMB_LEVEL:
+                    image = QImage(tile.pixels, tile.width, tile.height, tile.stride, QImage.Format_RGB32)
+                    self.thumbnailReady.emit(tile.page, QPixmap.fromImage(image))
+                    continue
                 r = self._item.add_tile(tile)
                 if r is not None:
                     dirty = dirty.united(r)

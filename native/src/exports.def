@@ -13,6 +13,7 @@ EXPORTS
 	ann_page_bounds
 	ann_set_hidden_annots
 	ann_set_flags
+	ann_set_thumbnails
 	ann_request_view
 	ann_poll
 	ann_release_tile
